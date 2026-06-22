@@ -23,7 +23,14 @@ The user has indicated they may want to continue developing the Android side (po
 2. **Tooling:** You must use `inotifywait` inside Termux, wrapped in a bash loop that calls the Python script.
 3. **Important Bug Fix:** Previously, the script announced "🔍 Analyzing your food photo..." for *every* photo taken (documents, cats, etc.). We fixed this by making the analysis completely silent, only sending a Telegram message if `is_food == true`. Make sure to retain this silent validation!
 4. **Integration with New Cloud Backend:** Instead of using `ntfy.sh` to talk to the Mac, the new Android script should just upload the photo directly to the newly hosted Telegram Bot (or a dedicated REST API endpoint on the GCP server) to ensure all data safely reaches the central SQLite `meals.db`.
-5. **Auto-Start:** The user previously struggled to get Termux to auto-start on device reboot. We were actively testing Termux `~/.termux/boot/` scripts to ensure the watcher survived phone restarts. 
+5. **Auto-Start on Boot (Termux:Boot):** 
+   To ensure the script survives phone reboots, we utilized the **Termux:Boot** add-on app. 
+   - You must create a shell script inside `~/.termux/boot/` (e.g., `~/.termux/boot/start_watcher.sh`).
+   - Termux:Boot automatically executes all scripts in this directory when the Android OS finishes booting.
+6. **Running Silently & Preventing App Kills:**
+   Android's aggressive battery management will kill Termux if it runs in the background for too long. To solve this, the boot script must execute two crucial commands:
+   - `termux-wake-lock`: This acquires an Android wakelock, physically preventing the CPU from sleeping and ensuring Termux stays alive in the background indefinitely.
+   - `nohup`: You must launch the Python watcher using `nohup python calorie_watcher.py > /dev/null 2>&1 &` to detach the process from the terminal session so it runs completely silently in the background without UI output.
 
 ### Core Tech Stack for Android:
 - Termux
