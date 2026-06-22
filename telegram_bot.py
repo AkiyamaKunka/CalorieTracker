@@ -45,7 +45,7 @@ from config import (
 # ─── Constants ─────────────────────────────────────────────────────
 ALLOWED_CHAT_ID = 8675416366
 
-BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', TELEGRAM_BOT_TOKEN or 'REDACTED-TELEGRAM-TOKEN-REVOKED')
+BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', TELEGRAM_BOT_TOKEN)
 
 HELP_TEXT = """🍽️ <b>CalorieTracker Bot</b>
 
@@ -56,6 +56,7 @@ You can also send food photos directly here (Android)!
 /meals — View today's meals (numbered list)
 /today — View today's calorie & macro summary
 /history — View your calorie totals for the last 7 days
+/status — Check Android auto-forwarder heartbeat
 /help — Show this help message
 
 <b>Photo:</b>
@@ -543,6 +544,32 @@ def main():
                 if text.startswith("/history"):
                     log.info(f"[{user}] /history")
                     bot.send_message(chat_id, format_history(chat_id))
+                    continue
+
+                if text.startswith("/ping_android"):
+                    # Silent heartbeat ping
+                    database.update_android_heartbeat()
+                    continue
+
+                if text.startswith("/status"):
+                    log.info(f"[{user}] /status")
+                    last_ping = database.get_last_android_heartbeat()
+                    
+                    if not last_ping:
+                        msg = "🔴 <b>Android Watcher is OFFLINE</b>\nNever received a ping."
+                    else:
+                        from datetime import datetime
+                        last_ping_dt = datetime.fromisoformat(last_ping)
+                        diff = datetime.now() - last_ping_dt
+                        mins = int(diff.total_seconds() / 60)
+                        
+                        if mins < 120:
+                            msg = f"🟢 <b>Android Watcher is ONLINE</b>\nLast ping: {mins} mins ago."
+                        else:
+                            hours = mins // 60
+                            msg = f"🔴 <b>Android Watcher is OFFLINE</b>\nLast ping: {hours} hours ago."
+                    
+                    bot.send_message(chat_id, msg)
                     continue
 
                 # ─── Handle photos ────────────────────────────────

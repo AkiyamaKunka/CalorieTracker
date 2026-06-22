@@ -26,6 +26,13 @@ def init_db():
         """)
         # Index to speed up daily queries
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_chat_date ON meals(chat_id, date)")
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS heartbeats (
+                device_name TEXT PRIMARY KEY,
+                last_ping_time TEXT NOT NULL
+            )
+        """)
         conn.commit()
 
 def save_meal(chat_id: int, date_str: str, time_str: str, timestamp_str: str, 
@@ -79,3 +86,24 @@ def update_meal_analysis(meal_id: int, chat_id: int, new_analysis: Dict):
 
 # Ensure tables are created when imported
 init_db()
+
+def update_android_heartbeat(device_name: str = "android_watcher"):
+    """Update the last ping time for a specific device."""
+    from datetime import datetime
+    now_str = datetime.now().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO heartbeats (device_name, last_ping_time)
+            VALUES (?, ?)
+            ON CONFLICT(device_name) DO UPDATE SET last_ping_time=excluded.last_ping_time
+        """, (device_name, now_str))
+        conn.commit()
+
+def get_last_android_heartbeat(device_name: str = "android_watcher") -> Optional[str]:
+    """Get the last ping time for a specific device."""
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT last_ping_time FROM heartbeats WHERE device_name = ?", (device_name,))
+        row = cursor.fetchone()
+        return row[0] if row else None
