@@ -18,7 +18,8 @@ from datetime import datetime, date
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
-from config import MEALS_LOG
+import database
+from config import TELEGRAM_CHAT_ID
 
 # ─── Logging ──────────────────────────────────────────────────
 logging.basicConfig(
@@ -51,24 +52,13 @@ class MealHandler(BaseHTTPRequestHandler):
                 self.wfile.write(b'{"status": "skipped", "reason": "not food"}')
                 return
 
-            # Save to meals log
-            MEALS_LOG.parent.mkdir(parents=True, exist_ok=True)
-            meals = []
-            if MEALS_LOG.exists():
-                content = MEALS_LOG.read_text().strip()
-                if content:
-                    meals = json.loads(content)
+            # Save to SQLite database
+            chat_id = int(TELEGRAM_CHAT_ID)
+            date_str = date.today().isoformat()
+            timestamp_str = datetime.now().isoformat()
+            image_hash = data.get("image_hash", "")
 
-            meals.append({
-                "date": date.today().isoformat(),
-                "time": meal_time,
-                "timestamp": datetime.now().isoformat(),
-                "filename": filename,
-                "source": source,
-                "analysis": analysis,
-            })
-
-            MEALS_LOG.write_text(json.dumps(meals, indent=2))
+            database.save_meal(chat_id, date_str, meal_time, timestamp_str, source, image_hash, filename, analysis)
 
             desc = analysis.get("meal_description", "?")
             cals = analysis.get("total_calories", "?")

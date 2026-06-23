@@ -14,7 +14,7 @@ import json
 import os
 import shutil
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 
 import requests
@@ -179,12 +179,34 @@ def send_telegram(text):
         print(f"❌ Failed to send: {e}")
 
 
+
+def get_local_time(tz_str: str) -> datetime:
+    """Convert current UTC time to user's local time based on +0800 string."""
+    try:
+        sign = 1 if tz_str.startswith('+') else -1
+        hours = int(tz_str[1:3])
+        minutes = int(tz_str[3:5])
+        offset = timedelta(hours=hours, minutes=minutes) * sign
+        return datetime.now(timezone.utc) + offset
+    except:
+        return datetime.now() # Fallback to server local time
+
 def main():
-    # Get target date
-    if len(sys.argv) > 1:
-        target_date = sys.argv[1]
+    # Check timezone if running automatically (no args)
+    is_auto = len(sys.argv) == 1
+    
+    if is_auto:
+        tz_str = database.get_android_timezone()
+        local_time = get_local_time(tz_str)
+        
+        # We only send the report if the local hour is 23 (11:00 PM)
+        if local_time.hour != 23:
+            print(f"[SKIP] User local time is {local_time.strftime('%Y-%m-%d %H:%M')}. Not 11 PM.")
+            return
+            
+        target_date = local_time.strftime('%Y-%m-%d')
     else:
-        target_date = date.today().isoformat()
+        target_date = sys.argv[1]
 
     print(f"📊 Generating daily report for {target_date}...")
 

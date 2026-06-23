@@ -31,6 +31,7 @@ from config import (
     SUPPORTED_EXTENSIONS,
     FOOD_DETECTION_PROMPT,
 )
+from utils import parse_ai_json
 
 # ─── Logging ───────────────────────────────────────────────────────
 logging.basicConfig(
@@ -229,15 +230,7 @@ def analyze_photo(client: genai.Client, image_path: str) -> Optional[Dict]:
             contents=[FOOD_DETECTION_PROMPT, img],
         )
 
-        content = response.text.strip()
-
-        # Strip markdown code fences if present
-        if content.startswith("```"):
-            lines = content.split("\n")
-            lines = [l for l in lines if not l.strip().startswith("```")]
-            content = "\n".join(lines)
-
-        return json.loads(content)
+        return parse_ai_json(response.text)
 
     except json.JSONDecodeError as e:
         log.warning(f"Could not parse API response as JSON: {e}")

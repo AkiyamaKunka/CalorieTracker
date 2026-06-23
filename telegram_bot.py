@@ -28,22 +28,33 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import threading
+from flask import Flask, request, jsonify
+
 import requests
 from google import genai
 from PIL import Image
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except ImportError:
+    pass
 
 import database
 from config import (
     GEMINI_API_KEY,
     GEMINI_MODEL,
     TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
     TEXT_HANDLER_PROMPT,
     FOOD_DETECTION_PROMPT,
     DUPLICATE_WINDOW_MINUTES,
+    ANDROID_API_KEY,
 )
+from utils import parse_ai_json
 
 # ─── Constants ─────────────────────────────────────────────────────
-ALLOWED_CHAT_ID = 8675416366
+ALLOWED_CHAT_ID = int(TELEGRAM_CHAT_ID)
 
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', TELEGRAM_BOT_TOKEN)
 
@@ -56,7 +67,7 @@ You can also send food photos directly here (Android)!
 /meals — View today's meals (numbered list)
 /today — View today's calorie & macro summary
 /history — View your calorie totals for the last 7 days
-/status — Check Android auto-forwarder heartbeat
+/status — Check Android sync & auto-forwarder health
 /help — Show this help message
 
 <b>Photo:</b>
@@ -113,12 +124,12 @@ class TelegramBot:
             return []
 
     def send_message(self, chat_id: int, text: str, parse_mode: str = "HTML"):
-        """Send a text message."""
+        """Send a text message. Returns the Message dict on success, or None."""
         # Truncate if too long for Telegram (4096 char limit)
         if len(text) > 4000:
             text = text[:4000] + "\n\n<i>(truncated)</i>"
         try:
-            self._call(
+            return self._call(
                 "sendMessage",
                 chat_id=chat_id,
                 text=text,
@@ -128,9 +139,16 @@ class TelegramBot:
             log.error(f"Failed to send message: {e}")
             # Retry without parse_mode in case of formatting issues
             try:
-                self._call("sendMessage", chat_id=chat_id, text=text)
+                return self._call("sendMessage", chat_id=chat_id, text=text)
             except Exception:
-                pass
+                return None
+
+    def delete_message(self, chat_id: int, message_id: int):
+        """Delete a message from a chat."""
+        try:
+            self._call("deleteMessage", chat_id=chat_id, message_id=message_id)
+        except Exception as e:
+            log.warning(f"Failed to delete message: {e}")
 
     def get_file(self, file_id: str) -> bytes:
         """Download a file from Telegram."""
@@ -181,12 +199,7 @@ def analyze_food_photo(client: genai.Client, image_bytes: bytes) -> Optional[Dic
             model=GEMINI_MODEL,
             contents=[FOOD_DETECTION_PROMPT, img],
         )
-        content = response.text.strip()
-        if content.startswith("```"):
-            lines = content.split("\n")
-            lines = [l for l in lines if not l.strip().startswith("```")]
-            content = "\n".join(lines)
-        return json.loads(content)
+        return parse_ai_json(response.text)
     except json.JSONDecodeError as e:
         log.warning(f"Could not parse API response: {e}")
         return None
@@ -499,6 +512,92 @@ def main():
     bot = TelegramBot(BOT_TOKEN)
     gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
+    # ─── Flask REST API ───────────────────────────────────────────────
+    app = Flask(__name__)
+
+    @app.route('/ping', methods=['POST'])
+    def ping():
+        if request.headers.get('X-API-Key') != ANDROID_API_KEY:
+            return jsonify({"error": "Unauthorized"}), 401
+            
+        tz = "+0800"
+        if request.is_json:
+            data = request.json
+            if data and "timezone" in data:
+                tz = data["timezone"]
+                
+        database.update_android_heartbeat(timezone=tz)
+        log.info(f"📡 Heartbeat ping received from Android Watcher (TZ: {tz})")
+        return jsonify({"status": "ok"})
+
+    @app.route('/reconcile', methods=['POST'])
+    def reconcile():
+        if request.headers.get('X-API-Key') != ANDROID_API_KEY:
+            return jsonify({"error": "Unauthorized"}), 401
+            
+        data = request.json
+        if not data or 'hashes' not in data:
+            return jsonify({"error": "Missing hashes array"}), 400
+            
+        android_hashes = set(data['hashes'])
+        server_hashes = set(database.get_today_hashes(ALLOWED_CHAT_ID))
+        
+        # Missing hashes are those on Android but NOT on the Server
+        missing_hashes = list(android_hashes - server_hashes)
+        
+        log.info(f"🔄 Reconcile Sync: Android sent {len(android_hashes)} hashes. Server is missing {len(missing_hashes)}.")
+        return jsonify({"missing_hashes": missing_hashes})
+
+    @app.route('/upload', methods=['POST'])
+    def upload():
+        if request.headers.get('X-API-Key') != ANDROID_API_KEY:
+            return jsonify({"error": "Unauthorized"}), 401
+            
+        if 'photo' not in request.files:
+            return jsonify({"error": "No photo provided"}), 400
+            
+        file = request.files['photo']
+        image_bytes = file.read()
+        
+        # Duplicate detection
+        img_hash = hashlib.md5(image_bytes).hexdigest()
+        if is_duplicate_photo(ALLOWED_CHAT_ID, img_hash):
+            log.info("  🔄 Duplicate photo detected via API, skipping")
+            return jsonify({"status": "duplicate"})
+            
+        user_agent = request.headers.get('User-Agent', '').lower()
+        if 'shortcuts' in user_agent or 'iphone' in user_agent or 'cfnetwork' in user_agent:
+            device_name = "iPhone"
+        elif 'python-requests' in user_agent or 'android' in user_agent:
+            device_name = "Android"
+        else:
+            device_name = "Phone"
+
+        # Process the photo in a background thread to return 200 OK instantly to iOS
+        def background_process(bytes_data, hsh, device):
+            log.info(f"🔍 Analyzing food from {device} API upload in background...")
+            analysis = analyze_food_photo(gemini_client, bytes_data)
+            
+            if analysis is None:
+                log.error("  ❌ API Upload: Analysis failed")
+                return
+                
+            if analysis.get("is_food"):
+                save_meal(ALLOWED_CHAT_ID, analysis, "api_auto", "api", hsh)
+                log.info(f"  ✅ API Food: {analysis.get('meal_description')} (~{analysis.get('total_calories')} kcal)")
+                result_text = format_food_result(ALLOWED_CHAT_ID, analysis)
+                bot.send_message(ALLOWED_CHAT_ID, f"📲 <b>Auto-Logged from {device}:</b>\n\n" + result_text)
+            else:
+                log.info("  ⏭️ API Upload: Not food")
+
+        threading.Thread(target=background_process, args=(image_bytes, img_hash, device_name)).start()
+        
+        return jsonify({"status": "processing_in_background"})
+
+    # Start Flask in a background thread
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False), daemon=True).start()
+    log.info("🚀 Flask REST API started on port 5000")
+    
     log.info("Bot is running! Listening for corrections and commands.")
     log.info("Press Ctrl+C to stop.\n")
 
@@ -552,13 +651,13 @@ def main():
                     continue
 
                 if text.startswith("/status"):
-                    log.info(f"[{user}] /status")
+                    log.info(f"[{user}] /status (or /ping_android)")
+                    
                     last_ping = database.get_last_android_heartbeat()
                     
                     if not last_ping:
                         msg = "🔴 <b>Android Watcher is OFFLINE</b>\nNever received a ping."
                     else:
-                        from datetime import datetime
                         last_ping_dt = datetime.fromisoformat(last_ping)
                         diff = datetime.now() - last_ping_dt
                         mins = int(diff.total_seconds() / 60)
@@ -601,7 +700,7 @@ def main():
                             )
                             continue
 
-                        bot.send_message(chat_id, "🔍 Analyzing your food... one moment!")
+                        processing_msg = bot.send_message(chat_id, "🔍 Processing image... one moment!")
                         analysis = analyze_food_photo(gemini_client, image_bytes)
 
                         if analysis is None:
@@ -614,11 +713,12 @@ def main():
                                 f"  ✅ Food: {analysis.get('meal_description')} "
                                 f"(~{analysis.get('total_calories')} kcal)"
                             )
+                            result_text = format_food_result(chat_id, analysis)
+                            bot.send_message(chat_id, result_text)
                         else:
-                            log.info("  ⏭️ Not food")
-
-                        result_text = format_food_result(chat_id, analysis)
-                        bot.send_message(chat_id, result_text)
+                            log.info("  ⏭️ Not food. Silently ignoring.")
+                            if processing_msg:
+                                bot.delete_message(chat_id, processing_msg["message_id"])
 
                     except Exception as e:
                         log.error(f"Error processing photo: {e}")

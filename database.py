@@ -30,9 +30,17 @@ def init_db():
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS heartbeats (
                 device_name TEXT PRIMARY KEY,
-                last_ping_time TEXT NOT NULL
+                last_ping_time TEXT NOT NULL,
+                timezone TEXT DEFAULT '+0800'
             )
         """)
+        
+        # Migration: Add timezone column if it doesn't exist
+        try:
+            cursor.execute("ALTER TABLE heartbeats ADD COLUMN timezone TEXT DEFAULT '+0800'")
+        except sqlite3.OperationalError:
+            pass # Column already exists
+            
         conn.commit()
 
 def save_meal(chat_id: int, date_str: str, time_str: str, timestamp_str: str, 
@@ -87,17 +95,17 @@ def update_meal_analysis(meal_id: int, chat_id: int, new_analysis: Dict):
 # Ensure tables are created when imported
 init_db()
 
-def update_android_heartbeat(device_name: str = "android_watcher"):
-    """Update the last ping time for a specific device."""
+def update_android_heartbeat(device_name: str = "android_watcher", timezone: str = "+0800"):
+    """Record that the device is online and save its timezone."""
     from datetime import datetime
     now_str = datetime.now().isoformat()
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO heartbeats (device_name, last_ping_time)
-            VALUES (?, ?)
-            ON CONFLICT(device_name) DO UPDATE SET last_ping_time=excluded.last_ping_time
-        """, (device_name, now_str))
+            INSERT INTO heartbeats (device_name, last_ping_time, timezone)
+            VALUES (?, ?, ?)
+            ON CONFLICT(device_name) DO UPDATE SET last_ping_time=excluded.last_ping_time, timezone=excluded.timezone
+        """, (device_name, now_str, timezone))
         conn.commit()
 
 def get_last_android_heartbeat(device_name: str = "android_watcher") -> Optional[str]:
@@ -107,3 +115,23 @@ def get_last_android_heartbeat(device_name: str = "android_watcher") -> Optional
         cursor.execute("SELECT last_ping_time FROM heartbeats WHERE device_name = ?", (device_name,))
         row = cursor.fetchone()
         return row[0] if row else None
+
+def get_android_timezone(device_name: str = "android_watcher") -> str:
+    """Get the last reported timezone for a specific device. Defaults to +0800."""
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT timezone FROM heartbeats WHERE device_name = ?", (device_name,))
+        row = cursor.fetchone()
+        return row[0] if row and row[0] else "+0800"
+
+def get_today_hashes(chat_id: int) -> List[str]:
+    """Return a list of image_hashes recorded today for the user."""
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT image_hash FROM meals WHERE chat_id = ? AND date(timestamp) = ? AND image_hash != ''",
+            (chat_id, today)
+        )
+        return [row[0] for row in cursor.fetchall() if row[0]]

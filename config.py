@@ -17,6 +17,7 @@ GEMINI_MODEL = "gemini-2.5-flash"
 # ─── Telegram Bot Settings ────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8675416366")
+ANDROID_API_KEY = os.environ.get("ANDROID_API_KEY", "secret-android-key-123")
 
 # ─── PushPlus WeChat Integration ─────────────────────────────────────
 # Token for PushPlus (http://www.pushplus.plus/)
@@ -63,6 +64,16 @@ Rules:
 - If you can see the portion size, adjust your estimate accordingly
 - Include a brief confidence note about the estimate uncertainty
 """
+
+# Load Dietary Preferences
+dietary_profile_path = Path.home() / "CalorieTracker" / "dietary_profile.txt"
+if dietary_profile_path.exists():
+    try:
+        dietary_profile = dietary_profile_path.read_text(encoding="utf-8")
+        if dietary_profile.strip():
+            FOOD_DETECTION_PROMPT += f"\n\nUser's Dietary Profile / Cultural Context:\n{dietary_profile}\nPlease strongly consider these preferences when analyzing the photo.\n"
+    except Exception as e:
+        pass
 
 # ─── Correction Prompt ─────────────────────────────────────────────
 CORRECTION_PROMPT = """I previously analyzed a food photo and got this result:
