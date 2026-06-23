@@ -9,7 +9,7 @@ from pathlib import Path
 
 # --- Configuration ---
 API_KEY = "termux-super-secret-key-9988"
-SERVER_URL = "http://SERVER-IP-REDACTED:5000"
+SERVER_URL = "http://SERVER-IP-REDACTED"
 QUEUE_DIR = Path.home() / ".offline_queue"
 
 def get_headers():
