@@ -124,9 +124,15 @@ sudo iptables -t nat -I PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000
 
 ### Android
 For Android, we provide a Termux script in the `android/` folder.
-1. Copy `android/upload_photo.py` and `android/android_watcher.sh` to your phone via Termux.
-2. Edit `upload_photo.py` to point to your `SERVER_URL`.
-3. Run `bash android_watcher.sh` in the background to automatically sync photos as they are taken!
+1. Install **Termux** and the **Termux:API** add-on from F-Droid.
+2. Copy `android/upload_photo.py` and `android/android_watcher.sh` to your phone via Termux.
+3. Edit `upload_photo.py` to point to your `SERVER_URL`.
+4. To ensure Android's battery manager doesn't kill the script in the background, acquire a wake lock and run it using `nohup`:
+```bash
+termux-wake-lock
+nohup bash android_watcher.sh > /dev/null 2>&1 &
+```
+*(You will see a "Wake lock held" notification in your Android status bar, meaning the watcher is permanently alive and silently syncing photos!)*
 
 ---
 
