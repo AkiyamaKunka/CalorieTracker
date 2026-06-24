@@ -46,30 +46,30 @@ if [ -n "$INITIAL_FILE" ]; then
 fi
 
 while true; do
-  # Find the newest media file in the camera directory
-  NEWEST_BASENAME=$(ls -t "$CAMERA_DIR" 2>/dev/null | grep -iE '\.(jpg|jpeg|png|heic)$' | head -n 1)
-  
-  if [ -n "$NEWEST_BASENAME" ]; then
+  # Find all media files in the camera directory, sorted by oldest first
+  # This ensures that if you take a burst of photos, they are all processed in chronological order
+  for NEWEST_BASENAME in $(ls -tr "$CAMERA_DIR" 2>/dev/null | grep -iE '\.(jpg|jpeg|png|heic)$'); do
     # Ensure there is a trailing slash if missing
     if [[ "$CAMERA_DIR" != */ ]]; then
-      NEWEST_FILE="$CAMERA_DIR/$NEWEST_BASENAME"
+      FILE_PATH="$CAMERA_DIR/$NEWEST_BASENAME"
     else
-      NEWEST_FILE="$CAMERA_DIR$NEWEST_BASENAME"
+      FILE_PATH="$CAMERA_DIR$NEWEST_BASENAME"
     fi
     
     # Check if we have already uploaded this exact file
-    if ! grep -Fxq "$NEWEST_FILE" "$HISTORY_FILE"; then
-      echo "[$(date)] New photo detected via polling: $NEWEST_FILE" | tee -a $LOG_FILE
+    if ! grep -Fxq "$FILE_PATH" "$HISTORY_FILE"; then
+      echo "[$(date)] New photo detected via polling: $FILE_PATH" | tee -a $LOG_FILE
       
-      # Add it to history so we NEVER upload it again, even if newer photos are deleted
-      echo "$NEWEST_FILE" >> "$HISTORY_FILE"
+      # Add it to history so we NEVER upload it again
+      echo "$FILE_PATH" >> "$HISTORY_FILE"
       
       # Let the file finish saving completely
       sleep 2
       
       # Pass it to the python script for offline queueing and upload
-      python3 ~/upload_photo.py "$NEWEST_FILE" >> $LOG_FILE 2>&1
+      python3 ~/upload_photo.py "$FILE_PATH"
     fi
-  fi
+  done
+  
   sleep 5
 done
