@@ -190,6 +190,20 @@ def update_meal_by_index(chat_id: int, meal_index: int, new_analysis: Dict) -> b
     return True
 
 
+def delete_meal_by_index(chat_id: int, meal_index: int) -> bool:
+    """Delete a specific meal from the log by its index within the recent food meals."""
+    meals = get_recent_meals(chat_id, days=3)
+
+    if meal_index < 0 or meal_index >= len(meals):
+        log.warning(f"Invalid meal_index {meal_index} (recent has {len(meals)} meals)")
+        return False
+
+    meal_id = meals[meal_index]["id"]
+    database.delete_meal(meal_id, chat_id)
+    log.info(f"Deleted meal at index {meal_index} (DB ID {meal_id})")
+    return True
+
+
 # ─── Photo Analysis ────────────────────────────────────────────────
 def analyze_food_photo(client: genai.Client, image_bytes: bytes) -> Optional[Dict]:
     """Analyze a food photo with Gemini."""
@@ -470,6 +484,39 @@ def handle_text_message(
         bot.send_message(chat_id, "\n".join(reply_lines))
         log.info(f"  ✏️ Corrected meal {meal_index + 1}: {old_cal} → {new_cal} kcal")
 
+    elif intent == "delete":
+        meal_indices = result.get("meal_indices", [])
+        reason = result.get("reason", "")
+
+        if not meals:
+            bot.send_message(chat_id, "❌ Cannot delete because no meals are logged recently.")
+            return
+
+        if not meal_indices:
+            bot.send_message(chat_id, "❌ Didn't catch which meals to delete. Try being more specific.")
+            return
+
+        deleted_count = 0
+        deleted_descs = []
+
+        # Sort indices in descending order so deleting one doesn't mess up the indices of the others
+        for index in sorted(meal_indices, reverse=True):
+            if 0 <= index < len(meals):
+                desc = meals[index]["analysis"].get("meal_description", "Unknown meal")
+                if delete_meal_by_index(chat_id, index):
+                    deleted_count += 1
+                    deleted_descs.append(desc)
+
+        if deleted_count > 0:
+            msg = f"🗑️ <b>Deleted {deleted_count} meal(s):</b>\n"
+            for desc in deleted_descs:
+                msg += f"• {desc}\n"
+            if reason:
+                msg += f"\n💬 {reason}"
+            bot.send_message(chat_id, msg)
+        else:
+            bot.send_message(chat_id, "❌ Failed to delete the specified meals.")
+
     elif intent == "new_meal":
         analysis = result.get("analysis", {})
         if analysis.get("is_food"):
@@ -576,7 +623,15 @@ def main():
         # Process the photo in a background thread to return 200 OK instantly to iOS
         def background_process(bytes_data, hsh, device):
             log.info(f"🔍 Analyzing food from {device} API upload in background...")
+            
+            # Send instant feedback to the user so they know the watcher worked
+            processing_msg = bot.send_message(ALLOWED_CHAT_ID, f"📲 Received photo from {device}, analyzing... 🔍")
+            
             analysis = analyze_food_photo(gemini_client, bytes_data)
+            
+            # Delete the temporary processing message
+            if processing_msg:
+                bot.delete_message(ALLOWED_CHAT_ID, processing_msg["message_id"])
             
             if analysis is None:
                 log.error("  ❌ API Upload: Analysis failed")

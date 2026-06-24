@@ -149,12 +149,14 @@ Your job is to determine the intent of the message and respond with JSON.
 Intent can be:
 1. "new_meal": The user is describing a new meal they ate.
 2. "correction": The user is correcting an existing meal from the recent meals list (e.g., "change yesterday's lunch to 500 kcal").
-3. "chat": A general question, greeting, or unrelated message.
+3. "delete": The user wants to completely delete one or more meals (e.g., "delete all food today", "remove meal 0").
+4. "chat": A general question, greeting, or unrelated message.
 
 Respond with JSON ONLY in this exact format:
 {{
   "intent": "new_meal",
   "meal_index": 0,
+  "meal_indices": [0],
   "reason": "Briefly explain your logic",
   "analysis": {{
     "is_food": true,
@@ -172,9 +174,10 @@ Respond with JSON ONLY in this exact format:
 }}
 
 Rules:
-- Respond ONLY with valid JSON, no other text
+- Respond ONLY with valid JSON, no other text.
 - For "new_meal", estimate calories based on standard portion sizes and return it in "analysis".
 - For "correction", accurately identify the "meal_index" (the exact 0-based index from the provided `meals_list` array), apply the correction, and return the FULL updated "analysis".
+- For "delete", accurately identify all targeted meals from `meals_list` and return their 0-based indices as a list in "meal_indices". Provide a brief "reason".
 - For "chat", just return a friendly "reply" string.
-- If the user describes food but meals_list is empty, it MUST be a "new_meal", not a "correction".
+- If the user describes food but meals_list is empty, it MUST be a "new_meal", not a "correction" or "delete".
 """

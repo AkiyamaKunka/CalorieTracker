@@ -34,18 +34,42 @@ echo "[$(date)] Starting CalorieTracker Android Watcher..." | tee -a $LOG_FILE
 ) &
 
 
-# Monitor the camera directory for new files
-inotifywait -m -e close_write --format "%w%f" "$CAMERA_DIR" | while read FILE
-do
-  # Convert filename to lowercase to handle .JPG, .PNG, .HEIC, etc.
-  FILE_LOWER="${FILE,,}"
-  if [[ "$FILE_LOWER" == *.jpg ]] || [[ "$FILE_LOWER" == *.jpeg ]] || [[ "$FILE_LOWER" == *.png ]] || [[ "$FILE_LOWER" == *.heic ]]; then
-    echo "[$(date)] New photo detected: $FILE" | tee -a $LOG_FILE
+# Monitor the camera directory using a polling loop (bypasses Android emulated storage bug)
+echo "[$(date)] Started polling loop for $CAMERA_DIR" | tee -a $LOG_FILE
+HISTORY_FILE="$HOME/uploaded_files.log"
+touch "$HISTORY_FILE"
+
+# Seed the history file with the absolute newest file on startup so it doesn't upload a backlog
+INITIAL_FILE=$(ls -t "$CAMERA_DIR" 2>/dev/null | grep -iE '\.(jpg|jpeg|png|heic)$' | head -n 1)
+if [ -n "$INITIAL_FILE" ]; then
+  echo "$CAMERA_DIR/$INITIAL_FILE" >> "$HISTORY_FILE"
+fi
+
+while true; do
+  # Find the newest media file in the camera directory
+  NEWEST_BASENAME=$(ls -t "$CAMERA_DIR" 2>/dev/null | grep -iE '\.(jpg|jpeg|png|heic)$' | head -n 1)
+  
+  if [ -n "$NEWEST_BASENAME" ]; then
+    # Ensure there is a trailing slash if missing
+    if [[ "$CAMERA_DIR" != */ ]]; then
+      NEWEST_FILE="$CAMERA_DIR/$NEWEST_BASENAME"
+    else
+      NEWEST_FILE="$CAMERA_DIR$NEWEST_BASENAME"
+    fi
     
-    # Let the file finish saving completely
-    sleep 2
-    
-    # Pass it to the python script for offline queueing and upload
-    python3 ~/upload_photo.py "$FILE" >> $LOG_FILE 2>&1
+    # Check if we have already uploaded this exact file
+    if ! grep -Fxq "$NEWEST_FILE" "$HISTORY_FILE"; then
+      echo "[$(date)] New photo detected via polling: $NEWEST_FILE" | tee -a $LOG_FILE
+      
+      # Add it to history so we NEVER upload it again, even if newer photos are deleted
+      echo "$NEWEST_FILE" >> "$HISTORY_FILE"
+      
+      # Let the file finish saving completely
+      sleep 2
+      
+      # Pass it to the python script for offline queueing and upload
+      python3 ~/upload_photo.py "$NEWEST_FILE" >> $LOG_FILE 2>&1
+    fi
   fi
+  sleep 5
 done

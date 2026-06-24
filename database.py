@@ -92,6 +92,13 @@ def update_meal_analysis(meal_id: int, chat_id: int, new_analysis: Dict):
         """, (json.dumps(new_analysis), meal_id, chat_id))
         conn.commit()
 
+def delete_meal(meal_id: int, chat_id: int):
+    """Delete a specific meal by its database ID. Validates chat_id for security."""
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM meals WHERE id = ? AND chat_id = ?", (meal_id, chat_id))
+        conn.commit()
+
 # Ensure tables are created when imported
 init_db()
 

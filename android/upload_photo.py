@@ -5,12 +5,29 @@ import sys
 import json
 import time
 import requests
+import hashlib
 from pathlib import Path
 
 # --- Configuration ---
 API_KEY = "termux-super-secret-key-9988"
-SERVER_URL = "http://SERVER-IP-REDACTED"
+SERVER_URLS = [
+    "http://SERVER-IP-REDACTED:5000",  # GCP Server (Port 5000)
+    "http://SERVER-IP-REDACTED"        # GCP Server (Port 80)
+]
 QUEUE_DIR = Path.home() / ".offline_queue"
+
+def get_server_url():
+    """Try URLs and return the first reachable one."""
+    for url in SERVER_URLS:
+        try:
+            resp = requests.post(f"{url}/ping", headers={"X-API-Key": API_KEY}, timeout=2)
+            if resp.status_code == 200:
+                return url
+        except requests.exceptions.RequestException:
+            pass
+    return SERVER_URLS[0]
+
+SERVER_URL = get_server_url()
 
 def get_headers():
     return {"X-API-Key": API_KEY}
