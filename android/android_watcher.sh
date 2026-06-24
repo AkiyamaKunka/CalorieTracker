@@ -37,8 +37,9 @@ echo "[$(date)] Starting CalorieTracker Android Watcher..." | tee -a $LOG_FILE
 # Monitor the camera directory for new files
 inotifywait -m -e close_write --format "%w%f" "$CAMERA_DIR" | while read FILE
 do
-  # Only process image files
-  if [[ "$FILE" == *.jpg ]] || [[ "$FILE" == *.jpeg ]] || [[ "$FILE" == *.png ]]; then
+  # Convert filename to lowercase to handle .JPG, .PNG, .HEIC, etc.
+  FILE_LOWER="${FILE,,}"
+  if [[ "$FILE_LOWER" == *.jpg ]] || [[ "$FILE_LOWER" == *.jpeg ]] || [[ "$FILE_LOWER" == *.png ]] || [[ "$FILE_LOWER" == *.heic ]]; then
     echo "[$(date)] New photo detected: $FILE" | tee -a $LOG_FILE
     
     # Let the file finish saving completely
