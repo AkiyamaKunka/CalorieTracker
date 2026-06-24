@@ -11,8 +11,8 @@ from pathlib import Path
 # --- Configuration ---
 API_KEY = "termux-super-secret-key-9988"
 SERVER_URLS = [
-    "http://SERVER-IP-REDACTED:5000",  # GCP Server (Port 5000)
-    "http://SERVER-IP-REDACTED"        # GCP Server (Port 80)
+    "http://SERVER-IP-REDACTED",        # GCP Server (Port 80) - Primary for Cellular compatibility
+    "http://SERVER-IP-REDACTED:5000"    # GCP Server (Port 5000) - Fallback
 ]
 QUEUE_DIR = Path.home() / ".offline_queue"
 
@@ -20,11 +20,13 @@ def get_server_url():
     """Try URLs and return the first reachable one."""
     for url in SERVER_URLS:
         try:
-            resp = requests.post(f"{url}/ping", headers={"X-API-Key": API_KEY}, timeout=2)
+            # Increased timeout to 5s because Cellular networks can be slow to wake up
+            resp = requests.post(f"{url}/ping", headers={"X-API-Key": API_KEY}, timeout=5)
             if resp.status_code == 200:
                 return url
         except requests.exceptions.RequestException:
             pass
+    # If both fail (e.g. offline), default to Port 80 since Port 5000 is likely blocked anyway
     return SERVER_URLS[0]
 
 SERVER_URL = get_server_url()
