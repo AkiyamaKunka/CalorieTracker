@@ -10,6 +10,7 @@ Store these in `.env` on the server and never commit them:
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
 - `ANDROID_API_KEY`
+- `MEAL_RELAY_API_KEY`, if the legacy relay runs with its own key (defaults to `ANDROID_API_KEY`)
 - `PUSHPLUS_TOKEN` and `PUSHPLUS_TOPIC`, if used
 
 Generate `ANDROID_API_KEY` with a high-entropy random value, for example:
@@ -44,4 +45,6 @@ A normal commit that deletes secrets from the current tree does not remove them 
 
 Phone upload endpoints use `X-API-Key` authentication. Prefer HTTPS or a trusted VPN in front of the server whenever possible; plain HTTP exposes metadata and the upload key to networks between the phone and server.
 
-The legacy `meal_relay.py` binds to `127.0.0.1` by default and requires `X-API-Key`. Do not expose it publicly without a reverse proxy, TLS, and authentication.
+Set `TRUSTED_PROXY_ENABLED=1` only when a trusted reverse proxy actually sits in front of the upload API; otherwise clients can spoof `X-Forwarded-For` to fake VPN evidence. The bot redacts the Telegram token from its logs and error messages, but treat log files as sensitive anyway.
+
+The legacy `meal_relay.py` binds to `127.0.0.1` by default (override with `MEAL_RELAY_HOST`), requires `X-API-Key` (`MEAL_RELAY_API_KEY`, falling back to `ANDROID_API_KEY`), and rejects request bodies over 2 MB. Do not expose it publicly without a reverse proxy, TLS, and authentication.

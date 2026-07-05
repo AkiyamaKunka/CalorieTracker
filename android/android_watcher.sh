@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 
 # Configuration
-CAMERA_DIR="${CAMERA_DIR:-/storage/emulated/0/DCIM/Camera/}"
+CAMERA_DIR="${CALORIE_CAMERA_DIR:-${CAMERA_DIR:-/storage/emulated/0/DCIM/Camera/}}"
 LOG_FILE="$HOME/watcher.log"
 PID_FILE="$HOME/.calorie_watcher.pid"
 LOCK_DIR="$HOME/.calorie_watcher.lock"

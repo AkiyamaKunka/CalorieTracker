@@ -73,9 +73,11 @@ flowchart LR
 - Food photo analysis with Google Gemini.
 - Calories, protein, carbs, fat, meal source, photo hash, and correction state in SQLite.
 - Uploads from Telegram photos, Android Termux, and iOS Shortcuts.
-- Natural-language meal corrections and deletions in Telegram.
-- Daily Telegram reports, with optional PushPlus/WeChat forwarding.
+- Natural-language meal corrections and deletions in Telegram (deletions ask for inline confirmation before touching data).
+- Meals are dated in the phone's reported timezone, so a midnight snack lands on the right day even when the server runs in UTC.
+- Daily Telegram reports with missed-day catch-up, plus optional PushPlus/WeChat forwarding.
 - Saved failed uploads with user-controlled retry or delete.
+- Graceful shutdown, plus a startup sweep that recovers uploads stranded mid-analysis by a crash.
 - Runtime health written to `logs/service_health.json`.
 - Duplicate protection through a photo-hash reservation guard.
 
@@ -102,13 +104,15 @@ bash scripts/check_public_safety.sh
 ## Setup
 
 ```bash
-git clone <your-repo-url> CalorieTracker
-cd CalorieTracker
+git clone <your-repo-url> ~/CalorieTracker
+cd ~/CalorieTracker
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 ```
+
+Install at `~/CalorieTracker`: runtime data (`meals.db`, `logs/`, `reports/`, `dietary_profile.txt`) is always read from and written under `~/CalorieTracker`, regardless of where the scripts are launched from.
 
 Edit `.env`:
 
@@ -240,6 +244,18 @@ python3 ~/upload_photo.py --sync
 python3 ~/upload_photo.py /storage/emulated/0/DCIM/Camera/example.jpg
 ```
 
+Or automate install and restarts with the bundled installer: put `upload_photo.py` and `android_watcher.sh` in `/sdcard/Download`, copy `android/install_and_start.sh` to the phone, and run:
+
+```bash
+bash install_and_start.sh
+```
+
+It verifies the source files before stopping the running watcher, preserves the offline upload queue across reinstalls, and restarts everything under a wake lock.
+
+Watcher behavior worth knowing: new photos are marked as handled after a successful upload or safe offline queueing; a photo that fails three consecutive attempts is recorded anyway (with a loud log line) so it cannot wedge the loop, and photos already on the phone at watcher startup are skipped rather than uploaded as a backlog — the nightly sync covers both cases. Partially-written camera files are skipped until their size stabilizes, and photos the server permanently rejects are quarantined in `~/.offline_queue/rejected/`. The nightly `--sync` reconciles today's and yesterday's photos (including HEIC) against the server.
+
+If your camera saves somewhere other than `DCIM/Camera`, set `CAMERA_DIR` (or `CALORIE_CAMERA_DIR`) in the environment for both the watcher and manual runs. Advanced env-only knobs: `CALORIE_TRACKER_SERVER_URLS`, `CALORIE_TRACKER_ANDROID_CONFIG`, `QUEUE_BATCH_LIMIT`, `QUEUE_LOCK_STALE_SECONDS`, `ANDROID_VPN_ACTIVE`.
+
 ### iPhone
 
 Use the logic in [ios/shortcut_upload_to_gcp.md](ios/shortcut_upload_to_gcp.md).
@@ -268,6 +284,8 @@ Use these only when needed:
 - `VPN_OFF_REMOTE_CIDRS` for known direct/non-VPN ranges
 - `/vpn` in Telegram to inspect the latest evidence
 
+The upload API trusts the direct peer IP and ignores `X-Forwarded-For`. If you ever put a reverse proxy in front of it, set `TRUSTED_PROXY_ENABLED=1` so the forwarded address is honored.
+
 ## Telegram Commands
 
 Run `/commands` for the full menu.
@@ -289,13 +307,13 @@ python3 daily_report.py
 python3 daily_report.py 2026-06-28
 ```
 
-When run without a date, `daily_report.py` checks the last Android-reported timezone and only sends during the local 23:00 hour. Use cron/systemd timers/launchd around 23:30 local time.
+When run without a date, `daily_report.py` resolves the target date from the last phone-reported timezone: at 23:00 local or later it reports on the current day; earlier in the day it catches up on the previous day instead. A date the scheduler already sent successfully is skipped (tracked in `logs/service_health.json`), so a machine that was asleep at report time delivers the missed report on its next run rather than dropping it. Schedule it around 23:30 local time with cron/systemd timers/launchd. Failures are recorded in the health ledger and alerted to Telegram.
 
 ## Tests
 
 ```bash
 bash scripts/check_public_safety.sh
-python3 -m py_compile config.py telegram_bot.py daily_report.py android/upload_photo.py database.py meal_relay.py migrate_to_sqlite.py utils.py
+python3 -m py_compile config.py telegram_bot.py daily_report.py android/upload_photo.py database.py meal_relay.py migrate_to_sqlite.py utils.py service_health.py
 python3 -m pytest -q
 ```
 
@@ -306,6 +324,7 @@ Ignored local data:
 - `.env`
 - `logs/`
 - `reports/`
+- `outputs/`
 - `*.db`
 - `dietary_profile.txt`
 - `*.shortcut`
