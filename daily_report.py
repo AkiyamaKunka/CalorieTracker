@@ -10,100 +10,77 @@ Usage:
     python3 daily_report.py 2026-03-28   # Report for a specific date
 """
 
-import json
-import os
+import re
 import sys
-from datetime import date, datetime, timezone, timedelta
-from html import escape
+import traceback
+from datetime import datetime, timezone, timedelta
+from html import escape, unescape
 from pathlib import Path
+from typing import Optional
 
 import requests
 
 # Add the project directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 import database
-from config import PUSHPLUS_TOKEN, PUSHPLUS_TOPIC, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+import service_health
+from config import (
+    PUSHPLUS_TOKEN,
+    PUSHPLUS_TOPIC,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
+    REPORTS_DIR,
+)
+from utils import telegram_message_chunks as _telegram_chunks
 
 # ─── Config ────────────────────────────────────────────────────────
-def _clean_config_value(value):
-    """Normalize values loaded from env files or shell exports."""
-    if value is None:
-        return ""
-    return str(value).strip().strip('"').strip("'")
+BOT_TOKEN = TELEGRAM_BOT_TOKEN or ""
+CHAT_ID = TELEGRAM_CHAT_ID or ""
+SERVICE_HEALTH_PATH = service_health.DEFAULT_PATH
 
 
-BOT_TOKEN = _clean_config_value(os.environ.get("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN))
-CHAT_ID = _clean_config_value(os.environ.get("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID))
-REPORTS_DIR = Path.home() / "CalorieTracker" / "reports"
-SERVICE_HEALTH_PATH = Path.home() / "CalorieTracker" / "logs" / "service_health.json"
-
-
-def _health_timestamp() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+def _warn(message):
+    print(f"[WARN] {message}")
 
 
 def _load_service_health():
-    try:
-        return json.loads(SERVICE_HEALTH_PATH.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-    except OSError as e:
-        print(f"[WARN] Could not read service health file: {e}")
-        return {}
+    return service_health.load(SERVICE_HEALTH_PATH, warn=_warn)
 
 
 def _save_service_health(data):
-    try:
-        SERVICE_HEALTH_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = SERVICE_HEALTH_PATH.with_name(f"{SERVICE_HEALTH_PATH.name}.{os.getpid()}.tmp")
-        tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True))
-        tmp_path.replace(SERVICE_HEALTH_PATH)
-    except OSError as e:
-        print(f"[WARN] Could not write service health file: {e}")
+    service_health.save(data, SERVICE_HEALTH_PATH, warn=_warn)
 
 
 def _record_daily_report_health(ok: bool, target_date: str, source: str = "cron", report_path: str = "", error_summary: str = ""):
     data = _load_service_health()
-    report = data.setdefault("daily_report", {})
-    now = _health_timestamp()
-    report["last_attempt_at"] = now
-    report["last_target_date"] = target_date
-    report["last_source"] = source
-    report["last_ok"] = ok
-    if report_path:
-        report["last_report_path"] = report_path
-
-    if ok:
-        report["last_success_at"] = now
-        report["consecutive_failures"] = 0
-        report.pop("last_error_summary", None)
-    else:
-        report["last_error_at"] = now
-        report["last_error_summary"] = str(error_summary or "")[:500]
-        report["consecutive_failures"] = int(report.get("consecutive_failures", 0)) + 1
-
-    events = report.setdefault("events", [])
-    events.append({
-        "at": now,
-        "ok": ok,
-        "target_date": target_date,
-        "source": source,
-    })
-    report["events"] = events[-50:]
+    service_health.apply_report_health(
+        data, ok, target_date,
+        source=source, report_path=report_path, error_summary=error_summary,
+    )
     _save_service_health(data)
 
 
+_TELEGRAM_HTML_TAG_RE = re.compile(
+    r"</?(?:b|i|u|s|code|pre|a)(?:\s[^>]*)?>", re.IGNORECASE
+)
+
+
+def _html_to_plain(text: str) -> str:
+    """Convert Telegram-HTML report text to plain text for files and WeChat."""
+    return unescape(_TELEGRAM_HTML_TAG_RE.sub("", text))
+
+
 def send_wechat(text, target_date):
-    """Send a markdown message to WeChat via PushPlus."""
+    """Send a plain-text version of the report to WeChat via PushPlus."""
     if not PUSHPLUS_TOKEN:
         print("[INFO] PUSHPLUS_TOKEN not set. Skipping WeChat notification.")
         return
-    
-    url = "http://www.pushplus.plus/send"
+
+    url = "https://www.pushplus.plus/send"
     payload = {
         "token": PUSHPLUS_TOKEN,
         "title": f"📊 Daily Calorie Report ({target_date})",
-        "content": text,
+        "content": _html_to_plain(text),
         "template": "markdown",
         "topic": PUSHPLUS_TOPIC,
     }
@@ -124,8 +101,14 @@ def generate_report(target_date: str) -> str:
     if not CHAT_ID:
         print("[ERROR] TELEGRAM_CHAT_ID is not set in config.")
         return ""
-        
-    meals = database.get_meals(int(CHAT_ID), target_date, target_date)
+
+    try:
+        chat_id = int(CHAT_ID)
+    except ValueError:
+        print(f"[ERROR] TELEGRAM_CHAT_ID is not a valid integer: {CHAT_ID!r}")
+        return ""
+
+    meals = database.get_meals(chat_id, target_date, target_date)
     food_meals = [m for m in meals if m.get("analysis", {}).get("is_food")]
 
     # Header
@@ -209,35 +192,8 @@ def save_report_file(target_date: str, report: str):
     """Save report as a markdown file."""
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     filepath = REPORTS_DIR / f"report_{target_date}.md"
-    # Strip markdown formatting for the file version
-    filepath.write_text(report)
+    filepath.write_text(_html_to_plain(report))
     return filepath
-
-
-def _telegram_chunks(text, limit=3900):
-    """Split a Telegram message without breaking normal report lines."""
-    chunks = []
-    current = ""
-
-    for line in text.splitlines(keepends=True):
-        if len(line) > limit:
-            if current:
-                chunks.append(current.rstrip())
-                current = ""
-            for start in range(0, len(line), limit):
-                chunks.append(line[start:start + limit].rstrip())
-            continue
-
-        if current and len(current) + len(line) > limit:
-            chunks.append(current.rstrip())
-            current = line
-        else:
-            current += line
-
-    if current:
-        chunks.append(current.rstrip())
-
-    return chunks or [""]
 
 
 def _post_telegram_message(text, parse_mode=None):
@@ -298,62 +254,97 @@ def send_telegram(text):
 
 
 def get_local_time(tz_str: str) -> datetime:
-    """Convert current UTC time to user's local time based on +0800 string."""
-    try:
-        if len(tz_str or "") != 5 or tz_str[0] not in "+-":
-            raise ValueError("Timezone must look like +0800")
-        sign = 1 if tz_str.startswith('+') else -1
-        hours = int(tz_str[1:3])
-        minutes = int(tz_str[3:5])
-        offset = timedelta(hours=hours, minutes=minutes) * sign
-        return datetime.now(timezone.utc) + offset
-    except (TypeError, ValueError):
-        return datetime.now() # Fallback to server local time
+    """Convert current UTC time to user's local time based on +0800 string.
+
+    Delegates offset parsing to database.parse_timezone_offset so the report
+    clock and the meal-date clock can never disagree on what counts as a
+    valid offset (e.g. '+2500' is rejected by both, not just one).
+    """
+    offset = database.parse_timezone_offset(tz_str)
+    if offset is None:
+        return datetime.now()  # Fallback to server local time
+    return datetime.now(timezone.utc).replace(tzinfo=None) + offset
+
+def _auto_candidate_date(local_time: datetime) -> str:
+    """The date an auto run should report on: today at 23:xx, else yesterday."""
+    if local_time.hour >= 23:
+        return local_time.strftime("%Y-%m-%d")
+    return (local_time - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def resolve_auto_target_date(local_time: datetime, health_data: dict) -> Optional[str]:
+    """Pick the report date for an auto run, or None if it was already sent.
+
+    Runs before 23:00 act as catch-up for the previous day (e.g. a launchd
+    job fired late because the Mac was asleep at 23:30).
+    """
+    target = _auto_candidate_date(local_time)
+    report = (health_data or {}).get("daily_report") or {}
+    # Only a successful CRON run for this date counts as "already sent".
+    # A manual /report or CLI run writes the same ledger record but must
+    # not suppress that night's automatic report.
+    if (
+        report.get("last_target_date") == target
+        and report.get("last_ok")
+        and report.get("last_source") == "cron"
+    ):
+        return None
+    return target
+
 
 def main():
-    # Check timezone if running automatically (no args)
     is_auto = len(sys.argv) == 1
-    
+    source = "cron" if is_auto else "manual"
+
     if is_auto:
-        tz_str = database.get_android_timezone()
-        local_time = get_local_time(tz_str)
-        
-        # We only send the report if the local hour is 23 (11:00 PM)
-        if local_time.hour != 23:
-            print(f"[SKIP] User local time is {local_time.strftime('%Y-%m-%d %H:%M')}. Not 11 PM.")
-            return
-            
-        target_date = local_time.strftime('%Y-%m-%d')
+        local_time = get_local_time(database.get_android_timezone())
+        target_date = resolve_auto_target_date(local_time, _load_service_health())
+        if target_date is None:
+            print(f"[SKIP] report for {_auto_candidate_date(local_time)} already sent")
+            return 0
     else:
         target_date = sys.argv[1]
 
     print(f"📊 Generating daily report for {target_date}...")
 
-    # Generate report
-    report = generate_report(target_date)
-    if not report:
-        print("[ERROR] Report generation returned empty content. Aborting send.")
-        _record_daily_report_health(False, target_date, error_summary="Report generation returned empty content.")
+    try:
+        # Generate report
+        report = generate_report(target_date)
+        if not report:
+            print("[ERROR] Report generation returned empty content. Aborting send.")
+            _record_daily_report_health(False, target_date, source=source, error_summary="Report generation returned empty content.")
+            return 1
+
+        # Save to file
+        filepath = save_report_file(target_date, report)
+        print(f"💾 Saved to {filepath}")
+
+        print("Sending reports...")
+
+        # 1. Send to Telegram
+        telegram_ok = send_telegram(report)
+        _record_daily_report_health(
+            telegram_ok,
+            target_date,
+            source=source,
+            report_path=str(filepath),
+            error_summary="" if telegram_ok else "Telegram send failed.",
+        )
+
+        # 2. Send to WeChat via PushPlus
+        send_wechat(report, target_date)
+    except Exception as e:
+        traceback.print_exc()
+        _record_daily_report_health(False, target_date, source=source, error_summary=f"{type(e).__name__}: {e}")
+        if BOT_TOKEN and CHAT_ID:
+            try:
+                _post_telegram_message(
+                    f"⚠️ Daily report for {target_date} failed: {type(e).__name__}: {e}"
+                )
+            except Exception:
+                pass
         return 1
 
-    # Save to file
-    filepath = save_report_file(target_date, report)
-    print(f"💾 Saved to {filepath}")
-
-    print("Sending reports...")
-    
-    # 1. Send to Telegram
-    telegram_ok = send_telegram(report)
-    _record_daily_report_health(
-        telegram_ok,
-        target_date,
-        report_path=str(filepath),
-        error_summary="" if telegram_ok else "Telegram send failed.",
-    )
-    
-    # 2. Send to WeChat via PushPlus
-    send_wechat(report, target_date)
-    
     print("Daily reporting process complete.")
     return 0 if telegram_ok else 1
 

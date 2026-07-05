@@ -1,12 +1,21 @@
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 import json
 
 import daily_report
 
 
-def test_clean_config_value_strips_shell_quotes():
-    assert daily_report._clean_config_value('"1234567890"') == "1234567890"
-    assert daily_report._clean_config_value("'token'") == "token"
+def test_clean_env_strips_shell_quotes(monkeypatch):
+    import config
+
+    monkeypatch.setenv("X_TEST_TOKEN", '"1234567890"')
+    assert config._clean_env("X_TEST_TOKEN") == "1234567890"
+    monkeypatch.setenv("X_TEST_TOKEN", "'token'")
+    assert config._clean_env("X_TEST_TOKEN") == "token"
+    monkeypatch.setenv("X_TEST_TOKEN", '  ""  ')
+    assert config._clean_env("X_TEST_TOKEN", "fallback") is None
+    monkeypatch.delenv("X_TEST_TOKEN")
+    assert config._clean_env("X_TEST_TOKEN", "fallback") == "fallback"
 
 
 def test_generate_report_escapes_dynamic_html(monkeypatch):
@@ -110,3 +119,192 @@ def test_telegram_chunks_splits_without_losing_text():
 
     assert "".join(chunks).replace("\n", "") == "abcdefghijk"
     assert all(len(chunk) <= 5 for chunk in chunks)
+
+
+def test_resolve_auto_target_date_late_night_targets_today():
+    local_time = datetime(2026, 7, 4, 23, 45)
+
+    assert daily_report.resolve_auto_target_date(local_time, {}) == "2026-07-04"
+
+
+def test_resolve_auto_target_date_morning_catches_up_yesterday():
+    local_time = datetime(2026, 7, 5, 7, 40)
+
+    assert daily_report.resolve_auto_target_date(local_time, {}) == "2026-07-04"
+
+
+def test_resolve_auto_target_date_skips_when_already_sent():
+    local_time = datetime(2026, 7, 5, 7, 40)
+    health = {
+        "daily_report": {
+            "last_target_date": "2026-07-04",
+            "last_ok": True,
+            "last_source": "cron",
+        }
+    }
+
+    assert daily_report.resolve_auto_target_date(local_time, health) is None
+
+
+def test_resolve_auto_target_date_manual_success_does_not_suppress_auto_run():
+    # A successful /report (telegram_command) or CLI run for the same date
+    # writes the same ledger record, but must NOT skip the nightly cron run.
+    local_time = datetime(2026, 7, 5, 7, 40)
+    for manual_source in ("telegram_command", "manual"):
+        health = {
+            "daily_report": {
+                "last_target_date": "2026-07-04",
+                "last_ok": True,
+                "last_source": manual_source,
+            }
+        }
+
+        assert daily_report.resolve_auto_target_date(local_time, health) == "2026-07-04"
+
+
+def test_resolve_auto_target_date_retries_after_failed_send():
+    local_time = datetime(2026, 7, 5, 7, 40)
+    health = {"daily_report": {"last_target_date": "2026-07-04", "last_ok": False}}
+
+    assert daily_report.resolve_auto_target_date(local_time, health) == "2026-07-04"
+
+
+def test_generate_report_rejects_non_numeric_chat_id(monkeypatch):
+    monkeypatch.setattr(daily_report, "CHAT_ID", "not-a-number")
+
+    calls = []
+    monkeypatch.setattr(
+        daily_report.database, "get_meals", lambda *args: calls.append(args) or []
+    )
+
+    assert daily_report.generate_report("2026-06-25") == ""
+    assert calls == []
+
+
+def test_save_report_file_strips_telegram_html(monkeypatch, tmp_path):
+    monkeypatch.setattr(daily_report, "REPORTS_DIR", tmp_path)
+
+    report = '<b>Daily</b>\n<i>note</i> &amp; <a href="https://x">link</a>'
+    filepath = daily_report.save_report_file("2026-06-25", report)
+    content = filepath.read_text()
+
+    assert "<b>" not in content
+    assert "<i>" not in content
+    assert "&amp;" not in content
+    assert "Daily" in content
+    assert "note & link" in content
+
+
+def test_send_wechat_uses_https_and_plain_text(monkeypatch):
+    captured = {}
+
+    def fake_post(url, json, timeout):
+        captured["url"] = url
+        captured["payload"] = json
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"code": 200})
+
+    monkeypatch.setattr(daily_report, "PUSHPLUS_TOKEN", "token")
+    monkeypatch.setattr(daily_report.requests, "post", fake_post)
+
+    daily_report.send_wechat("<b>Report</b> &amp; more", "2026-06-25")
+
+    assert captured["url"].startswith("https://")
+    assert captured["payload"]["content"] == "Report & more"
+
+
+def test_main_exception_records_health_failure(monkeypatch, tmp_path):
+    health_path = tmp_path / "service_health.json"
+    monkeypatch.setattr(daily_report, "SERVICE_HEALTH_PATH", health_path)
+    monkeypatch.setattr(daily_report.sys, "argv", ["daily_report.py", "2026-06-27"])
+
+    def boom(target_date):
+        raise RuntimeError("db exploded")
+
+    monkeypatch.setattr(daily_report, "generate_report", boom)
+
+    alerts = []
+    monkeypatch.setattr(daily_report, "BOT_TOKEN", "token")
+    monkeypatch.setattr(daily_report, "CHAT_ID", "12345")
+    monkeypatch.setattr(
+        daily_report,
+        "_post_telegram_message",
+        lambda text, parse_mode=None: alerts.append(text) or True,
+    )
+
+    assert daily_report.main() == 1
+
+    health = json.loads(health_path.read_text())
+    assert health["daily_report"]["last_ok"] is False
+    assert health["daily_report"]["last_target_date"] == "2026-06-27"
+    assert "RuntimeError: db exploded" in health["daily_report"]["last_error_summary"]
+    assert len(alerts) == 1
+    assert "2026-06-27" in alerts[0]
+
+
+def test_main_auto_skips_when_already_sent(monkeypatch, tmp_path):
+    health_path = tmp_path / "service_health.json"
+    health_path.write_text(
+        json.dumps(
+            {
+                "daily_report": {
+                    "last_target_date": "2026-07-04",
+                    "last_ok": True,
+                    "last_source": "cron",
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(daily_report, "SERVICE_HEALTH_PATH", health_path)
+    monkeypatch.setattr(daily_report.sys, "argv", ["daily_report.py"])
+    monkeypatch.setattr(daily_report.database, "get_android_timezone", lambda: "+0800")
+    monkeypatch.setattr(
+        daily_report, "get_local_time", lambda tz_str: datetime(2026, 7, 5, 7, 40)
+    )
+
+    generated = []
+    monkeypatch.setattr(
+        daily_report, "generate_report", lambda target_date: generated.append(target_date) or ""
+    )
+
+    assert daily_report.main() == 0
+    assert generated == []
+
+
+def test_main_manual_cli_records_source_manual(monkeypatch, tmp_path):
+    health_path = tmp_path / "service_health.json"
+    report_path = tmp_path / "report.md"
+
+    monkeypatch.setattr(daily_report, "SERVICE_HEALTH_PATH", health_path)
+    monkeypatch.setattr(daily_report.sys, "argv", ["daily_report.py", "2026-07-04"])
+    monkeypatch.setattr(daily_report, "generate_report", lambda target_date: "<b>Report</b>")
+    monkeypatch.setattr(daily_report, "save_report_file", lambda target_date, report: report_path)
+    monkeypatch.setattr(daily_report, "send_telegram", lambda report: True)
+    monkeypatch.setattr(daily_report, "send_wechat", lambda report, target_date: None)
+
+    assert daily_report.main() == 0
+
+    health = json.loads(health_path.read_text())
+    assert health["daily_report"]["last_ok"] is True
+    assert health["daily_report"]["last_target_date"] == "2026-07-04"
+    # A manual CLI run must not masquerade as the nightly cron run,
+    # otherwise resolve_auto_target_date would skip that night's report.
+    assert health["daily_report"]["last_source"] == "manual"
+
+
+def test_get_local_time_rejects_bogus_offset_and_falls_back_to_server_time():
+    # '+2500' (25 hours) passes the old hand-rolled parser but is rejected
+    # by database.parse_timezone_offset; both clocks must agree it is bogus.
+    before = datetime.now()
+    result = daily_report.get_local_time("+2500")
+    after = datetime.now()
+
+    assert result.tzinfo is None
+    assert before - timedelta(seconds=5) <= result <= after + timedelta(seconds=5)
+
+
+def test_get_local_time_applies_valid_offset():
+    expected = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=8)
+    result = daily_report.get_local_time("+0800")
+
+    assert result.tzinfo is None
+    assert abs(result - expected) < timedelta(seconds=5)
