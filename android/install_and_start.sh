@@ -1,7 +1,18 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -e
 
+SRC_DIR="${CALORIE_INSTALL_SRC:-/sdcard/Download}"
+
 echo "[$(date)] Installing CalorieTracker Android scripts..."
+
+# Verify the payload exists BEFORE killing the running watcher, so a botched
+# copy never leaves the phone with no watcher at all.
+for name in upload_photo.py android_watcher.sh; do
+  if [ ! -f "$SRC_DIR/$name" ]; then
+    echo "ERROR: $SRC_DIR/$name not found. Copy it there (or set CALORIE_INSTALL_SRC) and rerun." >&2
+    exit 1
+  fi
+done
 
 for pattern in android_watcher.sh upload_photo.py; do
   for pid in $(ps -ef 2>/dev/null | grep "$pattern" | grep -v grep | awk '{print $2}'); do
@@ -22,8 +33,8 @@ done
 rm -f "$HOME/.calorie_watcher.pid"
 rm -rf "$HOME/.calorie_watcher.lock"
 
-cp /sdcard/Download/upload_photo.py "$HOME/upload_photo.py"
-cp /sdcard/Download/android_watcher.sh "$HOME/android_watcher.sh"
+cp "$SRC_DIR/upload_photo.py" "$HOME/upload_photo.py"
+cp "$SRC_DIR/android_watcher.sh" "$HOME/android_watcher.sh"
 chmod +x "$HOME/upload_photo.py" "$HOME/android_watcher.sh"
 
 CONFIG_FILE="${CALORIE_TRACKER_ANDROID_CONFIG:-$HOME/.calorie_tracker_upload.json}"
@@ -44,10 +55,11 @@ JSON
 fi
 chmod 600 "$CONFIG_FILE"
 
-if [ -d "$HOME/.offline_queue" ]; then
-  mv "$HOME/.offline_queue" "$HOME/.offline_queue.backup.$(date +%Y%m%d_%H%M%S)"
-fi
+# Keep any pending offline uploads across reinstalls; just clear a stale
+# queue lock (safe: every uploader process was killed above). The --ping
+# below drains whatever is queued.
 mkdir -p "$HOME/.offline_queue"
+rm -rf "$HOME/.offline_queue/.process_lock"
 
 python3 "$HOME/upload_photo.py" --ping
 
