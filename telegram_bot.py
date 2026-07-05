@@ -24,11 +24,12 @@ import hmac
 import logging
 import os
 import re
-import shutil
+import signal
 import subprocess
 import sys
 import time
-from datetime import datetime, date, timedelta
+import uuid
+from datetime import datetime, date, timedelta, timezone
 from html import escape
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -46,6 +47,7 @@ except ImportError:
     pass
 
 import database
+import service_health
 from config import (
     GEMINI_API_KEY,
     GEMINI_MODEL,
@@ -55,8 +57,10 @@ from config import (
     FOOD_DETECTION_PROMPT,
     DUPLICATE_WINDOW_MINUTES,
     ANDROID_API_KEY,
+    REPORTS_DIR,
+    SUPPORTED_EXTENSIONS,
 )
-from utils import parse_ai_json
+from utils import parse_ai_json, telegram_message_chunks
 
 # ─── Constants ─────────────────────────────────────────────────────
 def _parse_chat_id(value: Optional[str]) -> int:
@@ -105,8 +109,7 @@ GEMINI_RETRY_MAX_DELAY_SECONDS = _env_int("GEMINI_RETRY_MAX_DELAY_SECONDS", 60, 
 GEMINI_DAILY_QUOTA_COOLDOWN_SECONDS = _env_int("GEMINI_DAILY_QUOTA_COOLDOWN_SECONDS", 12 * 3600, 60, 7 * 24 * 3600)
 API_UPLOAD_PENDING_DIR = Path.home() / "CalorieTracker" / "logs" / "pending_uploads"
 API_UPLOAD_FAILED_DIR = Path.home() / "CalorieTracker" / "logs" / "failed_uploads"
-SERVICE_HEALTH_PATH = Path.home() / "CalorieTracker" / "logs" / "service_health.json"
-REPORTS_DIR = Path.home() / "CalorieTracker" / "reports"
+SERVICE_HEALTH_PATH = service_health.DEFAULT_PATH
 BOT_SERVICE_NAME = os.environ.get("CALORIE_BOT_SERVICE_NAME", "caloriebot.service")
 RETRY_ALL_FAILED_MAX = _env_int("RETRY_ALL_FAILED_MAX", 10, 1, 50)
 MAX_API_UPLOAD_BYTES = _env_int("MAX_API_UPLOAD_BYTES", 25 * 1024 * 1024, 1024, 100 * 1024 * 1024)
@@ -133,12 +136,19 @@ VPN_OFF_REMOTE_CIDRS = [
     for cidr in os.environ.get("VPN_OFF_REMOTE_CIDRS", "").split(",")
     if cidr.strip()
 ]
+# Only trust X-Forwarded-For when a reverse proxy in front of Flask sets it;
+# the Flask port is directly exposed by default, so the header is spoofable.
+TRUSTED_PROXY_ENABLED = os.environ.get("TRUSTED_PROXY_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+NL_DELETE_CONFIRM_TTL_SECONDS = 600
 _last_android_vpn_warning_at = None
 _last_ios_vpn_warning_at = None
+_vpn_warning_lock = threading.Lock()
 _api_upload_processing_hashes = set()
 _api_upload_processing_lock = threading.Lock()
 _service_health_lock = threading.Lock()
 _remote_ip_country_cache = {}
+# Pending natural-language deletes awaiting inline-button confirmation.
+_pending_nl_deletes: Dict[int, Dict] = {}
 
 HELP_TEXT = """🍽️ <b>CalorieTracker Bot</b>
 
@@ -214,10 +224,22 @@ class TelegramBot:
         self.offset = 0  # Track last processed update
         self.session = requests.Session()
 
+    def _redact(self, value) -> str:
+        """Strip the bot token from text destined for logs or user messages."""
+        text = str(value)
+        return text.replace(self.token, "<token>") if self.token else text
+
     def _call(self, method: str, **kwargs) -> dict:
         """Make a Telegram Bot API call."""
-        resp = self.session.post(f"{self.base_url}/{method}", json=kwargs, timeout=60)
-        resp.raise_for_status()
+        try:
+            resp = self.session.post(f"{self.base_url}/{method}", json=kwargs, timeout=60)
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            # requests embeds the full URL (token included) in HTTPError messages,
+            # and ConnectionError/ConnectTimeout messages carry it too.
+            resp = getattr(e, "response", None)
+            status = resp.status_code if resp is not None else "network-error"
+            raise RuntimeError(f"Telegram {status} calling {method}") from None
         data = resp.json()
         if not data.get("ok"):
             raise RuntimeError(f"Telegram API error: {data}")
@@ -235,7 +257,7 @@ class TelegramBot:
         except requests.exceptions.Timeout:
             return []
         except Exception as e:
-            log.error(f"Error getting updates: {e}")
+            log.error(f"Error getting updates: {self._redact(e)}")
             time.sleep(5)
             return []
 
@@ -254,7 +276,7 @@ class TelegramBot:
         try:
             return self._call("sendMessage", **payload)
         except Exception as e:
-            log.error(f"Failed to send message: {e}")
+            log.error(f"Failed to send message: {self._redact(e)}")
             # Retry without parse_mode in case of formatting issues
             try:
                 fallback = {"chat_id": chat_id, "text": text}
@@ -269,7 +291,7 @@ class TelegramBot:
         try:
             return self._call("answerCallbackQuery", callback_query_id=callback_query_id, text=text[:200])
         except Exception as e:
-            log.warning(f"Failed to answer callback query: {e}")
+            log.warning(f"Failed to answer callback query: {self._redact(e)}")
             return None
 
     def delete_message(self, chat_id: int, message_id: int):
@@ -277,7 +299,7 @@ class TelegramBot:
         try:
             self._call("deleteMessage", chat_id=chat_id, message_id=message_id)
         except Exception as e:
-            log.warning(f"Failed to delete message: {e}")
+            log.warning(f"Failed to delete message: {self._redact(e)}")
 
     def get_file(self, file_id: str) -> bytes:
         """Download a file from Telegram."""
@@ -286,15 +308,21 @@ class TelegramBot:
         if not file_path:
             raise RuntimeError("Could not get file_path from telegram.")
         url = f"https://api.telegram.org/file/bot{self.token}/{file_path}"
-        resp = self.session.get(url, timeout=30)
-        resp.raise_for_status()
+        try:
+            resp = self.session.get(url, timeout=30)
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            # Network errors (ConnectionError/ConnectTimeout) embed the token URL too.
+            resp = getattr(e, "response", None)
+            status = resp.status_code if resp is not None else "network-error"
+            raise RuntimeError(f"Telegram {status} calling getFile") from None
         return resp.content
 
 
 # ─── Meals Data Access ─────────────────────────────────────────────
 def get_todays_meals(chat_id: int) -> List[Dict]:
-    """Get all food meals logged today."""
-    today_str = date.today().isoformat()
+    """Get all food meals logged today (user-local date)."""
+    today_str = database.user_local_now().date().isoformat()
     meals = database.get_meals(chat_id, today_str, today_str)
     return [m for m in meals if m.get("analysis", {}).get("is_food")]
 
@@ -303,34 +331,6 @@ def get_recent_meals(chat_id: int, days: int = 3) -> List[Dict]:
     """Get all food meals logged in the past N days."""
     meals = database.get_recent_meals(chat_id, days)
     return [m for m in meals if m.get("analysis", {}).get("is_food")]
-
-
-def update_meal_by_index(chat_id: int, meal_index: int, new_analysis: Dict) -> bool:
-    """Update a specific meal in the log by its index within the recent food meals."""
-    meals = get_recent_meals(chat_id, days=3)
-
-    if meal_index < 0 or meal_index >= len(meals):
-        log.warning(f"Invalid meal_index {meal_index} (recent has {len(meals)} meals)")
-        return False
-
-    meal_id = meals[meal_index]["id"]
-    database.update_meal_analysis(meal_id, chat_id, new_analysis)
-    log.info(f"Updated meal at index {meal_index} (DB ID {meal_id})")
-    return True
-
-
-def delete_meal_by_index(chat_id: int, meal_index: int) -> bool:
-    """Delete a specific meal from the log by its index within the recent food meals."""
-    meals = get_recent_meals(chat_id, days=3)
-
-    if meal_index < 0 or meal_index >= len(meals):
-        log.warning(f"Invalid meal_index {meal_index} (recent has {len(meals)} meals)")
-        return False
-
-    meal_id = meals[meal_index]["id"]
-    database.delete_meal(meal_id, chat_id)
-    log.info(f"Deleted meal at index {meal_index} (DB ID {meal_id})")
-    return True
 
 
 # ─── Photo Analysis ────────────────────────────────────────────────
@@ -401,29 +401,15 @@ def _is_daily_free_tier_quota_error(error: Exception) -> bool:
 
 
 def _load_service_health() -> Dict:
-    try:
-        return json.loads(SERVICE_HEALTH_PATH.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-    except OSError as e:
-        log.warning(f"Could not read service health file: {e}")
-        return {}
+    return service_health.load(SERVICE_HEALTH_PATH, warn=log.warning)
 
 
 def _save_service_health(data: Dict):
-    try:
-        SERVICE_HEALTH_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = SERVICE_HEALTH_PATH.with_name(
-            f"{SERVICE_HEALTH_PATH.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-        )
-        tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True))
-        tmp_path.replace(SERVICE_HEALTH_PATH)
-    except OSError as e:
-        log.warning(f"Could not write service health file: {e}")
+    service_health.save(data, SERVICE_HEALTH_PATH, warn=log.warning)
 
 
 def _health_timestamp() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return service_health.timestamp()
 
 
 def _parse_health_datetime(value: Optional[str]) -> Optional[datetime]:
@@ -558,32 +544,10 @@ def _record_report_health(
 ):
     with _service_health_lock:
         data = _load_service_health()
-        report = data.setdefault("daily_report", {})
-        now = _health_timestamp()
-        report["last_attempt_at"] = now
-        report["last_target_date"] = target_date
-        report["last_source"] = source
-        report["last_ok"] = ok
-        if report_path:
-            report["last_report_path"] = report_path
-
-        if ok:
-            report["last_success_at"] = now
-            report["consecutive_failures"] = 0
-            report.pop("last_error_summary", None)
-        else:
-            report["last_error_at"] = now
-            report["last_error_summary"] = str(error_summary or "")[:500]
-            report["consecutive_failures"] = int(report.get("consecutive_failures", 0)) + 1
-
-        events = report.setdefault("events", [])
-        events.append({
-            "at": now,
-            "ok": ok,
-            "target_date": target_date,
-            "source": source,
-        })
-        report["events"] = events[-50:]
+        service_health.apply_report_health(
+            data, ok, target_date,
+            source=source, report_path=report_path, error_summary=error_summary,
+        )
         _save_service_health(data)
 
 
@@ -607,10 +571,6 @@ def _gemini_recent_counts(hours: int = 24) -> tuple[int, int]:
             fail_count += 1
 
     return ok_count, fail_count
-
-
-def _gemini_health_label() -> str:
-    return _gemini_health_label_from(_load_service_health().get("gemini", {}))
 
 
 def _gemini_health_label_from(gemini: Dict) -> str:
@@ -659,39 +619,8 @@ def _analyze_food_photo_once(client: genai.Client, image_bytes: bytes) -> Dict:
 
 
 def analyze_food_photo(client: genai.Client, image_bytes: bytes) -> Optional[Dict]:
-    """Analyze a food photo with Gemini."""
-    pause = _gemini_quota_pause()
-    if pause:
-        log.warning("Skipping Gemini photo analysis because daily quota pause is active.")
-        return None
-
-    start = time.time()
-    try:
-        result = _analyze_food_photo_once(client, image_bytes)
-        _record_gemini_health(True, latency_seconds=time.time() - start)
-        return result
-    except json.JSONDecodeError as e:
-        log.warning(f"Could not parse API response: {e}")
-        _record_gemini_health(
-            False,
-            error_type=_classify_gemini_error(e),
-            error_summary=str(e),
-            latency_seconds=time.time() - start,
-        )
-        return None
-    except Exception as e:
-        error_type = _classify_gemini_error(e)
-        if error_type == "daily_quota_exhausted":
-            pause_until = _set_gemini_daily_quota_pause(e)
-            log.error(f"Gemini daily free-tier quota exhausted; pausing automatic analysis until {pause_until}.")
-        log.error(f"Error analyzing photo: {e}")
-        _record_gemini_health(
-            False,
-            error_type=error_type,
-            error_summary=str(e),
-            latency_seconds=time.time() - start,
-        )
-        return None
+    """Analyze a food photo with Gemini (single attempt for the interactive path)."""
+    return analyze_food_photo_with_retries(client, image_bytes, max_attempts=1)
 
 
 def analyze_food_photo_with_retries(
@@ -760,7 +689,7 @@ def analyze_food_photo_with_retries(
 
 def _api_upload_extension(filename: str) -> str:
     ext = Path(filename or "").suffix.lower()
-    return ext if ext in {".jpg", ".jpeg", ".png", ".heic", ".heif", ".tiff"} else ".jpg"
+    return ext if ext in SUPPORTED_EXTENSIONS else ".jpg"
 
 
 def _stage_api_upload(image_bytes: bytes, image_hash: str, filename: str) -> Path:
@@ -942,9 +871,10 @@ def _api_upload_device_name_from_request() -> str:
 
 
 def _request_remote_ip() -> str:
-    forwarded_for = request.headers.get("X-Forwarded-For", "")
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
+    if TRUSTED_PROXY_ENABLED:
+        forwarded_for = request.headers.get("X-Forwarded-For", "")
+        if forwarded_for:
+            return forwarded_for.split(",")[0].strip()
     return request.remote_addr or "unknown"
 
 
@@ -1064,13 +994,14 @@ def maybe_warn_android_vpn_inactive(bot: TelegramBot, endpoint: str):
         return
 
     now = datetime.now()
-    if _last_android_vpn_warning_at:
-        elapsed = now - _last_android_vpn_warning_at
-        if elapsed.total_seconds() < ANDROID_VPN_WARNING_COOLDOWN_MINUTES * 60:
-            log.info("Android VPN warning suppressed by cooldown.")
-            return
+    with _vpn_warning_lock:
+        if _last_android_vpn_warning_at:
+            elapsed = now - _last_android_vpn_warning_at
+            if elapsed.total_seconds() < ANDROID_VPN_WARNING_COOLDOWN_MINUTES * 60:
+                log.info("Android VPN warning suppressed by cooldown.")
+                return
+        _last_android_vpn_warning_at = now
 
-    _last_android_vpn_warning_at = now
     log.warning(
         f"Android client reached {endpoint} from {remote_ip} while reporting VPN inactive "
         f"({vpn_check or 'no detail'}; evidence={evidence_detail})."
@@ -1126,13 +1057,14 @@ def maybe_warn_ios_vpn_unverified(bot: TelegramBot, endpoint: str):
         return
 
     now = datetime.now()
-    if _last_ios_vpn_warning_at:
-        elapsed = now - _last_ios_vpn_warning_at
-        if elapsed.total_seconds() < IOS_VPN_WARNING_COOLDOWN_MINUTES * 60:
-            log.info("iOS VPN warning suppressed by cooldown.")
-            return
+    with _vpn_warning_lock:
+        if _last_ios_vpn_warning_at:
+            elapsed = now - _last_ios_vpn_warning_at
+            if elapsed.total_seconds() < IOS_VPN_WARNING_COOLDOWN_MINUTES * 60:
+                log.info("iOS VPN warning suppressed by cooldown.")
+                return
+        _last_ios_vpn_warning_at = now
 
-    _last_ios_vpn_warning_at = now
     detail = vpn_check or "shortcut did not report VPN status"
     log.warning(
         f"iOS Shortcut reached {endpoint} from {remote_ip}; VPN is required but unverified "
@@ -1151,8 +1083,12 @@ def maybe_warn_ios_vpn_unverified(bot: TelegramBot, endpoint: str):
 
 def save_meal(chat_id: int, analysis: Dict, source: str, file_id: str = "", image_hash: str = ""):
     """Save a meal analysis to the log (from direct Telegram photo)."""
-    date_str = date.today().isoformat()
-    time_str = datetime.now().strftime("%I:%M %p")
+    # Meal date/time use the user's clock so late-night meals land on the right
+    # day; timestamp stays on the server clock because duplicate detection and
+    # reservation staleness compare against datetime.now().
+    user_now = database.user_local_now()
+    date_str = user_now.date().isoformat()
+    time_str = user_now.strftime("%I:%M %p")
     timestamp_str = datetime.now().isoformat()
     return database.save_meal(chat_id, date_str, time_str, timestamp_str, source, image_hash, file_id, analysis)
 
@@ -1338,7 +1274,7 @@ def _retry_failed_upload_path(gemini_client, path: Path) -> Dict:
 
     img_hash = hashlib.md5(image_bytes).hexdigest()
 
-    if database.meal_image_hash_exists(ALLOWED_CHAT_ID, img_hash) or is_duplicate_photo(ALLOWED_CHAT_ID, img_hash):
+    if database.meal_image_hash_exists(ALLOWED_CHAT_ID, img_hash):
         database.mark_photo_hash_status(ALLOWED_CHAT_ID, img_hash, "saved", source="api_retry")
         _discard_api_upload(path)
         return {
@@ -1705,6 +1641,12 @@ def clear_failed_uploads(selector: str = "latest", confirmed: bool = False) -> s
             removed.append(path.name)
         except OSError as e:
             errors.append(f"{path.name}: {e}")
+            continue
+        # Tombstone the 'failed' ingestion row (status 'deleted') so /reconcile
+        # keeps suppressing the photo while a deliberate re-send can reclaim it.
+        match = re.search(r"_([0-9a-fA-F]{12})(?:\.[^.]+)?$", path.name)
+        if match:
+            database.discard_failed_photo_hashes_by_prefix(ALLOWED_CHAT_ID, match.group(1).lower())
 
     lines = [f"🧹 Removed {len(removed)} failed upload file(s)."]
     for name in removed[:10]:
@@ -1719,12 +1661,10 @@ def clear_failed_uploads(selector: str = "latest", confirmed: bool = False) -> s
 
 
 def _local_time_from_timezone_offset(tz_str: str) -> Optional[datetime]:
-    match = re.match(r"^([+-])(\d{2})(\d{2})$", str(tz_str or ""))
-    if not match:
+    offset = database.parse_timezone_offset(tz_str)
+    if offset is None:
         return None
-    sign = 1 if match.group(1) == "+" else -1
-    offset = timedelta(hours=int(match.group(2)), minutes=int(match.group(3))) * sign
-    return datetime.utcnow() + offset
+    return datetime.now(timezone.utc).replace(tzinfo=None) + offset
 
 
 def format_android_status() -> str:
@@ -1761,9 +1701,9 @@ def format_android_status() -> str:
 def _parse_report_date_selector(selector: str) -> str:
     normalized = (selector or "today").strip().lower()
     if normalized in {"", "today"}:
-        return date.today().isoformat()
+        return database.user_local_now().date().isoformat()
     if normalized in {"yesterday", "last"}:
-        return (date.today() - timedelta(days=1)).isoformat()
+        return (database.user_local_now().date() - timedelta(days=1)).isoformat()
     try:
         parsed = date.fromisoformat(normalized)
     except ValueError as e:
@@ -1908,8 +1848,9 @@ def format_safe_config() -> str:
 
 
 def format_database_stats(chat_id: int) -> str:
-    today_str = date.today().isoformat()
-    seven_days_ago = (date.today() - timedelta(days=6)).isoformat()
+    local_today = database.user_local_now().date()
+    today_str = local_today.isoformat()
+    seven_days_ago = (local_today - timedelta(days=6)).isoformat()
     all_meals = database.get_meals(chat_id, "1970-01-01", today_str)
     recent_meals = database.get_meals(chat_id, seven_days_ago, today_str)
     today_meals = get_todays_meals(chat_id)
@@ -1969,7 +1910,8 @@ def run_doctor(gemini_client) -> str:
     lines = ["🩺 <b>CalorieTracker Doctor</b>"]
 
     try:
-        database.get_meals(ALLOWED_CHAT_ID, date.today().isoformat(), date.today().isoformat())
+        local_today_str = database.user_local_now().date().isoformat()
+        database.get_meals(ALLOWED_CHAT_ID, local_today_str, local_today_str)
         lines.append("✅ Database readable")
     except Exception as e:
         lines.append(f"❌ Database error: <code>{escape(str(e)[:220])}</code>")
@@ -1999,29 +1941,6 @@ def run_doctor(gemini_client) -> str:
         lines.append("⚪ Daily report health not recorded yet")
 
     return "\n".join(lines)
-
-
-def telegram_message_chunks(text: str, limit: int = 3900) -> List[str]:
-    chunks = []
-    current = ""
-    for line in str(text).splitlines(keepends=True):
-        if len(line) > limit:
-            if current:
-                chunks.append(current.rstrip())
-                current = ""
-            for start in range(0, len(line), limit):
-                chunks.append(line[start:start + limit].rstrip())
-            continue
-
-        if current and len(current) + len(line) > limit:
-            chunks.append(current.rstrip())
-            current = line
-        else:
-            current += line
-
-    if current:
-        chunks.append(current.rstrip())
-    return chunks or [""]
 
 
 def send_long_message(bot: TelegramBot, chat_id: int, text: str):
@@ -2154,8 +2073,10 @@ def format_meals_list(chat_id: int) -> str:
 
 def format_history(chat_id: int, days: int = 7) -> str:
     """Format a summary of daily calorie totals over the past week."""
-    cutoff_date = (date.today() - timedelta(days=days)).isoformat()
-    today_str = date.today().isoformat()
+    local_today = database.user_local_now().date()
+    # days - 1 back plus today = an inclusive N-day window
+    cutoff_date = (local_today - timedelta(days=days - 1)).isoformat()
+    today_str = local_today.isoformat()
     all_meals = database.get_meals(chat_id, cutoff_date, today_str)
     meals = [m for m in all_meals if m.get("analysis", {}).get("is_food")]
     
@@ -2173,7 +2094,7 @@ def format_history(chat_id: int, days: int = 7) -> str:
         try:
             dt = date.fromisoformat(d)
             friendly_date = dt.strftime("%A, %b %d")
-            if d == date.today().isoformat():
+            if d == today_str:
                 friendly_date = "Today"
         except ValueError:
             friendly_date = _html(d)
@@ -2261,11 +2182,10 @@ def handle_text_message(
         old_desc = old_analysis.get("meal_description", "Unknown")
         new_desc = new_analysis.get("meal_description", old_desc)
 
-        # Update the log
-        success = update_meal_by_index(chat_id, meal_index, new_analysis)
-        if not success:
-            bot.send_message(chat_id, "❌ Failed to update the meal.")
-            return
+        # Update by the DB id from the snapshot Gemini indexed, so a meal
+        # logged mid-conversation cannot shift the target.
+        meal_id = meals[meal_index]["id"]
+        database.update_meal_analysis(meal_id, chat_id, new_analysis)
 
         # Format reply with diff
         diff = new_cal - old_cal
@@ -2280,7 +2200,7 @@ def handle_text_message(
             reply_lines.append(f"\n💬 {_html(reason)}")
 
         bot.send_message(chat_id, "\n".join(reply_lines))
-        log.info(f"  ✏️ Corrected meal {meal_index + 1}: {old_cal} → {new_cal} kcal")
+        log.info(f"  ✏️ Corrected meal {meal_index + 1} (DB ID {meal_id}): {old_cal} → {new_cal} kcal")
 
     elif intent == "delete":
         meal_indices = result.get("meal_indices", [])
@@ -2294,26 +2214,46 @@ def handle_text_message(
             bot.send_message(chat_id, "❌ Didn't catch which meals to delete. Try being more specific.")
             return
 
-        deleted_count = 0
-        deleted_descs = []
-
-        # Sort indices in descending order so deleting one doesn't mess up the indices of the others
-        for index in sorted(meal_indices, reverse=True):
+        # Resolve DB ids from the snapshot Gemini indexed, then ask for
+        # confirmation before destroying any rows.
+        ids = []
+        labels = []
+        for index in sorted(set(meal_indices)):
             if 0 <= index < len(meals):
-                desc = meals[index]["analysis"].get("meal_description", "Unknown meal")
-                if delete_meal_by_index(chat_id, index):
-                    deleted_count += 1
-                    deleted_descs.append(desc)
+                meal = meals[index]
+                analysis = meal.get("analysis", {})
+                ids.append(meal["id"])
+                labels.append(
+                    f"{analysis.get('meal_description', 'Unknown meal')} "
+                    f"({meal.get('date', '?')} {meal.get('time', '?')}, "
+                    f"~{analysis.get('total_calories') or 0} kcal)"
+                )
 
-        if deleted_count > 0:
-            msg = f"🗑️ <b>Deleted {deleted_count} meal(s):</b>\n"
-            for desc in deleted_descs:
-                msg += f"• {_html(desc)}\n"
-            if reason:
-                msg += f"\n💬 {_html(reason)}"
-            bot.send_message(chat_id, msg)
-        else:
-            bot.send_message(chat_id, "❌ Failed to delete the specified meals.")
+        if not ids:
+            bot.send_message(chat_id, "❌ Couldn't match those meals to the recent list.")
+            return
+
+        # Nonce binds the confirmation buttons to THIS message, so a stale
+        # Delete button from an older confirmation cannot fire the newest
+        # pending set (e.g. "delete the toast" deleting all of today's meals).
+        token = uuid.uuid4().hex[:8]
+        _pending_nl_deletes[chat_id] = {"ids": ids, "labels": labels, "at": datetime.now(), "token": token}
+        msg_lines = [f"🗑️ <b>Delete {len(ids)} meal(s)?</b>", ""]
+        for label in labels:
+            msg_lines.append(f"• {_html(label)}")
+        if reason:
+            msg_lines.append(f"\n💬 {_html(reason)}")
+        msg_lines.append("\nThis cannot be undone.")
+        bot.send_message(
+            chat_id,
+            "\n".join(msg_lines),
+            reply_markup={
+                "inline_keyboard": [[
+                    {"text": "✅ Delete", "callback_data": f"nl_delete_confirm:{token}"},
+                    {"text": "❌ Cancel", "callback_data": f"nl_delete_cancel:{token}"},
+                ]]
+            },
+        )
 
     elif intent == "new_meal":
         analysis = result.get("analysis", {})
@@ -2361,57 +2301,66 @@ def handle_callback_query(gemini_client, bot: TelegramBot, callback_query: Dict)
         bot.send_message(chat_id, clear_failed_uploads(selector, confirmed=True))
         return True
 
+    if data.split(":", 1)[0] == "nl_delete_confirm":
+        token = data.split(":", 1)[1] if ":" in data else ""
+        pending = _pending_nl_deletes.get(chat_id)
+        if not pending:
+            bot.answer_callback_query(callback_id, "Nothing to delete.")
+            bot.send_message(chat_id, "⌛ That delete request expired or was already handled. Nothing was deleted.")
+            return True
+        if pending.get("token") != token:
+            # Stale button from an older confirmation message: never execute
+            # the newer pending set, and leave it intact for its own buttons.
+            bot.answer_callback_query(callback_id, "That delete request expired or was superseded.")
+            bot.send_message(chat_id, "⌛ That delete request expired or was superseded. Nothing was deleted.")
+            return True
+        if (datetime.now() - pending["at"]).total_seconds() > NL_DELETE_CONFIRM_TTL_SECONDS:
+            _pending_nl_deletes.pop(chat_id, None)
+            bot.answer_callback_query(callback_id, "Nothing to delete.")
+            bot.send_message(chat_id, "⌛ That delete request expired or was already handled. Nothing was deleted.")
+            return True
+        _pending_nl_deletes.pop(chat_id, None)
+        for meal_id in pending["ids"]:
+            database.delete_meal(meal_id, chat_id)
+        bot.answer_callback_query(callback_id, "Deleted.")
+        msg_lines = [f"🗑️ <b>Deleted {len(pending['ids'])} meal(s):</b>"]
+        for label in pending["labels"]:
+            msg_lines.append(f"• {_html(label)}")
+        bot.send_message(chat_id, "\n".join(msg_lines))
+        log.info(f"  🗑️ NL delete confirmed for meal ids {pending['ids']}")
+        return True
+
+    if data.split(":", 1)[0] == "nl_delete_cancel":
+        token = data.split(":", 1)[1] if ":" in data else ""
+        pending = _pending_nl_deletes.get(chat_id)
+        if pending is not None and pending.get("token") != token:
+            # A stale Cancel button must not discard the newer pending request.
+            bot.answer_callback_query(callback_id, "That delete request expired or was superseded.")
+            return True
+        _pending_nl_deletes.pop(chat_id, None)
+        bot.answer_callback_query(callback_id, "Cancelled.")
+        bot.send_message(chat_id, "👍 Cancelled — nothing was deleted.")
+        return True
+
     bot.answer_callback_query(callback_id, "Unknown action.")
     return False
 
 
-# ─── Main Bot Loop ────────────────────────────────────────────────
-def main():
-    log.info("=" * 50)
-    log.info("🤖 CalorieTracker Bot (Corrections Mode)")
-    log.info("=" * 50)
-
-    # Validate config
-    if not BOT_TOKEN:
-        log.error(
-            "TELEGRAM_BOT_TOKEN not set. "
-            "Set it: export TELEGRAM_BOT_TOKEN='your-token'"
-        )
-        sys.exit(1)
-
-    if not GEMINI_API_KEY:
-        log.error(
-            "GEMINI_API_KEY not set. "
-            "Set it: export GEMINI_API_KEY='your-key'"
-        )
-        sys.exit(1)
-
-    if not ALLOWED_CHAT_ID:
-        log.error(
-            "TELEGRAM_CHAT_ID not set or invalid. "
-            "Set it to the numeric Telegram chat ID allowed to use this private bot."
-        )
-        sys.exit(1)
-
-    if not ANDROID_API_KEY:
-        log.error(
-            "ANDROID_API_KEY not set. "
-            "Generate a random value and set it on both the server and phone clients."
-        )
-        sys.exit(1)
-
-    # Initialize
-    bot = TelegramBot(BOT_TOKEN)
-    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-
-    # ─── Flask REST API ───────────────────────────────────────────────
+# ─── Flask REST API ───────────────────────────────────────────────
+def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
+    """Build the phone upload/heartbeat API app (module-level for testability)."""
     app = Flask(__name__)
+    app.config['MAX_CONTENT_LENGTH'] = MAX_API_UPLOAD_BYTES
+
+    @app.errorhandler(413)
+    def payload_too_large(error):
+        return jsonify({"error": "Photo too large"}), 413
 
     @app.route('/ping', methods=['POST'])
     def ping():
         if not _authorized_api_request():
             return jsonify({"error": "Unauthorized"}), 401
-            
+
         maybe_warn_android_vpn_inactive(bot, "/ping")
 
         tz = "+0800"
@@ -2419,7 +2368,7 @@ def main():
             data = request.get_json(silent=True)
             if data and "timezone" in data:
                 tz = data["timezone"]
-                
+
         database.update_android_heartbeat(timezone=tz)
         log.info(f"📡 Heartbeat ping received from Android Watcher (TZ: {tz})")
         return jsonify({"status": "ok"})
@@ -2430,18 +2379,18 @@ def main():
             return jsonify({"error": "Unauthorized"}), 401
 
         maybe_warn_android_vpn_inactive(bot, "/reconcile")
-            
+
         data = request.get_json(silent=True)
         if not data or 'hashes' not in data:
             return jsonify({"error": "Missing hashes array"}), 400
-            
+
         android_hashes = set(data['hashes'])
         server_hashes = set(database.get_today_hashes(ALLOWED_CHAT_ID))
         reserved_hashes = set(database.get_reserved_photo_hashes(ALLOWED_CHAT_ID))
-        
+
         # Missing hashes are those on Android but not logged, pending, or saved for retry.
         missing_hashes = _reconcile_missing_hashes(android_hashes, server_hashes, reserved_hashes)
-        
+
         log.info(f"🔄 Reconcile Sync: Android sent {len(android_hashes)} hashes. Server is missing {len(missing_hashes)}.")
         return jsonify({"missing_hashes": missing_hashes})
 
@@ -2449,10 +2398,10 @@ def main():
     def upload():
         if not _authorized_api_request():
             return jsonify({"error": "Unauthorized"}), 401
-            
+
         if 'photo' not in request.files:
             return jsonify({"error": "No photo provided"}), 400
-            
+
         file = request.files['photo']
         if request.content_length and request.content_length > MAX_API_UPLOAD_BYTES:
             return jsonify({"error": "Photo too large"}), 413
@@ -2462,12 +2411,8 @@ def main():
             return jsonify({"error": "Photo too large"}), 413
         if not image_bytes:
             return jsonify({"error": "Empty photo"}), 400
-        
-        # Duplicate detection
+
         img_hash = hashlib.md5(image_bytes).hexdigest()
-        if is_duplicate_photo(ALLOWED_CHAT_ID, img_hash):
-            log.info("  🔄 Duplicate photo detected via API, skipping")
-            return jsonify({"status": "duplicate"})
 
         existing_failed = _find_failed_upload_by_hash(img_hash)
         if existing_failed:
@@ -2477,7 +2422,7 @@ def main():
         if not database.reserve_photo_hash(ALLOWED_CHAT_ID, img_hash, "api_upload"):
             log.info(f"  🔄 API upload already reserved or logged for hash {img_hash}, skipping")
             return jsonify({"status": "duplicate"})
-            
+
         device_name = _api_upload_device_name_from_request()
         client_platform = request.headers.get("X-Client-Platform", "").strip().lower()
         device_label = device_name.lower()
@@ -2507,7 +2452,7 @@ def main():
             processing_msg = None
             try:
                 log.info(f"🔍 Analyzing food from {device} API upload in background...")
-                
+
                 # Send instant feedback to the user so they know the watcher worked
                 processing_msg = bot.send_message(ALLOWED_CHAT_ID, f"📲 Received photo from {device_display}, analyzing... 🔍")
 
@@ -2589,8 +2534,95 @@ def main():
                 _finish_api_upload_processing(hsh)
 
         threading.Thread(target=background_process, args=(str(upload_path), img_hash, device_name)).start()
-        
+
         return jsonify({"status": "processing_in_background"})
+
+    return app
+
+
+def _raise_keyboard_interrupt(signum, frame):
+    raise KeyboardInterrupt
+
+
+def _sweep_stranded_pending_uploads(bot: TelegramBot):
+    """Recover uploads stranded mid-processing by a previous shutdown.
+
+    Anything still in the pending dir at boot was never analyzed; move it to
+    the failed dir so /retry_failed can see it instead of it sitting invisible.
+    """
+    moved = []
+    for path in _pending_upload_items():
+        try:
+            img_hash = hashlib.md5(path.read_bytes()).hexdigest()
+        except OSError as e:
+            log.warning(f"Could not read stranded pending upload {path}: {e}")
+            continue
+        failed_path = _keep_failed_api_upload(path, img_hash)
+        database.mark_photo_hash_status(ALLOWED_CHAT_ID, img_hash, "failed", source="startup_sweep")
+        moved.append(failed_path.name)
+
+    if not moved:
+        return
+
+    lines = [
+        f"♻️ <b>Recovered {len(moved)} upload(s) stranded by the last shutdown.</b>",
+        "They were pending analysis and are now saved as failed uploads:",
+    ]
+    for name in moved[:10]:
+        lines.append(f"• <code>{escape(name)}</code>")
+    if len(moved) > 10:
+        lines.append(f"...and {len(moved) - 10} more.")
+    lines.append("\nRecover them with <code>/retry_failed latest</code> or <code>/retry_all_failed 3</code>.")
+    bot.send_message(ALLOWED_CHAT_ID, "\n".join(lines))
+
+
+# ─── Main Bot Loop ────────────────────────────────────────────────
+def main():
+    log.info("=" * 50)
+    log.info("🤖 CalorieTracker Bot (Corrections Mode)")
+    log.info("=" * 50)
+
+    # Validate config
+    if not BOT_TOKEN:
+        log.error(
+            "TELEGRAM_BOT_TOKEN not set. "
+            "Set it: export TELEGRAM_BOT_TOKEN='your-token'"
+        )
+        sys.exit(1)
+
+    if not GEMINI_API_KEY:
+        log.error(
+            "GEMINI_API_KEY not set. "
+            "Set it: export GEMINI_API_KEY='your-key'"
+        )
+        sys.exit(1)
+
+    if not ALLOWED_CHAT_ID:
+        log.error(
+            "TELEGRAM_CHAT_ID not set or invalid. "
+            "Set it to the numeric Telegram chat ID allowed to use this private bot."
+        )
+        sys.exit(1)
+
+    if not ANDROID_API_KEY:
+        log.error(
+            "ANDROID_API_KEY not set. "
+            "Generate a random value and set it on both the server and phone clients."
+        )
+        sys.exit(1)
+
+    # Initialize
+    bot = TelegramBot(BOT_TOKEN)
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+
+    # systemd stop sends SIGTERM; raising KeyboardInterrupt on the main thread
+    # reuses the existing shutdown path, and the interpreter then joins the
+    # non-daemon upload threads so in-flight uploads finish before exit.
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+
+    _sweep_stranded_pending_uploads(bot)
+
+    app = _build_api_app(bot, gemini_client)
 
     # Start Flask in a background thread
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False), daemon=True).start()
@@ -2792,7 +2824,15 @@ def main():
                             )
                             continue
 
-                        if not database.reserve_photo_hash(chat_id, img_hash, "telegram"):
+                        # A deliberate human re-send may re-log a photo that was
+                        # previously skipped, failed, or whose meal was deleted;
+                        # the automated /upload path stays strict.
+                        if not database.reserve_photo_hash(
+                            chat_id,
+                            img_hash,
+                            "telegram",
+                            reclaim_statuses={"failed", "skipped", "deleted"},
+                        ):
                             log.info(f"  🔄 Photo already reserved or logged, skipping")
                             bot.send_message(
                                 chat_id,
@@ -2860,7 +2900,8 @@ def main():
                     except Exception as e:
                         if reserved_photo:
                             database.release_photo_hash(chat_id, img_hash)
-                        log.error(f"Error processing photo: {e}")
+                        # Defense in depth: network errors can embed the token URL.
+                        log.error(f"Error processing photo: {bot._redact(e)}")
                         bot.send_message(chat_id, "❌ Error processing your photo. Please try again.")
                     continue
 

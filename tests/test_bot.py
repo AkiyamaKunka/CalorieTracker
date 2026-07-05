@@ -1,9 +1,14 @@
 import pytest
 import json
+import logging
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
+
+import requests
+
 from telegram_bot import format_food_result, format_daily_totals, is_duplicate_photo, analyze_food_photo
 import telegram_bot
+import database
 from utils import parse_ai_json
 
 def test_format_food_result():
@@ -306,6 +311,11 @@ def test_quota_discard_callback_deletes_failed_upload(monkeypatch, tmp_path):
 
     monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", failed_dir)
     monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    # Keep the test hermetic: don't tombstone rows in the real database.
+    monkeypatch.setattr(
+        telegram_bot.database, "discard_failed_photo_hashes_by_prefix",
+        lambda chat_id, prefix: 0,
+    )
 
     handled = telegram_bot.handle_callback_query(
         object(),
@@ -359,7 +369,6 @@ def test_retry_failed_upload_not_food_removes_file(monkeypatch, tmp_path):
     marked = []
     monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", failed_dir)
     monkeypatch.setattr(telegram_bot.database, "meal_image_hash_exists", lambda chat_id, image_hash: False)
-    monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: False)
     monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: True)
     monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status", lambda *args, **kwargs: marked.append((args, kwargs)))
     monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", lambda client, image_bytes: {"is_food": False})
@@ -379,7 +388,6 @@ def test_retry_failed_upload_save_error_keeps_file(monkeypatch, tmp_path):
     marked = []
     monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", failed_dir)
     monkeypatch.setattr(telegram_bot.database, "meal_image_hash_exists", lambda chat_id, image_hash: False)
-    monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: False)
     monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: True)
     monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status", lambda *args, **kwargs: marked.append((args, kwargs)))
     monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", lambda client, image_bytes: {
@@ -403,8 +411,7 @@ def test_retry_failed_upload_duplicate_removes_file_without_analysis(monkeypatch
     failed_path.write_bytes(b"fake image")
     marked = []
     monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", failed_dir)
-    monkeypatch.setattr(telegram_bot.database, "meal_image_hash_exists", lambda chat_id, image_hash: False)
-    monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: True)
+    monkeypatch.setattr(telegram_bot.database, "meal_image_hash_exists", lambda chat_id, image_hash: True)
     monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status", lambda *args, **kwargs: marked.append((args, kwargs)))
     monkeypatch.setattr(
         telegram_bot,
@@ -426,7 +433,6 @@ def test_retry_failed_upload_already_reserved_keeps_file(monkeypatch, tmp_path):
     failed_path.write_bytes(b"fake image")
     monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", failed_dir)
     monkeypatch.setattr(telegram_bot.database, "meal_image_hash_exists", lambda chat_id, image_hash: False)
-    monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: False)
     monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: False)
     monkeypatch.setattr(
         telegram_bot,
@@ -447,7 +453,6 @@ def test_retry_failed_upload_logged_marks_hash_saved(monkeypatch, tmp_path):
     marked = []
     monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", failed_dir)
     monkeypatch.setattr(telegram_bot.database, "meal_image_hash_exists", lambda chat_id, image_hash: False)
-    monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: False)
     monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: True)
     monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status", lambda *args, **kwargs: marked.append((args, kwargs)))
     monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", lambda client, image_bytes: {
@@ -516,6 +521,7 @@ def test_android_unreliable_vpn_check_does_not_warn_without_direct_evidence(monk
             sent_messages.append((chat_id, text))
 
     app = Flask(__name__)
+    monkeypatch.setattr(telegram_bot, "TRUSTED_PROXY_ENABLED", True)
     monkeypatch.setattr(telegram_bot, "_last_android_vpn_warning_at", None)
     monkeypatch.setattr(telegram_bot, "_remote_ip_country_code", lambda remote_ip: None)
 
@@ -543,6 +549,7 @@ def test_android_direct_country_still_warns(monkeypatch):
             sent_messages.append((chat_id, text))
 
     app = Flask(__name__)
+    monkeypatch.setattr(telegram_bot, "TRUSTED_PROXY_ENABLED", True)
     monkeypatch.setattr(telegram_bot, "_last_android_vpn_warning_at", None)
     monkeypatch.setattr(telegram_bot, "_remote_ip_country_code", lambda remote_ip: "CN")
 
@@ -597,6 +604,7 @@ def test_ios_vpn_required_warning(monkeypatch):
             sent_messages.append((chat_id, text))
 
     app = Flask(__name__)
+    monkeypatch.setattr(telegram_bot, "TRUSTED_PROXY_ENABLED", True)
     monkeypatch.setattr(telegram_bot, "_last_ios_vpn_warning_at", None)
     monkeypatch.setattr(telegram_bot, "_remote_ip_country_code", lambda remote_ip: "CN")
 
@@ -623,6 +631,7 @@ def test_ios_vpn_required_no_warning_for_non_off_country(monkeypatch):
             sent_messages.append((chat_id, text))
 
     app = Flask(__name__)
+    monkeypatch.setattr(telegram_bot, "TRUSTED_PROXY_ENABLED", True)
     monkeypatch.setattr(telegram_bot, "_last_ios_vpn_warning_at", None)
     monkeypatch.setattr(telegram_bot, "_remote_ip_country_code", lambda remote_ip: "JP")
 
@@ -662,23 +671,35 @@ def test_format_daily_totals_empty(monkeypatch):
     summary = format_today_summary(12345)
     assert "No meals logged yet" in summary
 
-def test_update_meal_invalid_index(monkeypatch):
-    from telegram_bot import update_meal_by_index
-    
-    # User only has 2 recent meals
-    def mock_get_recent_meals(chat_id, days):
-        return [{"id": 1}, {"id": 2}]
-        
-    monkeypatch.setattr(telegram_bot, "get_recent_meals", mock_get_recent_meals)
-    
-    # Try to access index 5 (which doesn't exist)
-    result = update_meal_by_index(12345, 5, {"is_food": True})
-    
-    # Should gracefully return False instead of crashing
-    assert result is False
-    
-    # Also test negative index
-    assert update_meal_by_index(12345, -1, {"is_food": True}) is False
+def test_handle_text_message_correction_invalid_index(monkeypatch, tmp_path):
+    sent = []
+
+    class FakeBot:
+        def send_message(self, chat_id, text, parse_mode="HTML", reply_markup=None):
+            sent.append(text)
+
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            return SimpleNamespace(text=json.dumps({
+                "intent": "correction",
+                "meal_index": 5,
+                "analysis": {"is_food": True, "total_calories": 100},
+            }))
+
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot, "get_recent_meals", lambda chat_id, days: [
+        {"id": 1, "analysis": {"is_food": True}},
+        {"id": 2, "analysis": {"is_food": True}},
+    ])
+    monkeypatch.setattr(
+        telegram_bot.database,
+        "update_meal_analysis",
+        lambda *args: pytest.fail("out-of-range index must not update anything"),
+    )
+
+    telegram_bot.handle_text_message(SimpleNamespace(models=FakeModels()), FakeBot(), 12345, "fix meal 6")
+
+    assert any("Invalid meal index" in message for message in sent)
 
 
 def test_format_queue_status_lists_pending_and_failed(monkeypatch, tmp_path):
@@ -744,7 +765,6 @@ def test_retry_all_failed_uploads_logs_food_and_removes_not_food(monkeypatch, tm
     monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", lambda client, image_bytes: analyses.pop(0))
     monkeypatch.setattr(telegram_bot, "save_meal", lambda *args: saved.append(args) or len(saved))
     monkeypatch.setattr(telegram_bot.database, "meal_image_hash_exists", lambda chat_id, image_hash: False)
-    monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: False)
     monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: True)
     monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status", lambda *args, **kwargs: None)
 
@@ -986,10 +1006,483 @@ def test_handle_text_message_correction_updates_meal(monkeypatch):
         models = FakeModels()
 
     monkeypatch.setattr(telegram_bot, "get_recent_meals", lambda chat_id, days: [meal])
-    monkeypatch.setattr(telegram_bot, "update_meal_by_index", lambda chat_id, index, analysis: updates.append((index, analysis)) or True)
+    monkeypatch.setattr(
+        telegram_bot.database,
+        "update_meal_analysis",
+        lambda meal_id, chat_id, analysis: updates.append((meal_id, chat_id, analysis)),
+    )
 
     telegram_bot.handle_text_message(FakeClient(), FakeBot(), 12345, "make it 650 kcal")
 
-    assert updates[0][0] == 0
-    assert updates[0][1]["total_calories"] == 650
+    # Updated by the DB id from the snapshot, not by re-queried index
+    assert updates[0][0] == 1
+    assert updates[0][1] == 12345
+    assert updates[0][2]["total_calories"] == 650
     assert any("Corrected meal" in message for message in sent)
+
+
+# --- Fixes: clocks, redaction, confirm flows, proxy trust ---
+
+class _RecordingBot:
+    def __init__(self):
+        self.sent = []
+        self.answered = []
+
+    def send_message(self, chat_id, text, parse_mode="HTML", reply_markup=None):
+        self.sent.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
+        return {"message_id": len(self.sent)}
+
+    def answer_callback_query(self, callback_query_id, text=""):
+        self.answered.append((callback_query_id, text))
+
+
+def _delete_intent_client(indices):
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            return SimpleNamespace(text=json.dumps({
+                "intent": "delete",
+                "meal_indices": indices,
+                "reason": "test",
+            }))
+
+    return SimpleNamespace(models=FakeModels())
+
+
+def test_save_meal_stamps_user_local_date_and_server_timestamp(monkeypatch):
+    user_now = datetime(2026, 1, 2, 23, 30, 0)
+    server_now = datetime(2026, 1, 2, 15, 30, 0)
+
+    class FakeDateTime:
+        @staticmethod
+        def now(tz=None):
+            return server_now
+
+    saved = {}
+
+    def fake_db_save(chat_id, date_str, time_str, timestamp_str, source, image_hash, file_id, analysis):
+        saved.update(date=date_str, time=time_str, timestamp=timestamp_str)
+        return 7
+
+    monkeypatch.setattr(telegram_bot.database, "user_local_now", lambda *args, **kwargs: user_now)
+    monkeypatch.setattr(telegram_bot, "datetime", FakeDateTime)
+    monkeypatch.setattr(telegram_bot.database, "save_meal", fake_db_save)
+
+    meal_id = telegram_bot.save_meal(12345, {"is_food": True}, "telegram")
+
+    assert meal_id == 7
+    assert saved["date"] == "2026-01-02"
+    assert saved["time"] == "11:30 PM"
+    assert saved["timestamp"] == server_now.isoformat()
+
+
+def test_format_history_window_is_inclusive_n_days(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        telegram_bot.database, "user_local_now",
+        lambda *args, **kwargs: datetime(2026, 7, 1, 12, 0, 0),
+    )
+    monkeypatch.setattr(
+        telegram_bot.database, "get_meals",
+        lambda chat_id, start, end: calls.append((start, end)) or [],
+    )
+
+    result = telegram_bot.format_history(12345, days=7)
+
+    # 6 days back plus today = exactly 7 days
+    assert calls == [("2026-06-25", "2026-07-01")]
+    assert "No meals logged" in result
+
+
+def test_call_wraps_http_error_without_token(monkeypatch):
+    bot = telegram_bot.TelegramBot("123:SECRETTOKEN")
+
+    def fake_post(url, json=None, timeout=None):
+        raise requests.HTTPError(
+            f"404 Client Error for url: {url}",
+            response=SimpleNamespace(status_code=404),
+        )
+
+    monkeypatch.setattr(bot.session, "post", fake_post)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        bot._call("getUpdates")
+
+    assert "SECRETTOKEN" not in str(excinfo.value)
+    assert "Telegram 404 calling getUpdates" in str(excinfo.value)
+
+
+def test_call_wraps_connection_error_without_token(monkeypatch):
+    bot = telegram_bot.TelegramBot("123:SECRETTOKEN")
+
+    def fake_post(url, json=None, timeout=None):
+        raise requests.ConnectionError(f"Max retries exceeded with url: {url}")
+
+    monkeypatch.setattr(bot.session, "post", fake_post)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        bot._call("sendMessage")
+
+    assert "SECRETTOKEN" not in str(excinfo.value)
+    assert "Telegram network-error calling sendMessage" in str(excinfo.value)
+
+
+def test_get_file_wraps_connection_error_without_token(monkeypatch):
+    bot = telegram_bot.TelegramBot("123:SECRETTOKEN")
+    monkeypatch.setattr(bot, "_call", lambda method, **kwargs: {"file_path": "photos/file_1.jpg"})
+
+    def fake_get(url, timeout=None):
+        raise requests.exceptions.ConnectTimeout(f"timed out connecting to {url}")
+
+    monkeypatch.setattr(bot.session, "get", fake_get)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        bot.get_file("file-id")
+
+    assert "SECRETTOKEN" not in str(excinfo.value)
+    assert "Telegram network-error calling getFile" in str(excinfo.value)
+
+
+def test_get_updates_logs_are_token_free(monkeypatch, caplog):
+    bot = telegram_bot.TelegramBot("123:SECRETTOKEN")
+
+    def fake_post(url, json=None, timeout=None):
+        raise requests.HTTPError(
+            f"502 Server Error for url: {url}",
+            response=SimpleNamespace(status_code=502),
+        )
+
+    monkeypatch.setattr(bot.session, "post", fake_post)
+    monkeypatch.setattr(telegram_bot.time, "sleep", lambda seconds: None)
+
+    with caplog.at_level(logging.ERROR, logger="calorie_bot"):
+        result = bot.get_updates(timeout=0)
+
+    assert result == []
+    assert caplog.text
+    assert "SECRETTOKEN" not in caplog.text
+
+
+def test_send_message_connection_error_logs_are_token_free(monkeypatch, caplog):
+    # ConnectionError messages embed the token URL; _call must sanitize them
+    # before they reach any generic logger.
+    bot = telegram_bot.TelegramBot("123:SECRETTOKEN")
+
+    def fake_post(url, json=None, timeout=None):
+        raise requests.ConnectionError(f"connection refused for {url}")
+
+    monkeypatch.setattr(bot.session, "post", fake_post)
+
+    with caplog.at_level(logging.ERROR, logger="calorie_bot"):
+        result = bot.send_message(1, "hello")
+
+    assert result is None
+    assert caplog.text
+    assert "SECRETTOKEN" not in caplog.text
+    assert "network-error" in caplog.text
+
+
+def test_request_remote_ip_honors_xff_only_with_trusted_proxy(monkeypatch):
+    from flask import Flask
+
+    app = Flask(__name__)
+    with app.test_request_context(
+        "/ping",
+        method="POST",
+        headers={"X-Forwarded-For": "203.0.113.10"},
+        environ_base={"REMOTE_ADDR": "10.0.0.2"},
+    ):
+        monkeypatch.setattr(telegram_bot, "TRUSTED_PROXY_ENABLED", False)
+        assert telegram_bot._request_remote_ip() == "10.0.0.2"
+
+        monkeypatch.setattr(telegram_bot, "TRUSTED_PROXY_ENABLED", True)
+        assert telegram_bot._request_remote_ip() == "203.0.113.10"
+
+
+def test_quota_keep_callback_sends_retry_instructions(monkeypatch):
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    bot = _RecordingBot()
+
+    handled = telegram_bot.handle_callback_query(object(), bot, {
+        "id": "cb-keep",
+        "data": "quota_keep:deadbeefcafe",
+        "message": {"chat": {"id": 12345}},
+    })
+
+    assert handled is True
+    assert bot.answered
+    assert any("/retry_failed deadbeefcafe" in m["text"] for m in bot.sent)
+    assert any("/clear_failed deadbeefcafe confirm" in m["text"] for m in bot.sent)
+
+
+def test_callback_query_from_unauthorized_chat_is_rejected(monkeypatch):
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    telegram_bot._pending_nl_deletes.clear()
+    telegram_bot._pending_nl_deletes[999] = {"ids": [1], "labels": ["x"], "at": datetime.now()}
+    monkeypatch.setattr(
+        telegram_bot.database, "delete_meal",
+        lambda *args: pytest.fail("unauthorized callback must not delete"),
+    )
+    bot = _RecordingBot()
+
+    handled = telegram_bot.handle_callback_query(object(), bot, {
+        "id": "cb-bad",
+        "data": "nl_delete_confirm",
+        "message": {"chat": {"id": 999}},
+    })
+
+    assert handled is True
+    assert bot.answered == [("cb-bad", "Not authorized.")]
+    assert bot.sent == []
+    telegram_bot._pending_nl_deletes.clear()
+
+
+def test_nl_delete_intent_stashes_pending_without_deleting(monkeypatch, tmp_path):
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot, "get_recent_meals", lambda chat_id, days: [
+        {
+            "id": 11,
+            "date": "2026-07-04",
+            "time": "12:00 PM",
+            "analysis": {"is_food": True, "meal_description": "Rice", "total_calories": 300},
+        }
+    ])
+    monkeypatch.setattr(
+        telegram_bot.database, "delete_meal",
+        lambda *args: pytest.fail("delete must wait for confirmation"),
+    )
+    telegram_bot._pending_nl_deletes.clear()
+    bot = _RecordingBot()
+
+    telegram_bot.handle_text_message(_delete_intent_client([0]), bot, 777, "delete the rice")
+
+    pending = telegram_bot._pending_nl_deletes[777]
+    assert pending["ids"] == [11]
+    token = pending["token"]
+    assert token
+    markup = bot.sent[-1]["reply_markup"]
+    callback_datas = [
+        button["callback_data"]
+        for row in markup["inline_keyboard"]
+        for button in row
+    ]
+    # Buttons are bound to this confirmation message via the nonce.
+    assert f"nl_delete_confirm:{token}" in callback_datas
+    assert f"nl_delete_cancel:{token}" in callback_datas
+    telegram_bot._pending_nl_deletes.clear()
+
+
+def test_nl_delete_cancel_callback_deletes_nothing(monkeypatch):
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(
+        telegram_bot.database, "delete_meal",
+        lambda *args: pytest.fail("cancel must not delete"),
+    )
+    telegram_bot._pending_nl_deletes.clear()
+    telegram_bot._pending_nl_deletes[12345] = {
+        "ids": [11], "labels": ["Rice"], "at": datetime.now(), "token": "cafe1234",
+    }
+    bot = _RecordingBot()
+
+    handled = telegram_bot.handle_callback_query(object(), bot, {
+        "id": "cb-cancel",
+        "data": "nl_delete_cancel:cafe1234",
+        "message": {"chat": {"id": 12345}},
+    })
+
+    assert handled is True
+    assert 12345 not in telegram_bot._pending_nl_deletes
+    assert any("nothing was deleted" in m["text"] for m in bot.sent)
+
+
+def test_nl_delete_confirm_expired_pending_deletes_nothing(monkeypatch):
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(
+        telegram_bot.database, "delete_meal",
+        lambda *args: pytest.fail("expired confirmation must not delete"),
+    )
+    telegram_bot._pending_nl_deletes.clear()
+    telegram_bot._pending_nl_deletes[12345] = {
+        "ids": [11],
+        "labels": ["Rice"],
+        "at": datetime.now() - timedelta(seconds=telegram_bot.NL_DELETE_CONFIRM_TTL_SECONDS + 60),
+        "token": "cafe1234",
+    }
+    bot = _RecordingBot()
+
+    handled = telegram_bot.handle_callback_query(object(), bot, {
+        "id": "cb-expired",
+        "data": "nl_delete_confirm:cafe1234",
+        "message": {"chat": {"id": 12345}},
+    })
+
+    assert handled is True
+    assert 12345 not in telegram_bot._pending_nl_deletes
+    assert any("expired" in m["text"] for m in bot.sent)
+
+
+def test_nl_delete_stale_confirm_token_is_noop_then_current_token_deletes(monkeypatch, tmp_path):
+    """A Delete button from an OLDER confirmation must never execute the newest
+    pending set; the current message's button still deletes the right ids."""
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    meals = [
+        {
+            "id": 11,
+            "date": "2026-07-04",
+            "time": "08:00 AM",
+            "analysis": {"is_food": True, "meal_description": "Toast", "total_calories": 200},
+        },
+        {
+            "id": 22,
+            "date": "2026-07-04",
+            "time": "12:00 PM",
+            "analysis": {"is_food": True, "meal_description": "Rice", "total_calories": 300},
+        },
+    ]
+    monkeypatch.setattr(telegram_bot, "get_recent_meals", lambda chat_id, days: meals)
+    deleted = []
+    monkeypatch.setattr(
+        telegram_bot.database, "delete_meal",
+        lambda meal_id, chat_id: deleted.append((meal_id, chat_id)),
+    )
+    telegram_bot._pending_nl_deletes.clear()
+    bot = _RecordingBot()
+
+    # First confirmation message: just the toast.
+    telegram_bot.handle_text_message(_delete_intent_client([0]), bot, 12345, "delete the toast")
+    first_markup = bot.sent[-1]["reply_markup"]
+    first_confirm = first_markup["inline_keyboard"][0][0]["callback_data"]
+    first_token = telegram_bot._pending_nl_deletes[12345]["token"]
+    assert first_confirm == f"nl_delete_confirm:{first_token}"
+
+    # Second confirmation message supersedes it: everything from today.
+    telegram_bot.handle_text_message(_delete_intent_client([0, 1]), bot, 12345, "delete everything today")
+    second_token = telegram_bot._pending_nl_deletes[12345]["token"]
+    assert second_token != first_token
+    assert telegram_bot._pending_nl_deletes[12345]["ids"] == [11, 22]
+
+    # Firing the FIRST (stale) message's Delete button deletes nothing and
+    # leaves the newer pending entry intact.
+    handled = telegram_bot.handle_callback_query(object(), bot, {
+        "id": "cb-stale",
+        "data": first_confirm,
+        "message": {"chat": {"id": 12345}},
+    })
+
+    assert handled is True
+    assert deleted == []
+    assert telegram_bot._pending_nl_deletes[12345]["token"] == second_token
+    assert telegram_bot._pending_nl_deletes[12345]["ids"] == [11, 22]
+    assert any("superseded" in text for _cb, text in bot.answered)
+    assert any("superseded" in m["text"] for m in bot.sent)
+
+    # Firing the CURRENT message's Delete button deletes exactly the right ids.
+    handled = telegram_bot.handle_callback_query(object(), bot, {
+        "id": "cb-current",
+        "data": f"nl_delete_confirm:{second_token}",
+        "message": {"chat": {"id": 12345}},
+    })
+
+    assert handled is True
+    assert deleted == [(11, 12345), (22, 12345)]
+    assert 12345 not in telegram_bot._pending_nl_deletes
+    telegram_bot._pending_nl_deletes.clear()
+
+
+def test_nl_delete_stale_cancel_token_leaves_pending_intact(monkeypatch):
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(
+        telegram_bot.database, "delete_meal",
+        lambda *args: pytest.fail("cancel must not delete"),
+    )
+    telegram_bot._pending_nl_deletes.clear()
+    telegram_bot._pending_nl_deletes[12345] = {
+        "ids": [11], "labels": ["Rice"], "at": datetime.now(), "token": "bbbbbbbb",
+    }
+    bot = _RecordingBot()
+
+    handled = telegram_bot.handle_callback_query(object(), bot, {
+        "id": "cb-stale-cancel",
+        "data": "nl_delete_cancel:aaaaaaaa",
+        "message": {"chat": {"id": 12345}},
+    })
+
+    assert handled is True
+    # The stale Cancel button must not discard the newer pending request.
+    assert telegram_bot._pending_nl_deletes[12345]["ids"] == [11]
+    assert telegram_bot._pending_nl_deletes[12345]["token"] == "bbbbbbbb"
+    assert any("superseded" in text for _cb, text in bot.answered)
+    telegram_bot._pending_nl_deletes.clear()
+
+
+def test_clear_failed_uploads_discards_failed_hash_rows(monkeypatch, tmp_path):
+    failed_dir = tmp_path / "failed"
+    failed_dir.mkdir()
+    (failed_dir / "20260701T010101_deadbeefcafe.jpg").write_bytes(b"img")
+    discarded = []
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", failed_dir)
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(
+        telegram_bot.database, "discard_failed_photo_hashes_by_prefix",
+        lambda chat_id, prefix: discarded.append((chat_id, prefix)) or 1,
+    )
+
+    result = telegram_bot.clear_failed_uploads("latest", confirmed=True)
+
+    assert "Removed 1" in result
+    assert discarded == [(12345, "deadbeefcafe")]
+
+
+def test_clear_failed_uploads_tombstones_ingestion_row(monkeypatch, tmp_path):
+    """/clear_failed keeps the ingestion row as a 'deleted' tombstone so the
+    nightly /reconcile keeps suppressing the photo instead of re-requesting it."""
+    import sqlite3
+
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "meals.db")
+    database.init_db()
+    failed_dir = tmp_path / "failed"
+    failed_dir.mkdir()
+    img_hash = "deadbeefcafe" + "0" * 20
+    (failed_dir / f"20260701T010101_{img_hash[:12]}.jpg").write_bytes(b"img")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", failed_dir)
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    assert database.reserve_photo_hash(12345, img_hash, source="telegram") is True
+    database.mark_photo_hash_status(12345, img_hash, "failed", source="telegram")
+
+    result = telegram_bot.clear_failed_uploads("latest", confirmed=True)
+
+    assert "Removed 1" in result
+    with sqlite3.connect(database.DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT status, meal_id FROM photo_ingestions WHERE chat_id = ? AND image_hash = ?",
+            (12345, img_hash),
+        ).fetchall()
+    # Row remains as a tombstone, not deleted.
+    assert rows == [("deleted", None)]
+    # And it still suppresses /reconcile from re-requesting the photo.
+    reserved = set(database.get_reserved_photo_hashes(12345))
+    assert img_hash in reserved
+    assert telegram_bot._reconcile_missing_hashes({img_hash}, set(), reserved) == []
+
+
+def test_sweep_stranded_pending_uploads_moves_files_and_notifies(monkeypatch, tmp_path):
+    pending_dir = tmp_path / "pending"
+    failed_dir = tmp_path / "failed"
+    pending_dir.mkdir()
+    (pending_dir / "20260701T010101_deadbeefcafe.jpg").write_bytes(b"stranded image")
+    statuses = []
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", pending_dir)
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", failed_dir)
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(
+        telegram_bot.database, "mark_photo_hash_status",
+        lambda *args, **kwargs: statuses.append((args, kwargs)),
+    )
+    bot = _RecordingBot()
+
+    telegram_bot._sweep_stranded_pending_uploads(bot)
+
+    assert list(pending_dir.iterdir()) == []
+    assert len(list(failed_dir.iterdir())) == 1
+    assert statuses and statuses[0][0][2] == "failed"
+    assert any("/retry_failed" in m["text"] for m in bot.sent)
