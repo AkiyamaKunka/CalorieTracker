@@ -3,6 +3,32 @@
 # Configuration
 CAMERA_DIR="/storage/emulated/0/DCIM/Camera/"
 LOG_FILE="$HOME/watcher.log"
+PID_FILE="$HOME/.calorie_watcher.pid"
+LOCK_DIR="$HOME/.calorie_watcher.lock"
+
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  EXISTING_PID="$(cat "$PID_FILE" 2>/dev/null || echo unknown)"
+  if [ "$EXISTING_PID" != "unknown" ] && ! kill -0 "$EXISTING_PID" 2>/dev/null; then
+    rm -rf "$LOCK_DIR"
+    mkdir "$LOCK_DIR" 2>/dev/null || exit 0
+  else
+    echo "[$(date)] CalorieTracker watcher is already running with PID $EXISTING_PID." | tee -a "$LOG_FILE"
+    exit 0
+  fi
+fi
+
+if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null && [ "$(cat "$PID_FILE")" != "$$" ]; then
+  echo "[$(date)] CalorieTracker watcher is already running with PID $(cat "$PID_FILE")." | tee -a "$LOG_FILE"
+  rmdir "$LOCK_DIR" 2>/dev/null || true
+  exit 0
+fi
+
+echo $$ > "$PID_FILE"
+cleanup() {
+  rm -f "$PID_FILE"
+  rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
 
 # Acquire a wake-lock so Android doesn't kill this process
 termux-wake-lock
@@ -39,23 +65,17 @@ echo "[$(date)] Started polling loop for $CAMERA_DIR" | tee -a $LOG_FILE
 HISTORY_FILE="$HOME/uploaded_files.log"
 touch "$HISTORY_FILE"
 
-# Seed the history file with the absolute newest file on startup so it doesn't upload a backlog
-INITIAL_FILE=$(ls -t "$CAMERA_DIR" 2>/dev/null | grep -iE '\.(jpg|jpeg|png|heic)$' | head -n 1)
-if [ -n "$INITIAL_FILE" ]; then
-  echo "$CAMERA_DIR/$INITIAL_FILE" >> "$HISTORY_FILE"
-fi
+# Seed the history with every photo already present at startup so restarts do not upload a backlog.
+# The daily reconciliation job still catches today's missed photos at 11 PM.
+find "$CAMERA_DIR" -maxdepth 1 -type f \
+  \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.heic' \) \
+  2>/dev/null >> "$HISTORY_FILE"
+sort -u "$HISTORY_FILE" -o "$HISTORY_FILE" 2>/dev/null || true
 
 while true; do
-  # Find all media files in the camera directory, sorted by oldest first
-  # This ensures that if you take a burst of photos, they are all processed in chronological order
-  for NEWEST_BASENAME in $(ls -tr "$CAMERA_DIR" 2>/dev/null | grep -iE '\.(jpg|jpeg|png|heic)$'); do
-    # Ensure there is a trailing slash if missing
-    if [[ "$CAMERA_DIR" != */ ]]; then
-      FILE_PATH="$CAMERA_DIR/$NEWEST_BASENAME"
-    else
-      FILE_PATH="$CAMERA_DIR$NEWEST_BASENAME"
-    fi
-    
+  find "$CAMERA_DIR" -maxdepth 1 -type f \
+    \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.heic' \) \
+    2>/dev/null | sort | while IFS= read -r FILE_PATH; do
     # Check if we have already uploaded this exact file
     if ! grep -Fxq "$FILE_PATH" "$HISTORY_FILE"; then
       echo "[$(date)] New photo detected via polling: $FILE_PATH" | tee -a $LOG_FILE

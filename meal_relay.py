@@ -12,6 +12,8 @@ Usage:
 """
 
 import json
+import hmac
+import os
 import sys
 import logging
 from datetime import datetime, date
@@ -19,7 +21,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 import database
-from config import TELEGRAM_CHAT_ID
+from config import ANDROID_API_KEY, TELEGRAM_CHAT_ID
 
 # ─── Logging ──────────────────────────────────────────────────
 logging.basicConfig(
@@ -30,13 +32,33 @@ logging.basicConfig(
 log = logging.getLogger("meal_relay")
 
 PORT = 8765
+HOST = os.environ.get("MEAL_RELAY_HOST", "127.0.0.1")
+RELAY_API_KEY = os.environ.get("MEAL_RELAY_API_KEY") or ANDROID_API_KEY
 
 
 class MealHandler(BaseHTTPRequestHandler):
     """Handle incoming meal data from Android."""
 
+    def _authorized(self) -> bool:
+        if not RELAY_API_KEY:
+            return False
+        provided = self.headers.get("X-API-Key", "")
+        return hmac.compare_digest(str(provided), str(RELAY_API_KEY))
+
     def do_POST(self, *args, **kwargs):
         try:
+            if not self._authorized():
+                self.send_response(401)
+                self.end_headers()
+                self.wfile.write(b'{"error": "Unauthorized"}')
+                return
+
+            if not TELEGRAM_CHAT_ID:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(b'{"error": "TELEGRAM_CHAT_ID is not configured"}')
+                return
+
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length)
             data = json.loads(body)
@@ -58,7 +80,15 @@ class MealHandler(BaseHTTPRequestHandler):
             timestamp_str = datetime.now().isoformat()
             image_hash = data.get("image_hash", "")
 
-            database.save_meal(chat_id, date_str, meal_time, timestamp_str, source, image_hash, filename, analysis)
+            if image_hash and not database.reserve_photo_hash(chat_id, image_hash, source, timestamp_str):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"status": "duplicate"}')
+                return
+
+            meal_id = database.save_meal(chat_id, date_str, meal_time, timestamp_str, source, image_hash, filename, analysis)
+            if image_hash:
+                database.mark_photo_hash_status(chat_id, image_hash, "saved", meal_id, source=source)
 
             desc = analysis.get("meal_description", "?")
             cals = analysis.get("total_calories", "?")
@@ -91,9 +121,9 @@ def main():
         idx = sys.argv.index("--port")
         port = int(sys.argv[idx + 1])
 
-    server = HTTPServer(("0.0.0.0", port), MealHandler)
+    server = HTTPServer((HOST, port), MealHandler)
     log.info(f"🔗 Meal Relay Server running on port {port}")
-    log.info(f"   Android can POST meals to: http://<mac-ip>:{port}")
+    log.info(f"   Listening on: http://{HOST}:{port}")
     log.info(f"   Press Ctrl+C to stop.\n")
 
     try:

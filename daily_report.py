@@ -12,9 +12,9 @@ Usage:
 
 import json
 import os
-import shutil
 import sys
 from datetime import date, datetime, timezone, timedelta
+from html import escape
 from pathlib import Path
 
 import requests
@@ -25,9 +25,72 @@ import database
 from config import PUSHPLUS_TOKEN, PUSHPLUS_TOPIC, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
 # ─── Config ────────────────────────────────────────────────────────
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN)
-CHAT_ID = TELEGRAM_CHAT_ID
+def _clean_config_value(value):
+    """Normalize values loaded from env files or shell exports."""
+    if value is None:
+        return ""
+    return str(value).strip().strip('"').strip("'")
+
+
+BOT_TOKEN = _clean_config_value(os.environ.get("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN))
+CHAT_ID = _clean_config_value(os.environ.get("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID))
 REPORTS_DIR = Path.home() / "CalorieTracker" / "reports"
+SERVICE_HEALTH_PATH = Path.home() / "CalorieTracker" / "logs" / "service_health.json"
+
+
+def _health_timestamp() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _load_service_health():
+    try:
+        return json.loads(SERVICE_HEALTH_PATH.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    except OSError as e:
+        print(f"[WARN] Could not read service health file: {e}")
+        return {}
+
+
+def _save_service_health(data):
+    try:
+        SERVICE_HEALTH_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = SERVICE_HEALTH_PATH.with_name(f"{SERVICE_HEALTH_PATH.name}.{os.getpid()}.tmp")
+        tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True))
+        tmp_path.replace(SERVICE_HEALTH_PATH)
+    except OSError as e:
+        print(f"[WARN] Could not write service health file: {e}")
+
+
+def _record_daily_report_health(ok: bool, target_date: str, source: str = "cron", report_path: str = "", error_summary: str = ""):
+    data = _load_service_health()
+    report = data.setdefault("daily_report", {})
+    now = _health_timestamp()
+    report["last_attempt_at"] = now
+    report["last_target_date"] = target_date
+    report["last_source"] = source
+    report["last_ok"] = ok
+    if report_path:
+        report["last_report_path"] = report_path
+
+    if ok:
+        report["last_success_at"] = now
+        report["consecutive_failures"] = 0
+        report.pop("last_error_summary", None)
+    else:
+        report["last_error_at"] = now
+        report["last_error_summary"] = str(error_summary or "")[:500]
+        report["consecutive_failures"] = int(report.get("consecutive_failures", 0)) + 1
+
+    events = report.setdefault("events", [])
+    events.append({
+        "at": now,
+        "ok": ok,
+        "target_date": target_date,
+        "source": source,
+    })
+    report["events"] = events[-50:]
+    _save_service_health(data)
 
 
 def send_wechat(text, target_date):
@@ -90,12 +153,12 @@ def generate_report(target_date: str) -> str:
 
     for i, meal in enumerate(food_meals, 1):
         a = meal["analysis"]
-        desc = a.get("meal_description", "Unknown")
+        desc = escape(str(a.get("meal_description", "Unknown")))
         cal = a.get("total_calories") or 0
         p = a.get("total_protein_g") or 0
         c = a.get("total_carbs_g") or 0
         f = a.get("total_fat_g") or 0
-        time_str = meal.get("time", "??:??")
+        time_str = escape(str(meal.get("time", "??:??")))
         corrected = " ✏️" if meal.get("corrected") else ""
 
         grand_cal += cal
@@ -107,7 +170,7 @@ def generate_report(target_date: str) -> str:
 
         # Per-item breakdown
         for item in a.get("food_items", []):
-            item_name = item.get("name", "?")
+            item_name = escape(str(item.get("name", "?")))
             item_cal = item.get("estimated_calories") or 0
             item_p = item.get("protein_g") or 0
             item_c = item.get("carbs_g") or 0
@@ -151,44 +214,100 @@ def save_report_file(target_date: str, report: str):
     return filepath
 
 
-def send_telegram(text):
-    """Send a message to Telegram."""
-    try:
-        resp = requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={
-                "chat_id": CHAT_ID,
-                "text": text,
-                "parse_mode": "HTML",
-            },
-            timeout=10,
-        )
-        result = resp.json()
-        if result.get("ok"):
-            print(f"✅ Report sent to Telegram")
+def _telegram_chunks(text, limit=3900):
+    """Split a Telegram message without breaking normal report lines."""
+    chunks = []
+    current = ""
+
+    for line in text.splitlines(keepends=True):
+        if len(line) > limit:
+            if current:
+                chunks.append(current.rstrip())
+                current = ""
+            for start in range(0, len(line), limit):
+                chunks.append(line[start:start + limit].rstrip())
+            continue
+
+        if current and len(current) + len(line) > limit:
+            chunks.append(current.rstrip())
+            current = line
         else:
-            # Retry without markdown
-            print(f"⚠️ Markdown failed, retrying plain text...")
-            requests.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                json={"chat_id": CHAT_ID, "text": text},
-                timeout=10,
-            )
-            print(f"✅ Report sent (plain text)")
+            current += line
+
+    if current:
+        chunks.append(current.rstrip())
+
+    return chunks or [""]
+
+
+def _post_telegram_message(text, parse_mode=None):
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": text,
+    }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+
+    resp = requests.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+        json=payload,
+        timeout=15,
+    )
+
+    try:
+        result = resp.json()
+    except ValueError:
+        result = {"ok": False, "description": resp.text[:300]}
+
+    if result.get("ok"):
+        return True
+
+    print(f"[ERROR] Telegram API error ({resp.status_code}): {result}")
+    return False
+
+
+def send_telegram(text):
+    """Send a report to Telegram and return whether every chunk succeeded."""
+    if not BOT_TOKEN:
+        print("[ERROR] TELEGRAM_BOT_TOKEN is not set.")
+        return False
+    if not CHAT_ID:
+        print("[ERROR] TELEGRAM_CHAT_ID is not set.")
+        return False
+
+    all_sent = True
+    try:
+        for chunk in _telegram_chunks(text):
+            if _post_telegram_message(chunk, parse_mode="HTML"):
+                continue
+
+            print("⚠️ HTML send failed, retrying plain text...")
+            if not _post_telegram_message(chunk):
+                all_sent = False
+
+        if all_sent:
+            print("✅ Report sent to Telegram")
+        else:
+            print("❌ One or more Telegram report chunks failed.")
     except Exception as e:
         print(f"❌ Failed to send: {e}")
+        return False
+
+    return all_sent
 
 
 
 def get_local_time(tz_str: str) -> datetime:
     """Convert current UTC time to user's local time based on +0800 string."""
     try:
+        if len(tz_str or "") != 5 or tz_str[0] not in "+-":
+            raise ValueError("Timezone must look like +0800")
         sign = 1 if tz_str.startswith('+') else -1
         hours = int(tz_str[1:3])
         minutes = int(tz_str[3:5])
         offset = timedelta(hours=hours, minutes=minutes) * sign
         return datetime.now(timezone.utc) + offset
-    except:
+    except (TypeError, ValueError):
         return datetime.now() # Fallback to server local time
 
 def main():
@@ -212,6 +331,10 @@ def main():
 
     # Generate report
     report = generate_report(target_date)
+    if not report:
+        print("[ERROR] Report generation returned empty content. Aborting send.")
+        _record_daily_report_health(False, target_date, error_summary="Report generation returned empty content.")
+        return 1
 
     # Save to file
     filepath = save_report_file(target_date, report)
@@ -220,13 +343,20 @@ def main():
     print("Sending reports...")
     
     # 1. Send to Telegram
-    send_telegram(report)
+    telegram_ok = send_telegram(report)
+    _record_daily_report_health(
+        telegram_ok,
+        target_date,
+        report_path=str(filepath),
+        error_summary="" if telegram_ok else "Telegram send failed.",
+    )
     
     # 2. Send to WeChat via PushPlus
     send_wechat(report, target_date)
     
     print("Daily reporting process complete.")
+    return 0 if telegram_ok else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

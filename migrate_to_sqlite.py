@@ -1,10 +1,14 @@
 import json
 from pathlib import Path
+from config import TELEGRAM_CHAT_ID
 from database import save_meal, init_db
 
-ALLOWED_CHAT_ID = 8675416366
+ALLOWED_CHAT_ID = int(TELEGRAM_CHAT_ID) if TELEGRAM_CHAT_ID else 0
 
 def migrate():
+    if not ALLOWED_CHAT_ID:
+        raise RuntimeError("TELEGRAM_CHAT_ID must be set before running migration.")
+
     init_db()
     meals_file = Path.home() / "CalorieTracker" / "logs" / "telegram_meals.json"
     if not meals_file.exists():
