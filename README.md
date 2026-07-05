@@ -1,139 +1,315 @@
-# 📸 AI Calorie Tracker: The "Zero-Tap" Diet Assistant
+# CalorieTracker
 
-Welcome to the **AI Calorie Tracker**—a completely frictionless, entirely automated dietary tracking system that makes counting calories as easy as snapping a photo.
+<p align="center">
+  <strong>Private-first calorie tracking from food photos.</strong><br>
+  Android, iPhone, and Telegram send photos. Gemini estimates the meal. SQLite keeps the record. Telegram stays the control room.
+</p>
 
-No more manually searching databases. No more guessing portion sizes. No more clunky apps.
-
----
-
-## ✨ Key Features
-
-- **📱 True "Zero-Tap" iPhone/Android Sync**
-  Forget manual uploads. With our custom iOS Shortcut and Android background scripts, you simply take a picture of your food with your native Camera app. The system silently grabs the photo in the background, compresses it, and beams it to the server automatically over Wi-Fi or Cellular Data (Port 80).
-  
-- **🧠 Advanced Visual AI (Powered by Google Gemini 2.5 Flash)**
-  Our backend AI instantly analyzes the image, identifies the food items, estimates the portion sizes, and calculates the exact Macros (Protein, Carbs, Fats) and total Calories with stunning accuracy.
-  
-- **💬 Telegram Bot Interface**
-  Receive your calorie breakdowns directly in Telegram within seconds. Need to correct an entry? Just reply to the bot in natural language: *"Change the lunch to 400 calories"* or *"I didn't eat the rice,"* and the AI will recalculate and update the database instantly.
-  
-- **🌏 Cultural Dietary Profiling**
-  Unlike generic trackers that mislabel cultural foods, this tracker uses a customizable `dietary_profile.txt`. Tell it your cuisine preferences once (e.g., *"I'm Chinese, large meat rolls are Roulong"*), and the AI permanently biases its visual recognition to respect your specific cultural diet.
-
-- **⚡ Blazing Fast Asynchronous Backend**
-  Built on a highly optimized Flask and Python-Telegram-Bot architecture, the server handles Apple's heavy HEIC photos natively and processes AI requests completely asynchronously. The result? A system that never times out.
-
-- **📈 Daily Push Notifications**
-  Every night at 11:30 PM, the system generates a comprehensive daily report of your totals and pushes it to your designated chat (e.g., WeChat via PushPlus) to keep your coach or accountability partner updated automatically.
+<p align="center">
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.10%2B-111111?style=flat-square">
+  <img alt="Flask" src="https://img.shields.io/badge/Flask-upload%20API-f2f2f2?style=flat-square">
+  <img alt="Telegram" src="https://img.shields.io/badge/Telegram-Bot%20API-f2f2f2?style=flat-square">
+  <img alt="Gemini" src="https://img.shields.io/badge/Gemini-2.5%20Flash-ff6b3a?style=flat-square">
+  <img alt="SQLite" src="https://img.shields.io/badge/SQLite-local%20state-f2f2f2?style=flat-square">
+</p>
 
 ---
 
-## 🚀 Quick Start / Deployment Guide
+## Overview
 
-You can easily deploy this system to your own server (Google Cloud, AWS, DigitalOcean, or a home Linux server).
+CalorieTracker is a small automation system for personal food logging. It accepts food photos from mobile devices and Telegram, analyzes them with Google Gemini, saves the structured meal data in SQLite, and sends results plus daily reports back to Telegram.
 
-### 1. Prerequisites
-- **Python 3.10+** installed on your server.
-- A **Gemini API Key** from [Google AI Studio](https://aistudio.google.com/app/apikey) (Free).
-- A **Telegram Bot Token** from [@BotFather](https://t.me/BotFather).
-- A **PushPlus Token** (Optional, for WeChat daily reports).
+| Signal | What it means |
+| --- | --- |
+| Private by default | One allowed Telegram chat, local `.env`, local SQLite, ignored runtime data |
+| Mobile-first | Android Termux watcher, iOS Shortcut upload, direct Telegram photos |
+| Recoverable | Failed uploads are saved for retry instead of silently dropped |
+| Observable | `/status`, `/doctor`, `/gemini`, `/queue`, `/vpn`, `/report_status`, `/logs` |
+| Quota-aware | Gemini daily quota exhaustion pauses retries and asks the user what to do |
 
-### 2. Clone and Install
-SSH into your server and run the following commands:
+## Architecture
+
+```mermaid
+flowchart LR
+    Android["Android Termux<br>watcher + queue"] --> Upload["Flask upload API<br>/ping /reconcile /upload"]
+    IOS["iOS Shortcut<br>multipart upload"] --> Upload
+    User["Telegram user<br>photos + commands"] --> Bot["Telegram bot<br>long polling"]
+
+    Upload --> Guard["Photo hash<br>reservation guard"]
+    Bot --> Guard
+    Guard --> Gemini["Gemini 2.5 Flash<br>vision + correction parsing"]
+    Gemini --> DB["SQLite<br>meals + health state"]
+    Bot --> DB
+    DB --> Report["Daily report<br>local-time summary"]
+    Report --> User
+    Upload --> Failed["Failed upload store<br>retry or delete later"]
+    Failed --> Bot
+    Bot --> Ops["Operations commands<br>debug + recovery"]
+    Ops --> User
+
+    classDef base fill:#f2f2f2,stroke:#d9d9d9,color:#111111;
+    classDef accent fill:#fff1ea,stroke:#ff6b3a,color:#111111;
+    classDef state fill:#ffffff,stroke:#b7bdc7,color:#111111;
+    class Android,IOS,User base;
+    class Upload,Bot,Gemini accent;
+    class Guard,DB,Report,Failed,Ops state;
+```
+
+## Technical Framework
+
+| Layer | Technology | Responsibility |
+| --- | --- | --- |
+| Bot interface | Telegram Bot API, long polling | User commands, corrections, photo feedback, operational alerts |
+| Upload API | Flask | Authenticated phone uploads, heartbeat pings, Android reconciliation |
+| AI analysis | Google Gemini 2.5 Flash | Food detection, calorie and macro estimation, correction parsing |
+| Persistence | SQLite | Meals, hashes, correction state, Android heartbeat, photo ingestion guard |
+| Mobile clients | Android Termux, iOS Shortcuts | Camera automation, VPN evidence headers, offline queueing |
+| Scheduling | systemd or launchd | Always-on bot service and local-time daily reports |
+| Reliability | Failed-upload store, quota circuit breaker, `/doctor` checks | Recovery from quota, network, duplicate, and report failures |
+| Security | `.env`, `ANDROID_API_KEY`, private chat allowlist | Keep secrets local and restrict uploads/commands to the owner |
+
+## Core Features
+
+- Food photo analysis with Google Gemini.
+- Calories, protein, carbs, fat, meal source, photo hash, and correction state in SQLite.
+- Uploads from Telegram photos, Android Termux, and iOS Shortcuts.
+- Natural-language meal corrections and deletions in Telegram.
+- Daily Telegram reports, with optional PushPlus/WeChat forwarding.
+- Saved failed uploads with user-controlled retry or delete.
+- Runtime health written to `logs/service_health.json`.
+- Duplicate protection through a photo-hash reservation guard.
+
+## Repository Safety
+
+This app is meant for a private deployment. Never commit `.env`, phone config, exported Shortcuts, logs, reports, DB files, or personal dietary profiles.
+
+Before publishing publicly, read [SECURITY.md](SECURITY.md). If this repo ever had secrets in git history, publish from a fresh clean export or rewrite history and rotate the exposed credentials.
+
 ```bash
-# Clone the repository
-git clone https://github.com/AkiyamaKunka/CalorieTracker.git
-cd CalorieTracker
+bash scripts/check_public_safety.sh
+```
 
-# Create and activate a Python virtual environment
+## Requirements
+
+| Required | Optional |
+| --- | --- |
+| Python 3.10+ | GCP/Linux VM with `systemd` |
+| Google Gemini API key | PushPlus token/topic for WeChat forwarding |
+| Telegram bot token | Reverse proxy, HTTPS, or VPN for phone uploads |
+| Numeric Telegram chat ID | Android Termux and iOS Shortcuts clients |
+| Long random `ANDROID_API_KEY` | Personal `dietary_profile.txt` |
+
+## Setup
+
+```bash
+git clone <your-repo-url> CalorieTracker
+cd CalorieTracker
 python3 -m venv venv
 source venv/bin/activate
-
-# Install the required dependencies
 pip install -r requirements.txt
+cp .env.example .env
 ```
 
-### 3. Environment Configuration
-Create a `.env` file in the root directory:
-```bash
-nano .env
-```
-Paste in your credentials:
+Edit `.env`:
+
 ```env
-GEMINI_API_KEY=your_gemini_api_key
-TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-TELEGRAM_CHAT_ID=your_telegram_chat_id
-PUSHPLUS_TOKEN=your_pushplus_token  # Optional
-PORT=5000
+GEMINI_API_KEY=replace-with-google-ai-studio-key
+GEMINI_MODEL=gemini-2.5-flash
+TELEGRAM_BOT_TOKEN=replace-with-botfather-token
+TELEGRAM_CHAT_ID=replace-with-your-numeric-chat-id
+ANDROID_API_KEY=replace-with-random-upload-api-key
+PUSHPLUS_TOKEN=
+PUSHPLUS_TOPIC=
+VPN_OFF_COUNTRY_CODES=CN
+VPN_REMOTE_CIDRS=
+VPN_OFF_REMOTE_CIDRS=
 ```
 
-### 4. Running the Bot Locally (Testing)
-To test the bot, simply run:
+Generate the upload key:
+
 ```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Optional dietary context:
+
+```bash
+cp dietary_profile.example.txt dietary_profile.txt
+```
+
+`dietary_profile.txt` is ignored by git.
+
+## Run Locally
+
+```bash
+source venv/bin/activate
 python3 telegram_bot.py
 ```
-You should see `Starting Flask server on port 5000...` and `Starting Telegram Bot polling...`. You can now send a photo to your Telegram bot to test the AI!
 
-### 5. Production Deployment (Running 24/7)
-To keep the bot running forever in the background, we use `systemd`.
+The bot starts Telegram long polling and a Flask upload API on `0.0.0.0:5000`.
 
-Create a service file:
-```bash
-sudo nano /etc/systemd/system/caloriebot.service
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /ping` | Phone heartbeat and VPN evidence |
+| `POST /reconcile` | Android asks which local photo hashes are missing |
+| `POST /upload` | Android/iOS multipart photo upload |
+
+All phone API requests must include:
+
+```http
+X-API-Key: <ANDROID_API_KEY>
 ```
-Paste the following (replace `/home/ubuntu` with your actual username path):
+
+<details>
+<summary><strong>Production with systemd</strong></summary>
+
+Example service:
+
 ```ini
 [Unit]
-Description=Calorie Tracker Telegram Bot & Flask API
+Description=CalorieTracker Telegram Bot and Upload API
 After=network.target
 
 [Service]
 User=ubuntu
 WorkingDirectory=/home/ubuntu/CalorieTracker
+EnvironmentFile=/home/ubuntu/CalorieTracker/.env
 Environment="PATH=/home/ubuntu/CalorieTracker/venv/bin"
 ExecStart=/home/ubuntu/CalorieTracker/venv/bin/python3 telegram_bot.py
 Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 ```
-Enable and start the service:
+
+Enable it:
+
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable caloriebot.service
 sudo systemctl start caloriebot.service
+sudo systemctl status caloriebot.service
 ```
 
-### 6. Bypassing Cellular Network Blocks
-Mobile carriers (5G/LTE) often block outbound connections to port 5000. To fix this, use `iptables` to secretly route universal HTTP port 80 to port 5000 so your phone can sync photos over cellular data without issues:
-```bash
-sudo iptables -t nat -I PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000
-```
+If phones cannot reach port `5000`, put the service behind a reverse proxy, VPN, firewall rule, or port-forward. Prefer HTTPS or VPN for real deployments because plain HTTP exposes upload metadata and the upload key to the network path.
 
----
+</details>
 
-## 📱 Mobile Phone Setup
-
-### iOS (iPhone)
-1. Open the **Shortcuts** app and create an automation for "When Camera is closed".
-2. Add a **Find Photos** action to grab the most recent photo.
-3. Add a **Get Contents of URL** action:
-   - **URL:** `http://YOUR_SERVER_IP/upload` (Don't include the port if you set up port 80).
-   - **Method:** `POST`
-   - **File:** Pass the photo object in a Form variable named `photo`.
+## Mobile Uploads
 
 ### Android
-For Android, we provide a Termux script in the `android/` folder.
-1. Install **Termux** and the **Termux:API** add-on from F-Droid.
-2. Copy `android/upload_photo.py` and `android/android_watcher.sh` to your phone via Termux.
-3. Edit `upload_photo.py` to point to your `SERVER_URL`.
-4. To ensure Android's battery manager doesn't kill the script in the background, acquire a wake lock and run it using `nohup`:
+
+Android uses Termux.
+
+1. Install Termux and Termux:API.
+2. Copy `android/upload_photo.py` and `android/android_watcher.sh` to the phone.
+3. Copy `android/calorie_tracker_upload.example.json` to `~/.calorie_tracker_upload.json`.
+4. Edit the JSON with your server URL and `ANDROID_API_KEY`.
+5. Set permissions:
+
+```bash
+chmod 600 ~/.calorie_tracker_upload.json
+```
+
+Example config:
+
+```json
+{
+  "ANDROID_API_KEY": "same-random-value-as-server",
+  "SERVER_URLS": [
+    "https://your-domain.example",
+    "http://YOUR_SERVER_IP:5000"
+  ]
+}
+```
+
+Run:
+
 ```bash
 termux-wake-lock
-nohup bash android_watcher.sh > /dev/null 2>&1 &
+python3 ~/upload_photo.py --ping
+nohup bash ~/android_watcher.sh >> ~/watcher.log 2>&1 &
 ```
-*(You will see a "Wake lock held" notification in your Android status bar, meaning the watcher is permanently alive and silently syncing photos!)*
 
----
+Useful manual commands:
 
-*Enjoy tracking your calories completely friction-free!*
+```bash
+python3 ~/upload_photo.py --ping
+python3 ~/upload_photo.py --sync
+python3 ~/upload_photo.py /storage/emulated/0/DCIM/Camera/example.jpg
+```
+
+### iPhone
+
+Use the logic in [ios/shortcut_upload_to_gcp.md](ios/shortcut_upload_to_gcp.md).
+
+Required request shape:
+
+| Field | Value |
+| --- | --- |
+| URL | `https://your-domain.example/upload` or `http://YOUR_SERVER_IP/upload` |
+| Method | `POST` |
+| Body | Form field `photo` |
+| `X-API-Key` | Same `ANDROID_API_KEY` |
+| `X-Client-Platform` | `iOS` |
+| `X-Device-Name` | `iPhone` |
+| `X-VPN-Required` | `true` |
+
+Do not commit exported `.shortcut` or `.wflow` files.
+
+## VPN Detection
+
+The server records VPN evidence from client headers and remote IP geolocation. By default, `VPN_OFF_COUNTRY_CODES=CN`, so non-China exit IPs are treated as VPN-looking traffic. This avoids warnings when a VPN switches between multiple exit countries.
+
+Use these only when needed:
+
+- `VPN_REMOTE_CIDRS` for known VPN provider ranges
+- `VPN_OFF_REMOTE_CIDRS` for known direct/non-VPN ranges
+- `/vpn` in Telegram to inspect the latest evidence
+
+## Telegram Commands
+
+Run `/commands` for the full menu.
+
+| Area | Commands |
+| --- | --- |
+| Tracking | `/today`, `/meals`, `/recent`, `/history` |
+| Health | `/status`, `/doctor`, `/gemini`, `/android`, `/vpn` |
+| Uploads | `/queue`, `/failed`, `/retry_failed latest`, `/retry_all_failed 3`, `/clear_failed latest confirm` |
+| Reports | `/report today`, `/report_status`, `/reports` |
+| Debug | `/logs 30`, `/config`, `/stats` |
+
+## Daily Reports
+
+Manual:
+
+```bash
+python3 daily_report.py
+python3 daily_report.py 2026-06-28
+```
+
+When run without a date, `daily_report.py` checks the last Android-reported timezone and only sends during the local 23:00 hour. Use cron/systemd timers/launchd around 23:30 local time.
+
+## Tests
+
+```bash
+bash scripts/check_public_safety.sh
+python3 -m py_compile config.py telegram_bot.py daily_report.py android/upload_photo.py database.py meal_relay.py migrate_to_sqlite.py utils.py
+python3 -m pytest -q
+```
+
+## Runtime Data
+
+Ignored local data:
+
+- `.env`
+- `logs/`
+- `reports/`
+- `*.db`
+- `dietary_profile.txt`
+- `*.shortcut`
+- `*.wflow`
+- `__pycache__/`
+
+Keep backups of `meals.db`, `logs/failed_uploads/`, and reports separately if you care about the data.

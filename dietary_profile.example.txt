@@ -1,0 +1,9 @@
+# Dietary Profile & Cultural Context
+
+This optional local file helps Gemini interpret your common foods more accurately.
+Copy it to `dietary_profile.txt` and customize it for your own diet.
+
+- Cuisine:
+- Common dishes:
+- Portion-size notes:
+- Foods the model often misidentifies:

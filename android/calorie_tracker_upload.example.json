@@ -1,0 +1,7 @@
+{
+  "ANDROID_API_KEY": "replace-with-the-same-random-value-as-server",
+  "SERVER_URLS": [
+    "http://YOUR_GCP_IP",
+    "http://YOUR_GCP_IP:5000"
+  ]
+}

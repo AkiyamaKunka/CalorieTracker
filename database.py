@@ -1,15 +1,26 @@
 import sqlite3
 import json
+import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Dict, Optional
 
 DB_PATH = Path.home() / "CalorieTracker" / "meals.db"
+PHOTO_RESERVATION_STALE_SECONDS = 6 * 3600
+
+
+def _connect():
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
 
 def init_db():
     """Initialize the SQLite database and create tables if they don't exist."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DB_PATH) as conn:
+    with _connect() as conn:
         cursor = conn.cursor()
+        cursor.execute("PRAGMA journal_mode = WAL")
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS meals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -26,6 +37,8 @@ def init_db():
         """)
         # Index to speed up daily queries
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_chat_date ON meals(chat_id, date)")
+        # Index for the per-upload duplicate check inside reserve_photo_hash
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_chat_hash ON meals(chat_id, image_hash)")
         
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS heartbeats (
@@ -34,6 +47,23 @@ def init_db():
                 timezone TEXT DEFAULT '+0800'
             )
         """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS photo_ingestions (
+                chat_id INTEGER NOT NULL,
+                image_hash TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                source TEXT,
+                status TEXT NOT NULL DEFAULT 'processing',
+                meal_id INTEGER,
+                PRIMARY KEY (chat_id, image_hash)
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_photo_ingestions_status "
+            "ON photo_ingestions(chat_id, status)"
+        )
         
         # Migration: Add timezone column if it doesn't exist
         try:
@@ -46,18 +76,202 @@ def init_db():
 def save_meal(chat_id: int, date_str: str, time_str: str, timestamp_str: str, 
               source: str, image_hash: str, file_id: str, analysis: Dict) -> int:
     """Save a new meal to the database and return its row ID."""
-    with sqlite3.connect(DB_PATH) as conn:
+    with _connect() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO meals (chat_id, date, time, timestamp, source, image_hash, file_id, analysis, corrected)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (chat_id, date_str, time_str, timestamp_str, source, image_hash, file_id, json.dumps(analysis), False))
+        """, (chat_id, date_str, time_str, timestamp_str, source, _normalize_image_hash(image_hash),
+              file_id, json.dumps(analysis), False))
         conn.commit()
         return cursor.lastrowid
 
+
+def _normalize_image_hash(image_hash: str) -> str:
+    return str(image_hash or "").strip().lower()
+
+
+def _processing_reservation_is_stale(last_seen_at: str, now: datetime,
+                                     stale_after_seconds: int) -> bool:
+    try:
+        seen_at = datetime.fromisoformat(str(last_seen_at or ""))
+        return (now - seen_at).total_seconds() > stale_after_seconds
+    except (TypeError, ValueError):
+        return False
+
+
+def reserve_photo_hash(chat_id: int, image_hash: str, source: str = "",
+                       timestamp_str: Optional[str] = None,
+                       stale_after_seconds: int = PHOTO_RESERVATION_STALE_SECONDS,
+                       reclaim_statuses: Optional[set] = None) -> bool:
+    """
+    Atomically reserve a photo hash before Gemini analysis.
+
+    This prevents duplicate Telegram updates, Android queue retries, iOS double
+    fires, or overlapping bot processes from analyzing/logging the same image
+    while the first copy is still in flight.
+    """
+    normalized_hash = _normalize_image_hash(image_hash)
+    if not normalized_hash:
+        return True
+
+    reclaim_statuses = set(reclaim_statuses or [])
+    now = datetime.now()
+    now_str = timestamp_str or now.isoformat()
+    with _connect() as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            existing_meal = conn.execute(
+                "SELECT id FROM meals WHERE chat_id = ? AND image_hash = ? LIMIT 1",
+                (chat_id, normalized_hash),
+            ).fetchone()
+            if existing_meal:
+                conn.commit()
+                return False
+
+            existing_reservation = conn.execute("""
+                SELECT status, last_seen_at
+                FROM photo_ingestions
+                WHERE chat_id = ? AND image_hash = ?
+                LIMIT 1
+            """, (chat_id, normalized_hash)).fetchone()
+            if existing_reservation:
+                status, last_seen_at = existing_reservation
+                can_reclaim_processing = status == "processing" and _processing_reservation_is_stale(
+                    last_seen_at,
+                    now,
+                    stale_after_seconds,
+                )
+                if can_reclaim_processing or status in reclaim_statuses:
+                    conn.execute("""
+                        UPDATE photo_ingestions
+                        SET last_seen_at = ?, source = ?, status = 'processing', meal_id = NULL
+                        WHERE chat_id = ? AND image_hash = ?
+                    """, (now_str, source, chat_id, normalized_hash))
+                    conn.commit()
+                    return True
+
+                conn.commit()
+                return False
+
+            cursor = conn.execute("""
+                INSERT OR IGNORE INTO photo_ingestions
+                    (chat_id, image_hash, first_seen_at, last_seen_at, source, status)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (chat_id, normalized_hash, now_str, now_str, source, "processing"))
+            conn.commit()
+            return cursor.rowcount == 1
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def mark_photo_hash_status(chat_id: int, image_hash: str, status: str,
+                           meal_id: Optional[int] = None, source: str = ""):
+    """Update the processing status for a reserved photo hash."""
+    normalized_hash = _normalize_image_hash(image_hash)
+    if not normalized_hash:
+        return
+
+    now_str = datetime.now().isoformat()
+    with _connect() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE photo_ingestions
+            SET last_seen_at = ?, status = ?, meal_id = COALESCE(?, meal_id),
+                source = CASE WHEN ? != '' THEN ? ELSE source END
+            WHERE chat_id = ? AND image_hash = ?
+        """, (now_str, status, meal_id, source, source, chat_id, normalized_hash))
+        if cursor.rowcount == 0:
+            cursor.execute("""
+                INSERT OR IGNORE INTO photo_ingestions
+                    (chat_id, image_hash, first_seen_at, last_seen_at, source, status, meal_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (chat_id, normalized_hash, now_str, now_str, source, status, meal_id))
+        conn.commit()
+
+
+def release_photo_hash(chat_id: int, image_hash: str):
+    """Release an in-flight reservation when no meal or saved upload remains."""
+    normalized_hash = _normalize_image_hash(image_hash)
+    if not normalized_hash:
+        return
+
+    with _connect() as conn:
+        conn.execute(
+            "DELETE FROM photo_ingestions WHERE chat_id = ? AND image_hash = ? AND status = 'processing'",
+            (chat_id, normalized_hash),
+        )
+        conn.commit()
+
+
+def discard_failed_photo_hashes_by_prefix(chat_id: int, hash_prefix: str) -> int:
+    """Tombstone 'failed' reservations whose hash starts with the given prefix.
+
+    Used when the user explicitly clears a failed upload (/clear_failed). The
+    row is kept with status 'deleted' (matching delete_meal's tombstone) so
+    the nightly /reconcile keeps suppressing the photo instead of
+    auto-resurrecting it, while a deliberate Telegram re-send can still
+    reclaim the hash via reserve_photo_hash(reclaim_statuses={'deleted'}).
+    Returns the number of rows tombstoned.
+    """
+    prefix = _normalize_image_hash(hash_prefix)
+    if not prefix:
+        return 0
+    with _connect() as conn:
+        cursor = conn.execute(
+            "UPDATE photo_ingestions "
+            "SET status = 'deleted', meal_id = NULL, last_seen_at = ? "
+            "WHERE chat_id = ? AND status = 'failed' AND image_hash LIKE ? || '%'",
+            (datetime.now().isoformat(), chat_id, prefix),
+        )
+        conn.commit()
+        return cursor.rowcount
+
+
+def get_reserved_photo_hashes(chat_id: int) -> List[str]:
+    """Return image hashes already claimed by the ingestion guard.
+
+    Stale 'processing' rows are skipped so a crash mid-analysis does not
+    permanently block /reconcile from recovering the photo.
+    """
+    now = datetime.now()
+    with _connect() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT image_hash, status, last_seen_at FROM photo_ingestions "
+            "WHERE chat_id = ? AND image_hash != ''",
+            (chat_id,),
+        )
+        hashes = []
+        for image_hash, status, last_seen_at in cursor.fetchall():
+            if not image_hash:
+                continue
+            if status == "processing" and _processing_reservation_is_stale(
+                last_seen_at, now, PHOTO_RESERVATION_STALE_SECONDS
+            ):
+                continue
+            hashes.append(image_hash)
+        return hashes
+
+
+def meal_image_hash_exists(chat_id: int, image_hash: str) -> bool:
+    """Return whether a meal already exists with this exact image hash."""
+    normalized_hash = _normalize_image_hash(image_hash)
+    if not normalized_hash:
+        return False
+
+    with _connect() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM meals WHERE chat_id = ? AND image_hash = ? LIMIT 1",
+            (chat_id, normalized_hash),
+        )
+        return cursor.fetchone() is not None
+
 def get_meals(chat_id: int, start_date: str, end_date: str) -> List[Dict]:
     """Retrieve meals for a specific chat_id within a date range (inclusive)."""
-    with sqlite3.connect(DB_PATH) as conn:
+    with _connect() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute("""
@@ -75,15 +289,15 @@ def get_meals(chat_id: int, start_date: str, end_date: str) -> List[Dict]:
         return results
 
 def get_recent_meals(chat_id: int, days: int = 3) -> List[Dict]:
-    """Helper to get meals from the last N days."""
-    from datetime import date, timedelta
-    end_date = date.today().isoformat()
-    start_date = (date.today() - timedelta(days=days)).isoformat()
+    """Helper to get meals from the last N calendar days, including today."""
+    today = user_local_now().date()
+    end_date = today.isoformat()
+    start_date = (today - timedelta(days=max(days - 1, 0))).isoformat()
     return get_meals(chat_id, start_date, end_date)
 
 def update_meal_analysis(meal_id: int, chat_id: int, new_analysis: Dict):
     """Update a specific meal's analysis by its database ID. Validates chat_id for security."""
-    with sqlite3.connect(DB_PATH) as conn:
+    with _connect() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE meals 
@@ -94,30 +308,51 @@ def update_meal_analysis(meal_id: int, chat_id: int, new_analysis: Dict):
 
 def delete_meal(meal_id: int, chat_id: int):
     """Delete a specific meal by its database ID. Validates chat_id for security."""
-    with sqlite3.connect(DB_PATH) as conn:
+    with _connect() as conn:
         cursor = conn.cursor()
+        cursor.execute(
+            "SELECT image_hash FROM meals WHERE id = ? AND chat_id = ?",
+            (meal_id, chat_id),
+        )
+        row = cursor.fetchone()
         cursor.execute("DELETE FROM meals WHERE id = ? AND chat_id = ?", (meal_id, chat_id))
+        image_hash = _normalize_image_hash(row[0]) if row else ""
+        if image_hash:
+            # Keep the ingestion row (as 'deleted') so /reconcile does not
+            # auto re-log the photo; an explicit re-send reclaims it.
+            cursor.execute("""
+                UPDATE photo_ingestions
+                SET status = 'deleted', meal_id = NULL, last_seen_at = ?
+                WHERE chat_id = ? AND image_hash = ?
+            """, (datetime.now().isoformat(), chat_id, image_hash))
         conn.commit()
 
 # Ensure tables are created when imported
 init_db()
 
-def update_android_heartbeat(device_name: str = "android_watcher", timezone: str = "+0800"):
-    """Record that the device is online and save its timezone."""
+def update_android_heartbeat(device_name: str = "android_watcher", timezone: Optional[str] = None):
+    """Record that the device is online and optionally save its timezone.
+
+    When timezone is None (a bare liveness ping), the previously stored
+    device-reported offset is preserved; only an explicit non-None value
+    overwrites it. First-ever inserts without a timezone default to '+0800'.
+    """
     from datetime import datetime
     now_str = datetime.now().isoformat()
-    with sqlite3.connect(DB_PATH) as conn:
+    with _connect() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO heartbeats (device_name, last_ping_time, timezone)
-            VALUES (?, ?, ?)
-            ON CONFLICT(device_name) DO UPDATE SET last_ping_time=excluded.last_ping_time, timezone=excluded.timezone
-        """, (device_name, now_str, timezone))
+            VALUES (?, ?, COALESCE(?, '+0800'))
+            ON CONFLICT(device_name) DO UPDATE SET
+                last_ping_time=excluded.last_ping_time,
+                timezone=COALESCE(?, heartbeats.timezone)
+        """, (device_name, now_str, timezone, timezone))
         conn.commit()
 
 def get_last_android_heartbeat(device_name: str = "android_watcher") -> Optional[str]:
     """Get the last ping time for a specific device."""
-    with sqlite3.connect(DB_PATH) as conn:
+    with _connect() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT last_ping_time FROM heartbeats WHERE device_name = ?", (device_name,))
         row = cursor.fetchone()
@@ -125,20 +360,48 @@ def get_last_android_heartbeat(device_name: str = "android_watcher") -> Optional
 
 def get_android_timezone(device_name: str = "android_watcher") -> str:
     """Get the last reported timezone for a specific device. Defaults to +0800."""
-    with sqlite3.connect(DB_PATH) as conn:
+    with _connect() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT timezone FROM heartbeats WHERE device_name = ?", (device_name,))
         row = cursor.fetchone()
         return row[0] if row and row[0] else "+0800"
 
+
+_TZ_OFFSET_RE = re.compile(r"^([+-])(\d{2})(\d{2})$")
+
+
+def parse_timezone_offset(tz_str: str) -> Optional[timedelta]:
+    """Parse a '+0800'-style offset string; return None when malformed."""
+    match = _TZ_OFFSET_RE.match(str(tz_str or "").strip())
+    if not match:
+        return None
+    hours = int(match.group(2))
+    minutes = int(match.group(3))
+    if hours > 14 or minutes > 59:
+        return None
+    sign = 1 if match.group(1) == "+" else -1
+    return sign * timedelta(hours=hours, minutes=minutes)
+
+
+def user_local_now(device_name: str = "android_watcher") -> datetime:
+    """Current naive datetime in the user's timezone (last device-reported offset).
+
+    The server may run in a different timezone (e.g. a UTC GCP VM), so meal
+    dates and "today" windows must use this clock, not the host clock. Falls
+    back to server-local time when the stored offset is malformed.
+    """
+    offset = parse_timezone_offset(get_android_timezone(device_name))
+    if offset is None:
+        return datetime.now()
+    return datetime.now(timezone.utc).replace(tzinfo=None) + offset
+
 def get_today_hashes(chat_id: int) -> List[str]:
-    """Return a list of image_hashes recorded today for the user."""
-    from datetime import datetime
-    today = datetime.now().strftime("%Y-%m-%d")
-    with sqlite3.connect(DB_PATH) as conn:
+    """Return a list of image_hashes recorded today (user-local) for the user."""
+    today = user_local_now().date().isoformat()
+    with _connect() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT image_hash FROM meals WHERE chat_id = ? AND date(timestamp) = ? AND image_hash != ''",
+            "SELECT image_hash FROM meals WHERE chat_id = ? AND date = ? AND image_hash != ''",
             (chat_id, today)
         )
         return [row[0] for row in cursor.fetchall() if row[0]]

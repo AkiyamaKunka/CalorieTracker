@@ -3,32 +3,41 @@ Configuration for the Daily Calorie Tracker.
 """
 
 import os
+import sys
 from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
 
+
+def _clean_env(name: str, default: Optional[str] = None) -> Optional[str]:
+    value = os.environ.get(name, default)
+    if value is None:
+        return None
+    value = str(value).strip().strip('"').strip("'")
+    return value or None
+
+
 # ─── Gemini API Settings ──────────────────────────────────────────
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_API_KEY = _clean_env("GEMINI_API_KEY")
+GEMINI_MODEL = _clean_env("GEMINI_MODEL", "gemini-2.5-flash")
 
 # ─── Telegram Bot Settings ────────────────────────────────────────
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8675416366")
-ANDROID_API_KEY = os.environ.get("ANDROID_API_KEY", "secret-android-key-123")
+TELEGRAM_BOT_TOKEN = _clean_env("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = _clean_env("TELEGRAM_CHAT_ID")
+ANDROID_API_KEY = _clean_env("ANDROID_API_KEY")
 
 # ─── PushPlus WeChat Integration ─────────────────────────────────────
 # Token for PushPlus (http://www.pushplus.plus/)
-PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN")
+PUSHPLUS_TOKEN = _clean_env("PUSHPLUS_TOKEN")
 # Topic code (群组编码) to route messages to the coach instead of personal WeChat
-PUSHPLUS_TOPIC = os.environ.get("PUSHPLUS_TOPIC", "coach123")
+PUSHPLUS_TOPIC = _clean_env("PUSHPLUS_TOPIC")
 
 # ─── Paths ─────────────────────────────────────────────────────────
 REPORTS_DIR = Path.home() / "CalorieTracker" / "reports"
-MEALS_LOG = Path.home() / "CalorieTracker" / "logs" / "telegram_meals.json"
-PROCESSED_PHOTOS_LOG = Path.home() / "CalorieTracker" / "logs" / "processed_photos.json"
 
 # ─── Photo Settings ───────────────────────────────────────────────
 # Supported image extensions to process
@@ -72,8 +81,8 @@ if dietary_profile_path.exists():
         dietary_profile = dietary_profile_path.read_text(encoding="utf-8")
         if dietary_profile.strip():
             FOOD_DETECTION_PROMPT += f"\n\nUser's Dietary Profile / Cultural Context:\n{dietary_profile}\nPlease strongly consider these preferences when analyzing the photo.\n"
-    except Exception as e:
-        pass
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"[WARN] Could not load dietary profile from {dietary_profile_path}: {e}", file=sys.stderr)
 
 # ─── Correction Prompt ─────────────────────────────────────────────
 CORRECTION_PROMPT = """I previously analyzed a food photo and got this result:
