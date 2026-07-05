@@ -4,6 +4,7 @@ Shared utilities for CalorieTracker.
 
 import json
 import re
+from typing import List
 
 
 def parse_ai_json(text: str) -> dict:
@@ -28,3 +29,27 @@ def parse_ai_json(text: str) -> dict:
             raise
 
         return json.loads(content[start:end + 1])
+
+
+def telegram_message_chunks(text: str, limit: int = 3900) -> List[str]:
+    """Split a Telegram message into <=limit chunks without breaking normal lines."""
+    chunks = []
+    current = ""
+    for line in str(text).splitlines(keepends=True):
+        if len(line) > limit:
+            if current:
+                chunks.append(current.rstrip())
+                current = ""
+            for start in range(0, len(line), limit):
+                chunks.append(line[start:start + limit].rstrip())
+            continue
+
+        if current and len(current) + len(line) > limit:
+            chunks.append(current.rstrip())
+            current = line
+        else:
+            current += line
+
+    if current:
+        chunks.append(current.rstrip())
+    return chunks or [""]

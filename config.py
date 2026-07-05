@@ -3,6 +3,7 @@ Configuration for the Daily Calorie Tracker.
 """
 
 import os
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -37,8 +38,6 @@ PUSHPLUS_TOPIC = _clean_env("PUSHPLUS_TOPIC")
 
 # ─── Paths ─────────────────────────────────────────────────────────
 REPORTS_DIR = Path.home() / "CalorieTracker" / "reports"
-MEALS_LOG = Path.home() / "CalorieTracker" / "logs" / "telegram_meals.json"
-PROCESSED_PHOTOS_LOG = Path.home() / "CalorieTracker" / "logs" / "processed_photos.json"
 
 # ─── Photo Settings ───────────────────────────────────────────────
 # Supported image extensions to process
@@ -82,8 +81,8 @@ if dietary_profile_path.exists():
         dietary_profile = dietary_profile_path.read_text(encoding="utf-8")
         if dietary_profile.strip():
             FOOD_DETECTION_PROMPT += f"\n\nUser's Dietary Profile / Cultural Context:\n{dietary_profile}\nPlease strongly consider these preferences when analyzing the photo.\n"
-    except Exception as e:
-        pass
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"[WARN] Could not load dietary profile from {dietary_profile_path}: {e}", file=sys.stderr)
 
 # ─── Correction Prompt ─────────────────────────────────────────────
 CORRECTION_PROMPT = """I previously analyzed a food photo and got this result:

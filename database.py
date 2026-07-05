@@ -1,6 +1,7 @@
 import sqlite3
 import json
-from datetime import datetime
+import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -36,6 +37,8 @@ def init_db():
         """)
         # Index to speed up daily queries
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_chat_date ON meals(chat_id, date)")
+        # Index for the per-upload duplicate check inside reserve_photo_hash
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_chat_hash ON meals(chat_id, image_hash)")
         
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS heartbeats (
@@ -78,7 +81,8 @@ def save_meal(chat_id: int, date_str: str, time_str: str, timestamp_str: str,
         cursor.execute("""
             INSERT INTO meals (chat_id, date, time, timestamp, source, image_hash, file_id, analysis, corrected)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (chat_id, date_str, time_str, timestamp_str, source, image_hash, file_id, json.dumps(analysis), False))
+        """, (chat_id, date_str, time_str, timestamp_str, source, _normalize_image_hash(image_hash),
+              file_id, json.dumps(analysis), False))
         conn.commit()
         return cursor.lastrowid
 
@@ -201,15 +205,54 @@ def release_photo_hash(chat_id: int, image_hash: str):
         conn.commit()
 
 
+def discard_failed_photo_hashes_by_prefix(chat_id: int, hash_prefix: str) -> int:
+    """Tombstone 'failed' reservations whose hash starts with the given prefix.
+
+    Used when the user explicitly clears a failed upload (/clear_failed). The
+    row is kept with status 'deleted' (matching delete_meal's tombstone) so
+    the nightly /reconcile keeps suppressing the photo instead of
+    auto-resurrecting it, while a deliberate Telegram re-send can still
+    reclaim the hash via reserve_photo_hash(reclaim_statuses={'deleted'}).
+    Returns the number of rows tombstoned.
+    """
+    prefix = _normalize_image_hash(hash_prefix)
+    if not prefix:
+        return 0
+    with _connect() as conn:
+        cursor = conn.execute(
+            "UPDATE photo_ingestions "
+            "SET status = 'deleted', meal_id = NULL, last_seen_at = ? "
+            "WHERE chat_id = ? AND status = 'failed' AND image_hash LIKE ? || '%'",
+            (datetime.now().isoformat(), chat_id, prefix),
+        )
+        conn.commit()
+        return cursor.rowcount
+
+
 def get_reserved_photo_hashes(chat_id: int) -> List[str]:
-    """Return image hashes already claimed by the ingestion guard."""
+    """Return image hashes already claimed by the ingestion guard.
+
+    Stale 'processing' rows are skipped so a crash mid-analysis does not
+    permanently block /reconcile from recovering the photo.
+    """
+    now = datetime.now()
     with _connect() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT image_hash FROM photo_ingestions WHERE chat_id = ? AND image_hash != ''",
+            "SELECT image_hash, status, last_seen_at FROM photo_ingestions "
+            "WHERE chat_id = ? AND image_hash != ''",
             (chat_id,),
         )
-        return [row[0] for row in cursor.fetchall() if row[0]]
+        hashes = []
+        for image_hash, status, last_seen_at in cursor.fetchall():
+            if not image_hash:
+                continue
+            if status == "processing" and _processing_reservation_is_stale(
+                last_seen_at, now, PHOTO_RESERVATION_STALE_SECONDS
+            ):
+                continue
+            hashes.append(image_hash)
+        return hashes
 
 
 def meal_image_hash_exists(chat_id: int, image_hash: str) -> bool:
@@ -246,10 +289,10 @@ def get_meals(chat_id: int, start_date: str, end_date: str) -> List[Dict]:
         return results
 
 def get_recent_meals(chat_id: int, days: int = 3) -> List[Dict]:
-    """Helper to get meals from the last N days."""
-    from datetime import date, timedelta
-    end_date = date.today().isoformat()
-    start_date = (date.today() - timedelta(days=days)).isoformat()
+    """Helper to get meals from the last N calendar days, including today."""
+    today = user_local_now().date()
+    end_date = today.isoformat()
+    start_date = (today - timedelta(days=max(days - 1, 0))).isoformat()
     return get_meals(chat_id, start_date, end_date)
 
 def update_meal_analysis(meal_id: int, chat_id: int, new_analysis: Dict):
@@ -267,23 +310,44 @@ def delete_meal(meal_id: int, chat_id: int):
     """Delete a specific meal by its database ID. Validates chat_id for security."""
     with _connect() as conn:
         cursor = conn.cursor()
+        cursor.execute(
+            "SELECT image_hash FROM meals WHERE id = ? AND chat_id = ?",
+            (meal_id, chat_id),
+        )
+        row = cursor.fetchone()
         cursor.execute("DELETE FROM meals WHERE id = ? AND chat_id = ?", (meal_id, chat_id))
+        image_hash = _normalize_image_hash(row[0]) if row else ""
+        if image_hash:
+            # Keep the ingestion row (as 'deleted') so /reconcile does not
+            # auto re-log the photo; an explicit re-send reclaims it.
+            cursor.execute("""
+                UPDATE photo_ingestions
+                SET status = 'deleted', meal_id = NULL, last_seen_at = ?
+                WHERE chat_id = ? AND image_hash = ?
+            """, (datetime.now().isoformat(), chat_id, image_hash))
         conn.commit()
 
 # Ensure tables are created when imported
 init_db()
 
-def update_android_heartbeat(device_name: str = "android_watcher", timezone: str = "+0800"):
-    """Record that the device is online and save its timezone."""
+def update_android_heartbeat(device_name: str = "android_watcher", timezone: Optional[str] = None):
+    """Record that the device is online and optionally save its timezone.
+
+    When timezone is None (a bare liveness ping), the previously stored
+    device-reported offset is preserved; only an explicit non-None value
+    overwrites it. First-ever inserts without a timezone default to '+0800'.
+    """
     from datetime import datetime
     now_str = datetime.now().isoformat()
     with _connect() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO heartbeats (device_name, last_ping_time, timezone)
-            VALUES (?, ?, ?)
-            ON CONFLICT(device_name) DO UPDATE SET last_ping_time=excluded.last_ping_time, timezone=excluded.timezone
-        """, (device_name, now_str, timezone))
+            VALUES (?, ?, COALESCE(?, '+0800'))
+            ON CONFLICT(device_name) DO UPDATE SET
+                last_ping_time=excluded.last_ping_time,
+                timezone=COALESCE(?, heartbeats.timezone)
+        """, (device_name, now_str, timezone, timezone))
         conn.commit()
 
 def get_last_android_heartbeat(device_name: str = "android_watcher") -> Optional[str]:
@@ -302,10 +366,38 @@ def get_android_timezone(device_name: str = "android_watcher") -> str:
         row = cursor.fetchone()
         return row[0] if row and row[0] else "+0800"
 
+
+_TZ_OFFSET_RE = re.compile(r"^([+-])(\d{2})(\d{2})$")
+
+
+def parse_timezone_offset(tz_str: str) -> Optional[timedelta]:
+    """Parse a '+0800'-style offset string; return None when malformed."""
+    match = _TZ_OFFSET_RE.match(str(tz_str or "").strip())
+    if not match:
+        return None
+    hours = int(match.group(2))
+    minutes = int(match.group(3))
+    if hours > 14 or minutes > 59:
+        return None
+    sign = 1 if match.group(1) == "+" else -1
+    return sign * timedelta(hours=hours, minutes=minutes)
+
+
+def user_local_now(device_name: str = "android_watcher") -> datetime:
+    """Current naive datetime in the user's timezone (last device-reported offset).
+
+    The server may run in a different timezone (e.g. a UTC GCP VM), so meal
+    dates and "today" windows must use this clock, not the host clock. Falls
+    back to server-local time when the stored offset is malformed.
+    """
+    offset = parse_timezone_offset(get_android_timezone(device_name))
+    if offset is None:
+        return datetime.now()
+    return datetime.now(timezone.utc).replace(tzinfo=None) + offset
+
 def get_today_hashes(chat_id: int) -> List[str]:
-    """Return a list of image_hashes recorded today for the user."""
-    from datetime import date
-    today = date.today().isoformat()
+    """Return a list of image_hashes recorded today (user-local) for the user."""
+    today = user_local_now().date().isoformat()
     with _connect() as conn:
         cursor = conn.cursor()
         cursor.execute(
