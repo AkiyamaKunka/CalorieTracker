@@ -1,9 +1,12 @@
 # Environments
 .env
+.env.*
+!.env.example
 venv/
 env/
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Database
 *.db
@@ -12,6 +15,21 @@ __pycache__/
 # Logs and Reports
 logs/
 reports/
+*.log
+
+# Local mobile/client config
+.calorie_tracker_upload.json
+android/.calorie_tracker_upload.json
+dietary_profile.txt
+
+# Generated Shortcuts exports can embed API keys.
+ios/*.shortcut
+ios/*.wflow
+*.shortcut
+*.wflow
+
+# Local artifacts
+outputs/
 
 # OS generated files
 .DS_Store
