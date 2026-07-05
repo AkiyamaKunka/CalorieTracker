@@ -108,3 +108,141 @@ def test_android_heartbeat():
     # Ensure it's a valid ISO string
     dt = datetime.fromisoformat(last_ping)
     assert dt.date() == date.today()
+
+
+def test_android_timezone_defaults_and_updates():
+    assert database.get_android_timezone("missing_device") == "+0800"
+
+    database.update_android_heartbeat("android_watcher", timezone="+0900")
+
+    assert database.get_android_timezone("android_watcher") == "+0900"
+
+
+def test_delete_meal_validates_chat_id():
+    owner_chat = 111
+    other_chat = 222
+    date_str = date.today().isoformat()
+    meal_id = database.save_meal(
+        chat_id=owner_chat,
+        date_str=date_str,
+        time_str="12:00:00",
+        timestamp_str=datetime.now().isoformat(),
+        source="telegram",
+        image_hash="abc",
+        file_id="file",
+        analysis={"is_food": True, "total_calories": 500},
+    )
+
+    database.delete_meal(meal_id, other_chat)
+    assert len(database.get_meals(owner_chat, date_str, date_str)) == 1
+
+    database.delete_meal(meal_id, owner_chat)
+    assert database.get_meals(owner_chat, date_str, date_str) == []
+
+
+def test_get_today_hashes_returns_only_hashes_for_today():
+    chat_id = 12345
+    today = date.today().isoformat()
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    database.save_meal(
+        chat_id,
+        today,
+        "12:00",
+        f"{today}T12:00:00",
+        "api",
+        "today_hash",
+        "file1",
+        {"is_food": True},
+    )
+    database.save_meal(
+        chat_id,
+        yesterday,
+        "12:00",
+        f"{yesterday}T12:00:00",
+        "api",
+        "yesterday_hash",
+        "file2",
+        {"is_food": True},
+    )
+    database.save_meal(
+        chat_id,
+        today,
+        "13:00",
+        f"{today}T13:00:00",
+        "api",
+        "",
+        "file3",
+        {"is_food": True},
+    )
+
+    assert database.get_today_hashes(chat_id) == ["today_hash"]
+
+
+def test_photo_hash_reservation_blocks_duplicate_until_released():
+    chat_id = 12345
+    image_hash = "latte_hash"
+
+    assert database.reserve_photo_hash(chat_id, image_hash, "telegram") is True
+    assert database.reserve_photo_hash(chat_id, image_hash, "api_upload") is False
+
+    database.release_photo_hash(chat_id, image_hash)
+
+    assert database.reserve_photo_hash(chat_id, image_hash, "api_upload") is True
+
+
+def test_photo_hash_reservation_blocks_existing_meal():
+    chat_id = 12345
+    today = date.today().isoformat()
+    image_hash = "already_logged_latte"
+
+    database.save_meal(
+        chat_id,
+        today,
+        "12:00",
+        datetime.now().isoformat(),
+        "telegram",
+        image_hash,
+        "file1",
+        {"is_food": True, "meal_description": "Latte"},
+    )
+
+    assert database.reserve_photo_hash(chat_id, image_hash, "api_upload") is False
+    assert database.meal_image_hash_exists(chat_id, image_hash) is True
+    assert database.meal_image_hash_exists(chat_id, "missing_hash") is False
+
+
+def test_mark_photo_hash_status_and_reserved_hashes():
+    chat_id = 12345
+    image_hash = "saved_latte_hash"
+
+    assert database.reserve_photo_hash(chat_id, image_hash, "telegram") is True
+    database.mark_photo_hash_status(chat_id, image_hash, "saved", meal_id=42, source="telegram")
+
+    assert database.get_reserved_photo_hashes(chat_id) == [image_hash]
+    assert database.reserve_photo_hash(chat_id, image_hash, "api_upload") is False
+
+
+def test_stale_processing_photo_hash_can_be_reclaimed():
+    chat_id = 12345
+    image_hash = "stale_latte_hash"
+    old_timestamp = (datetime.now() - timedelta(hours=7)).isoformat()
+
+    assert database.reserve_photo_hash(chat_id, image_hash, "telegram", old_timestamp) is True
+
+    assert database.reserve_photo_hash(chat_id, image_hash, "api_upload") is True
+
+
+def test_failed_photo_hash_can_be_reclaimed_for_retry():
+    chat_id = 12345
+    image_hash = "failed_latte_hash"
+
+    assert database.reserve_photo_hash(chat_id, image_hash, "api_upload") is True
+    database.mark_photo_hash_status(chat_id, image_hash, "failed", source="api_upload")
+
+    assert database.reserve_photo_hash(
+        chat_id,
+        image_hash,
+        "api_retry",
+        reclaim_statuses={"failed"},
+    ) is True
+    assert database.reserve_photo_hash(chat_id, image_hash, "api_upload") is False
