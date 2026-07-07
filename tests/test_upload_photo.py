@@ -742,6 +742,83 @@ def test_full_offline_to_online_lifecycle(mock_post, mock_queue_dir, mock_env, t
     assert len(successful_uploads) == 1
 
 
+def _noise_jpeg(width=2400, height=1800, seed=42):
+    """Deterministic high-entropy JPEG that genuinely shrinks when downscaled."""
+    import io as _io
+    import random as _random
+
+    from PIL import Image
+
+    rng = _random.Random(seed)
+    img = Image.frombytes("RGB", (width, height),
+                          bytes(rng.getrandbits(8) for _ in range(width * height * 3)))
+    out = _io.BytesIO()
+    img.save(out, format="JPEG", quality=92)
+    return out.getvalue()
+
+
+def test_recompress_shrinks_large_jpeg():
+    import io as _io
+
+    from PIL import Image
+
+    original = _noise_jpeg()
+    result = upload_photo._recompress_for_upload(original)
+
+    assert result is not None
+    assert len(result) < len(original)
+    decoded = Image.open(_io.BytesIO(result))
+    assert max(decoded.size) <= upload_photo.RECOMPRESS_MAX_EDGE
+    assert decoded.mode == "RGB"
+
+
+def test_recompress_falls_back_safely(monkeypatch):
+    # Non-image bytes: decode fails, original kept.
+    assert upload_photo._recompress_for_upload(b"not an image at all") is None
+    # Feature disabled via env knob.
+    monkeypatch.setattr(upload_photo, "RECOMPRESS_MAX_EDGE", 0)
+    assert upload_photo._recompress_for_upload(_noise_jpeg(400, 300)) is None
+
+
+@patch('upload_photo.requests.post')
+def test_upload_sends_original_hash_with_recompressed_bytes(mock_post, mock_env, tmp_path):
+    original = _noise_jpeg()
+    img_path = tmp_path / "meal.heic"  # name keeps original ext; upload becomes .jpg
+    img_path.write_bytes(original)
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = {"status": "processing_in_background"}
+    mock_post.return_value = resp
+
+    status, body_is_json = upload_photo._upload_photo_status(str(img_path))
+
+    assert (status, body_is_json) == (200, True)
+    kwargs = mock_post.call_args.kwargs
+    assert kwargs["data"] == {"original_hash": hashlib.md5(original).hexdigest()}
+    upload_name, upload_bytes = kwargs["files"]["photo"]
+    assert upload_name == "meal.jpg"
+    assert len(upload_bytes) < len(original)
+
+
+@patch('upload_photo.requests.post')
+def test_upload_falls_back_to_original_bytes(mock_post, mock_env, tmp_path, monkeypatch):
+    monkeypatch.setattr(upload_photo, "_recompress_for_upload", lambda original_bytes: None)
+    original = b"undecodable original bytes"
+    img_path = tmp_path / "meal.jpg"
+    img_path.write_bytes(original)
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = {"status": "processing_in_background"}
+    mock_post.return_value = resp
+
+    status, _ = upload_photo._upload_photo_status(str(img_path))
+
+    assert status == 200
+    kwargs = mock_post.call_args.kwargs
+    assert kwargs["files"]["photo"] == ("meal.jpg", original)
+    assert kwargs["data"] == {"original_hash": hashlib.md5(original).hexdigest()}
+
+
 @patch('upload_photo.requests.post')
 def test_queue_drain_unlinks_on_duplicate_reply(mock_post, mock_queue_dir, mock_env):
     """A 200 'duplicate' reply removes the queued copy. Safe only because the

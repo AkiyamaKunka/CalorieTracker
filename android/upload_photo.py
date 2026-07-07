@@ -315,6 +315,38 @@ def process_queue(max_items=QUEUE_BATCH_LIMIT):
     finally:
         _release_queue_lock()
 
+RECOMPRESS_MAX_EDGE = int(os.environ.get("CALORIE_RECOMPRESS_MAX_EDGE", "1600"))
+RECOMPRESS_JPEG_QUALITY = int(os.environ.get("CALORIE_RECOMPRESS_JPEG_QUALITY", "80"))
+
+
+def _recompress_for_upload(original_bytes):
+    """Best-effort downscale/re-encode before upload; None keeps the original.
+
+    Gemini needs nowhere near a 10-25MB camera file, and cellular+VPN pays
+    for every byte. Pillow may be missing in Termux and HEIC may not decode
+    there — any failure, or a result that isn't actually smaller, falls back
+    to the original bytes.
+    """
+    if RECOMPRESS_MAX_EDGE <= 0:
+        return None
+    try:
+        import io as _io
+
+        from PIL import Image, ImageOps
+
+        img = Image.open(_io.BytesIO(original_bytes))
+        img = ImageOps.exif_transpose(img)
+        img.thumbnail((RECOMPRESS_MAX_EDGE, RECOMPRESS_MAX_EDGE))
+        out = _io.BytesIO()
+        img.convert("RGB").save(out, format="JPEG", quality=RECOMPRESS_JPEG_QUALITY)
+        recompressed = out.getvalue()
+    except Exception:
+        return None
+    if len(recompressed) >= len(original_bytes):
+        return None
+    return recompressed
+
+
 def _upload_photo_status(file_path):
     """Upload a photo and return (status, body_is_json).
 
@@ -323,12 +355,31 @@ def _upload_photo_status(file_path):
     always answers with JSON, while an intermediary (e.g. a default nginx with
     a 1MB client_max_body_size) rejects with HTML. Callers use it to tell an
     app-origin permanent reject apart from a proxy-origin one.
+
+    The server keys dedup and /reconcile on the ORIGINAL file's hash, so it
+    is declared via the additive original_hash form field even when the
+    uploaded bytes are recompressed.
     """
     try:
         _require_api_key()
         with open(file_path, "rb") as f:
-            files = {"photo": f}
-            response = requests.post(f"{SERVER_URL}/upload", headers=get_headers(), files=files, timeout=30)
+            original_bytes = f.read()
+        original_hash = hashlib.md5(original_bytes).hexdigest()
+        upload_bytes = _recompress_for_upload(original_bytes)
+        upload_name = Path(file_path).name
+        if upload_bytes is None:
+            upload_bytes = original_bytes
+        else:
+            upload_name = Path(file_path).stem + ".jpg"
+            print(f"[{time.strftime('%X')}] Recompressed {Path(file_path).name}: "
+                  f"{len(original_bytes)} -> {len(upload_bytes)} bytes")
+        response = requests.post(
+            f"{SERVER_URL}/upload",
+            headers=get_headers(),
+            files={"photo": (upload_name, upload_bytes)},
+            data={"original_hash": original_hash},
+            timeout=30,
+        )
     except (requests.exceptions.RequestException, RuntimeError, OSError) as e:
         print(f"[{time.strftime('%X')}] Network/config error: {e}")
         return None, False
