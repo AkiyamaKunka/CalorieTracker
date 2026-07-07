@@ -130,6 +130,53 @@ def test_b1_upload_analysis_failure_moves_to_failed_dir(monkeypatch, tmp_path):
     assert any("could not be analyzed" in m["text"] for m in bot.sent)
 
 
+def test_b1b_upload_during_quota_pause_offers_keep_or_discard(monkeypatch, tmp_path):
+    """During a Gemini quota pause, a failed /upload keeps the photo and asks
+    the user to keep or discard via inline keyboard instead of a plain error."""
+    pending_dir = tmp_path / "pending"
+    failed_dir = tmp_path / "failed"
+    statuses = []
+    bot = FakeBot()
+
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", pending_dir)
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", failed_dir)
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "service_health.json")
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", lambda client, image_bytes: None)
+    monkeypatch.setattr(telegram_bot, "_gemini_quota_pause",
+                        lambda: {"until": datetime.now(), "reason": "daily quota", "set_at": ""})
+    monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        telegram_bot.database, "mark_photo_hash_status",
+        lambda *args, **kwargs: statuses.append((args, kwargs)),
+    )
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
+
+    app = telegram_bot._build_api_app(bot, object())
+    resp = app.test_client().post(
+        "/upload",
+        headers={"X-API-Key": "test-upload-key"},
+        data={"photo": (io.BytesIO(b"quota-paused-upload-bytes"), "meal.jpg")},
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {"status": "processing_in_background"}
+    assert list(pending_dir.iterdir()) == []
+    assert len(list(failed_dir.iterdir())) == 1
+    assert statuses and statuses[0][0][2] == "failed"
+
+    decision = bot.sent[-1]
+    assert decision["reply_markup"] is not None
+    callbacks = [
+        button["callback_data"]
+        for row in decision["reply_markup"]["inline_keyboard"]
+        for button in row
+    ]
+    assert any(data.startswith("quota_keep:") for data in callbacks)
+    assert any(data.startswith("quota_discard:") for data in callbacks)
+
+
 def test_b2_upload_oversized_body_returns_413_json(monkeypatch):
     """Test Case B2: oversized multipart bodies are rejected with the JSON error shape."""
     monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
