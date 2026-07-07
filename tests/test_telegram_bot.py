@@ -177,6 +177,87 @@ def test_b1b_upload_during_quota_pause_offers_keep_or_discard(monkeypatch, tmp_p
     assert any(data.startswith("quota_discard:") for data in callbacks)
 
 
+def test_upload_uses_declared_original_hash(monkeypatch, tmp_path):
+    """A recompressing client declares the ORIGINAL file's hash; the ledger,
+    staged filename, and saved meal must all key on it, not on the received
+    (recompressed) bytes."""
+    declared = "ab" * 16
+    reserved, saved = [], []
+    bot = FakeBot()
+
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "failed")
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries",
+                        lambda client, image_bytes: {"is_food": True, "total_calories": 500})
+    monkeypatch.setattr(telegram_bot, "save_meal",
+                        lambda chat_id, analysis, source, file_id, img_hash: saved.append(img_hash) or 77)
+    monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash",
+                        lambda chat_id, image_hash, *a, **k: reserved.append(image_hash) or True)
+    monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status", lambda *a, **k: None)
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
+
+    app = telegram_bot._build_api_app(bot, object())
+    resp = app.test_client().post(
+        "/upload",
+        headers={"X-API-Key": "test-upload-key"},
+        data={"photo": (io.BytesIO(b"recompressed jpeg bytes"), "meal.jpg"),
+              "original_hash": declared.upper()},  # case-insensitive
+    )
+
+    assert resp.status_code == 200
+    assert reserved == [declared]
+    assert saved == [declared]
+
+
+def test_upload_ignores_malformed_original_hash(monkeypatch, tmp_path):
+    reserved = []
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "failed")
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash",
+                        lambda chat_id, image_hash, *a, **k: reserved.append(image_hash) or False)
+
+    body = b"plain old client bytes"
+    expected = hashlib.md5(body).hexdigest()
+    app = telegram_bot._build_api_app(FakeBot(), object())
+    for bad in ("zz" * 16, "abc123", ""):
+        resp = app.test_client().post(
+            "/upload",
+            headers={"X-API-Key": "test-upload-key"},
+            data={"photo": (io.BytesIO(body), "meal.jpg"), "original_hash": bad},
+        )
+        assert resp.status_code == 200  # duplicate path (reserve False)
+
+    assert reserved == [expected] * 3  # fell back to hashing the bytes
+
+
+def test_retry_and_sweep_resolve_ledger_hash_from_filename(monkeypatch, tmp_path):
+    """Staged bytes of a recompressed upload hash differently than the ledger
+    key; retry and the startup sweep must resolve through the ledger via the
+    filename prefix instead of rehashing."""
+    declared = "cd" * 16
+    failed_dir = tmp_path / "failed"
+    failed_dir.mkdir()
+    staged = failed_dir / f"20260708_010000_{declared[:12]}.jpg"
+    staged.write_bytes(b"recompressed bytes that hash differently")
+
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot.database, "find_photo_hash_by_prefix",
+                        lambda chat_id, prefix: declared if prefix == declared[:12] else None)
+
+    assert telegram_bot._upload_file_ledger_hash(staged, staged.read_bytes()) == declared
+
+    # Legacy file (no ledger row): falls back to hashing the bytes.
+    monkeypatch.setattr(telegram_bot.database, "find_photo_hash_by_prefix",
+                        lambda chat_id, prefix: None)
+    legacy_bytes = staged.read_bytes()
+    assert telegram_bot._upload_file_ledger_hash(staged, legacy_bytes) == hashlib.md5(legacy_bytes).hexdigest()
+
+
 def test_b2_upload_oversized_body_returns_413_json(monkeypatch):
     """Test Case B2: oversized multipart bodies are rejected with the JSON error shape."""
     monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")

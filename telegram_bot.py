@@ -1323,6 +1323,26 @@ def _select_failed_upload(selector: str) -> Optional[Path]:
     return None
 
 
+_ORIGINAL_HASH_RE = re.compile(r"^[0-9a-f]{32}$")
+_UPLOAD_NAME_HASH_RE = re.compile(r"_([0-9a-fA-F]{12})(?:\.[^.]+)?$")
+
+
+def _upload_file_ledger_hash(path: Path, image_bytes: bytes) -> str:
+    """Ledger hash for a staged/failed upload file.
+
+    When the phone recompresses before upload it declares the ORIGINAL
+    file's hash, which becomes the ledger key and the filename prefix —
+    the staged bytes hash differently. Resolve through the ledger first;
+    fall back to hashing the bytes for legacy files.
+    """
+    match = _UPLOAD_NAME_HASH_RE.search(path.name)
+    if match:
+        ledger_hash = database.find_photo_hash_by_prefix(ALLOWED_CHAT_ID, match.group(1))
+        if ledger_hash:
+            return ledger_hash
+    return hashlib.md5(image_bytes).hexdigest()
+
+
 def _retry_failed_upload_path(gemini_client, path: Path) -> Dict:
     pause = _gemini_quota_pause()
     if pause:
@@ -1341,7 +1361,7 @@ def _retry_failed_upload_path(gemini_client, path: Path) -> Dict:
             "message": f"could not read file: {e}",
         }
 
-    img_hash = hashlib.md5(image_bytes).hexdigest()
+    img_hash = _upload_file_ledger_hash(path, image_bytes)
 
     if database.meal_image_hash_exists(ALLOWED_CHAT_ID, img_hash):
         database.mark_photo_hash_status(ALLOWED_CHAT_ID, img_hash, "saved", source="api_retry")
@@ -2563,6 +2583,11 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
             return jsonify({"error": "Empty photo"}), 400
 
         img_hash = hashlib.md5(image_bytes).hexdigest()
+        declared_hash = (request.form.get("original_hash") or "").strip().lower()
+        if _ORIGINAL_HASH_RE.match(declared_hash):
+            # The phone may recompress before uploading; dedup, /reconcile,
+            # and the meals ledger must key on the ORIGINAL file's hash.
+            img_hash = declared_hash
 
         existing_failed = _find_failed_upload_by_hash(img_hash)
         if existing_failed:
@@ -2703,7 +2728,7 @@ def _sweep_stranded_pending_uploads(bot: TelegramBot):
     moved = []
     for path in _pending_upload_items():
         try:
-            img_hash = hashlib.md5(path.read_bytes()).hexdigest()
+            img_hash = _upload_file_ledger_hash(path, path.read_bytes())
         except OSError as e:
             log.warning(f"Could not read stranded pending upload {path}: {e}")
             continue

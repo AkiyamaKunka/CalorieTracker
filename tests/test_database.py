@@ -3,6 +3,18 @@ import sqlite3
 from datetime import datetime, date, timedelta
 import database
 
+
+def test_find_photo_hash_by_prefix():
+    full = "ab" * 16
+    assert database.reserve_photo_hash(1, full, "test") is True
+    assert database.find_photo_hash_by_prefix(1, full[:12]) == full
+    assert database.find_photo_hash_by_prefix(1, "no such prefix") is None
+    assert database.find_photo_hash_by_prefix(1, "") is None
+    # Ambiguous prefixes resolve to None so callers fall back to rehashing.
+    sibling = full[:12] + "f" * 20
+    assert database.reserve_photo_hash(1, sibling, "test") is True
+    assert database.find_photo_hash_by_prefix(1, full[:12]) is None
+
 @pytest.fixture(autouse=True)
 def mock_db_path(monkeypatch, tmp_path):
     """Override the DB_PATH to use a temporary file for tests."""
