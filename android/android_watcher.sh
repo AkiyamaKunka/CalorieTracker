@@ -128,9 +128,20 @@ wait_for_stable_file() {
 touch "$HISTORY_FILE"
 mkdir -p "$FAIL_COUNT_DIR"
 
-# Seed the history with every photo already present at startup so restarts do not upload a backlog.
-# The daily reconciliation job still catches today's missed photos at 11 PM.
-list_photos >> "$HISTORY_FILE"
+# Seed the history with photos already present at startup so restarts do not
+# upload a whole camera backlog — except photos taken within the last
+# SEED_FRESH_MINUTES (default 15): a meal snapped just before starting the
+# watcher should upload now, not wait for the 11 PM reconciliation.
+SEED_FRESH_MINUTES="${SEED_FRESH_MINUTES:-15}"
+if [ "$SEED_FRESH_MINUTES" -gt 0 ] 2>/dev/null; then
+  find "$CAMERA_DIR" -maxdepth 1 -type f \
+    ! -name '.pending-*' \
+    \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.heic' -o -iname '*.heif' \) \
+    -mmin "+${SEED_FRESH_MINUTES}" \
+    2>/dev/null | LC_ALL=C sort >> "$HISTORY_FILE"
+else
+  list_photos >> "$HISTORY_FILE"
+fi
 LC_ALL=C sort -u "$HISTORY_FILE" -o "$HISTORY_FILE" 2>/dev/null || true
 
 echo "[$(date)] Started polling loop for $CAMERA_DIR" | tee -a "$LOG_FILE"

@@ -92,7 +92,16 @@ def test_watcher_end_to_end_lifecycle(tmp_path):
     (home / ".calorie_watcher.pid").write_text(str(decoy.pid))
     (home / ".calorie_watcher.lock").mkdir()
 
-    (camera / "existing.jpg").write_bytes(b"seeded before startup")
+    # True backlog (old mtime): seeded at startup, never uploaded.
+    existing = camera / "existing.jpg"
+    existing.write_bytes(b"seeded before startup")
+    two_hours_ago = time.time() - 2 * 3600
+    os.utime(existing, (two_hours_ago, two_hours_ago))
+
+    # Fresh photo taken just before the watcher starts (mtime now): must be
+    # uploaded by the first polls, not seeded away until the 11 PM sync.
+    fresh_before_start = camera / "fresh_before_start.jpg"
+    fresh_before_start.write_bytes(b"meal snapped right before startup")
 
     proc = subprocess.Popen(
         [BASH, str(WATCHER)],
@@ -112,8 +121,10 @@ def test_watcher_end_to_end_lifecycle(tmp_path):
 
         assert _wait_for(lambda: _file_contains(calls, f"UPLOAD {new_photo}"))
         assert _wait_for(lambda: _file_contains(history, str(new_photo)))
+        # Fresh pre-start photo is uploaded (scenario C), old backlog is not.
+        assert _wait_for(lambda: _file_contains(calls, f"UPLOAD {fresh_before_start}"))
         text = calls.read_text()
-        assert "existing.jpg" not in text  # seeded at startup, never uploaded
+        assert "existing.jpg" not in text  # old backlog seeded at startup, never uploaded
         assert ".pending-123" not in text  # in-progress MediaStore names excluded
         assert _file_contains(history, str(camera / "existing.jpg"))
 
