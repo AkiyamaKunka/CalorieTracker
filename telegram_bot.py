@@ -25,6 +25,7 @@ import logging
 import os
 import re
 import signal
+import statistics
 import subprocess
 import sys
 import time
@@ -39,7 +40,8 @@ from flask import Flask, request, jsonify
 
 import requests
 from google import genai
-from PIL import Image
+from google.genai import types
+from PIL import Image, ImageOps
 try:
     import pillow_heif
     pillow_heif.register_heif_opener()
@@ -60,7 +62,7 @@ from config import (
     REPORTS_DIR,
     SUPPORTED_EXTENSIONS,
 )
-from utils import parse_ai_json, telegram_message_chunks
+from utils import meal_calorie_mismatch, parse_ai_json, telegram_message_chunks
 
 # ─── Constants ─────────────────────────────────────────────────────
 def _parse_chat_id(value: Optional[str]) -> int:
@@ -107,6 +109,10 @@ GEMINI_ANALYSIS_MAX_ATTEMPTS = _env_int("GEMINI_ANALYSIS_MAX_ATTEMPTS", 3, 1, 10
 GEMINI_RETRY_BASE_DELAY_SECONDS = _env_int("GEMINI_RETRY_BASE_DELAY_SECONDS", 5, 0, 3600)
 GEMINI_RETRY_MAX_DELAY_SECONDS = _env_int("GEMINI_RETRY_MAX_DELAY_SECONDS", 60, 1, 3600)
 GEMINI_DAILY_QUOTA_COOLDOWN_SECONDS = _env_int("GEMINI_DAILY_QUOTA_COOLDOWN_SECONDS", 12 * 3600, 60, 7 * 24 * 3600)
+# Native JSON mode for JSON-producing Gemini calls: a malformed free-form
+# response terminally burns a free-tier request, so ask the API to enforce
+# JSON output. parse_ai_json stays as the fallback for wrapped responses.
+GEMINI_JSON_CONFIG = types.GenerateContentConfig(response_mime_type="application/json")
 API_UPLOAD_PENDING_DIR = Path.home() / "CalorieTracker" / "logs" / "pending_uploads"
 API_UPLOAD_FAILED_DIR = Path.home() / "CalorieTracker" / "logs" / "failed_uploads"
 SERVICE_HEALTH_PATH = service_health.DEFAULT_PATH
@@ -149,6 +155,8 @@ _vpn_warning_lock = threading.Lock()
 _api_upload_processing_hashes = set()
 _api_upload_processing_lock = threading.Lock()
 _remote_ip_country_cache = {}
+GEO_CACHE_MAX_ENTRIES = 256
+_geo_cache_lock = threading.Lock()
 # Pending natural-language deletes awaiting inline-button confirmation.
 _pending_nl_deletes: Dict[int, Dict] = {}
 
@@ -619,12 +627,32 @@ def _gemini_failure_context() -> str:
     return "\n".join(lines)
 
 
+def _prepare_image_for_gemini(image_bytes: bytes) -> Image.Image:
+    """Downscale a photo before sending it to Gemini.
+
+    Phone photos can be 25MB; Gemini needs nowhere near that, and >20MB
+    inline requests hard-fail. EXIF orientation is baked in first so the
+    thumbnail is not sideways. If anything about resizing goes wrong, fall
+    back to the original un-resized image — but let a genuinely unreadable
+    image raise the same error the un-resized path would have raised.
+    """
+    img = Image.open(io.BytesIO(image_bytes))
+    try:
+        img = ImageOps.exif_transpose(img)
+        img.thumbnail((1024, 1024))
+        return img.convert("RGB")
+    except Exception as e:
+        log.warning(f"Could not downscale image for Gemini; sending original: {e}")
+        return Image.open(io.BytesIO(image_bytes))
+
+
 def _analyze_food_photo_once(client: genai.Client, image_bytes: bytes) -> Dict:
     """Analyze a food photo once with Gemini, letting callers handle failures."""
-    img = Image.open(io.BytesIO(image_bytes))
+    img = _prepare_image_for_gemini(image_bytes)
     response = client.models.generate_content(
         model=GEMINI_MODEL,
         contents=[FOOD_DETECTION_PROMPT, img],
+        config=GEMINI_JSON_CONFIG,
     )
     return parse_ai_json(response.text)
 
@@ -930,11 +958,13 @@ def _remote_ip_country_code(remote_ip: str) -> Optional[str]:
     if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
         return None
 
-    cached = _remote_ip_country_cache.get(str(ip))
     now_ts = time.time()
-    if cached and now_ts - cached["time"] < VPN_GEO_CACHE_TTL_SECONDS:
-        return cached["country"]
+    with _geo_cache_lock:
+        cached = _remote_ip_country_cache.get(str(ip))
+        if cached and now_ts - cached["time"] < VPN_GEO_CACHE_TTL_SECONDS:
+            return cached["country"]
 
+    # Never hold the lock across the blocking network call.
     try:
         response = requests.get(
             f"http://ip-api.com/json/{ip}",
@@ -947,8 +977,36 @@ def _remote_ip_country_code(remote_ip: str) -> Optional[str]:
         log.info(f"Could not geolocate remote IP {ip}: {e}")
         country = None
 
-    _remote_ip_country_cache[str(ip)] = {"country": country, "time": now_ts}
+    with _geo_cache_lock:
+        _prune_geo_cache_locked(now_ts)
+        _remote_ip_country_cache[str(ip)] = {"country": country, "time": now_ts}
     return country
+
+
+def _prune_geo_cache_locked(now_ts: float):
+    """Bound the geo cache before an insert; caller must hold _geo_cache_lock.
+
+    Drops expired entries first and, if the cache is still full, the oldest
+    entries by stored time, leaving room for one new entry.
+    """
+    if len(_remote_ip_country_cache) < GEO_CACHE_MAX_ENTRIES:
+        return
+
+    expired = [
+        key for key, entry in _remote_ip_country_cache.items()
+        if now_ts - entry["time"] >= VPN_GEO_CACHE_TTL_SECONDS
+    ]
+    for key in expired:
+        del _remote_ip_country_cache[key]
+
+    overflow = len(_remote_ip_country_cache) - (GEO_CACHE_MAX_ENTRIES - 1)
+    if overflow > 0:
+        oldest = sorted(
+            _remote_ip_country_cache,
+            key=lambda key: _remote_ip_country_cache[key]["time"],
+        )[:overflow]
+        for key in oldest:
+            del _remote_ip_country_cache[key]
 
 
 def _remote_vpn_evidence(remote_ip: str) -> tuple[str, str]:
@@ -2051,10 +2109,19 @@ def format_food_result(chat_id: int, analysis: Dict) -> str:
     lines.append(f"\n📊 <b>This meal: ~{_html(total)} kcal</b>")
     lines.append(f"🥩 P: {_html(tp)}g | 🍞 C: {_html(tc)}g | 🧈 F: {_html(tf)}g")
 
+    # Gemini sometimes hallucinates a meal total that contradicts its own
+    # per-item breakdown; flag it so the user can correct it right away.
+    item_sum = meal_calorie_mismatch(analysis)
+    if item_sum is not None:
+        lines.append(
+            f"⚠️ Item calories sum to ~{item_sum} kcal but the meal total is "
+            f"~{_html(total)} kcal — reply with a correction if this looks wrong."
+        )
+
     # Daily totals
     daily = format_daily_totals(chat_id)
     if daily:
-        lines.append(f"\n━━━━━━━━━━━━━━━━━━")
+        lines.append("\n━━━━━━━━━━━━━━━━━━")
         lines.append(daily)
 
     return "\n".join(lines)
@@ -2078,6 +2145,19 @@ def format_daily_totals(chat_id: int) -> str:
 
 
 # ─── Formatting ────────────────────────────────────────────────────
+def _daily_calorie_totals(chat_id: int, start_date: str, end_date: str) -> Dict[str, int]:
+    """Sum food-meal calories per user-local day over an inclusive date window."""
+    meals = database.get_meals(chat_id, start_date, end_date)
+    totals: Dict[str, int] = {}
+    for m in meals:
+        analysis = m.get("analysis", {})
+        if not analysis.get("is_food"):
+            continue
+        d = m.get("date", "")
+        totals[d] = totals.get(d, 0) + (analysis.get("total_calories") or 0)
+    return totals
+
+
 def format_today_summary(chat_id: int) -> str:
     """Format today's calorie & macro summary."""
     meals = get_todays_meals(chat_id)
@@ -2098,6 +2178,24 @@ def format_today_summary(chat_id: int) -> str:
         f"🧈 Fat: {total_f}g",
         f"📸 Meals: {len(meals)}",
     ]
+
+    # Typical-day comparison over the prior 7 user-local days (today excluded).
+    # Median rather than mean: under-logged days would bias a mean low.
+    local_today = database.user_local_now().date()
+    prior_totals = _daily_calorie_totals(
+        chat_id,
+        (local_today - timedelta(days=7)).isoformat(),
+        (local_today - timedelta(days=1)).isoformat(),
+    )
+    if len(prior_totals) >= 2:
+        typical = int(statistics.median(prior_totals.values()))
+        lines.append("")
+        lines.append(f"📊 Typical day: ~{typical:,} kcal")
+        if total_cal <= typical:
+            lines.append(f"⏳ ~{typical - total_cal:,} kcal headroom vs typical")
+        else:
+            lines.append(f"📈 ~{total_cal - typical:,} kcal above typical")
+
     return "\n".join(lines)
 
 
@@ -2123,7 +2221,7 @@ def format_meals_list(chat_id: int) -> str:
         lines.append(f"{i + 1}. <b>{_html(desc)}</b> ({_html(meal.get('time', '?'))}){corrected}")
         lines.append(f"   ~{cal} kcal | P:{p}g C:{c}g F:{f}g")
 
-    lines.append(f"\n━━━━━━━━━━━━━━━━━━")
+    lines.append("\n━━━━━━━━━━━━━━━━━━")
     lines.append(f"🔥 <b>Total: ~{total_cal:,} kcal</b> ({len(meals)} meals)")
     return "\n".join(lines)
 
@@ -2134,18 +2232,11 @@ def format_history(chat_id: int, days: int = 7) -> str:
     # days - 1 back plus today = an inclusive N-day window
     cutoff_date = (local_today - timedelta(days=days - 1)).isoformat()
     today_str = local_today.isoformat()
-    all_meals = database.get_meals(chat_id, cutoff_date, today_str)
-    meals = [m for m in all_meals if m.get("analysis", {}).get("is_food")]
-    
-    if not meals:
+    daily_cals = _daily_calorie_totals(chat_id, cutoff_date, today_str)
+
+    if not daily_cals:
         return f"📅 <b>{days}-Day History</b>\n\nNo meals logged in the past {days} days."
 
-    daily_cals = {}
-    for m in meals:
-        d = m.get("date", "")
-        cal = m.get("analysis", {}).get("total_calories") or 0
-        daily_cals[d] = daily_cals.get(d, 0) + cal
-        
     lines = [f"📅 <b>{days}-Day History</b>\n"]
     for d in sorted(daily_cals.keys(), reverse=True):
         try:
@@ -2206,6 +2297,7 @@ def handle_text_message(
         response = gemini_client.models.generate_content(
             model=GEMINI_MODEL,
             contents=[prompt],
+            config=GEMINI_JSON_CONFIG,
         )
         result = parse_ai_json(response.text)
     except json.JSONDecodeError as e:
@@ -2249,7 +2341,7 @@ def handle_text_message(
         diff_str = f"+{diff}" if diff > 0 else str(diff)
         reply_lines = [
             f"✏️ <b>Corrected meal {meal_index + 1}!</b>",
-            f"",
+            "",
             f"<b>{_html(old_desc)}</b> → <b>{_html(new_desc)}</b>",
             f"🔥 {_html(old_cal)} kcal → {_html(new_cal)} kcal ({_html(diff_str)})",
         ]
@@ -2326,7 +2418,7 @@ def handle_text_message(
         # chat
         reply = result.get("reply", "I'm not sure what you mean. Try describing a meal or correction!")
         bot.send_message(chat_id, _html(reply))
-        log.info(f"  💬 Chat response sent")
+        log.info("  💬 Chat response sent")
 
 
 def handle_callback_query(gemini_client, bot: TelegramBot, callback_query: Dict) -> bool:
@@ -2890,7 +2982,7 @@ def main():
                         # Duplicate detection
                         img_hash = hashlib.md5(image_bytes).hexdigest()
                         if is_duplicate_photo(chat_id, img_hash):
-                            log.info(f"  🔄 Duplicate photo detected, skipping")
+                            log.info("  🔄 Duplicate photo detected, skipping")
                             bot.send_message(
                                 chat_id,
                                 "🔄 This looks like the same photo you already sent!\n"
@@ -2907,7 +2999,7 @@ def main():
                             "telegram",
                             reclaim_statuses={"failed", "skipped", "deleted"},
                         ):
-                            log.info(f"  🔄 Photo already reserved or logged, skipping")
+                            log.info("  🔄 Photo already reserved or logged, skipping")
                             bot.send_message(
                                 chat_id,
                                 "🔄 This photo is already being processed or was already logged.\n"

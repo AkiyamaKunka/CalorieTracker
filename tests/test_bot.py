@@ -1,3 +1,4 @@
+import io
 import pytest
 import json
 import logging
@@ -59,10 +60,45 @@ def test_format_food_result_missing_fields():
     }
     
     result = format_food_result(12345, analysis)
-    
+
     assert "Apple" in result
     assert "95 kcal" in result
     assert "P: 0g" in result  # defaults to 0 for missing macros
+
+def test_format_food_result_warns_on_item_total_mismatch(monkeypatch):
+    """Item calories contradicting the meal total get a correction hint."""
+    monkeypatch.setattr(telegram_bot, "format_daily_totals", lambda chat_id: "")
+    analysis = {
+        "is_food": True,
+        "meal_description": "Big bowl",
+        "food_items": [
+            {"name": "rice", "estimated_calories": 100},
+            {"name": "egg", "estimated_calories": 35},
+        ],
+        "total_calories": 1335,
+    }
+
+    result = format_food_result(12345, analysis)
+
+    assert "⚠️ Item calories sum to ~135 kcal" in result
+    assert "meal total is ~1335 kcal" in result
+    assert "reply with a correction" in result
+
+def test_format_food_result_no_mismatch_warning_when_consistent(monkeypatch):
+    monkeypatch.setattr(telegram_bot, "format_daily_totals", lambda chat_id: "")
+    analysis = {
+        "is_food": True,
+        "meal_description": "Bowl",
+        "food_items": [
+            {"name": "rice", "estimated_calories": 300},
+            {"name": "egg", "estimated_calories": 100},
+        ],
+        "total_calories": 420,
+    }
+
+    result = format_food_result(12345, analysis)
+
+    assert "Item calories sum" not in result
 
 def test_format_daily_totals(monkeypatch):
     # Mock the database.get_meals function to return controlled data
@@ -150,6 +186,68 @@ def test_analyze_food_photo_invalid_json(monkeypatch):
     # Should gracefully return None instead of crashing on JSON decode
     assert result is None
 
+def test_analyze_food_photo_passes_native_json_config(monkeypatch, tmp_path):
+    """The photo call site must request Gemini's native JSON mode."""
+    captured = {}
+
+    class MockModels:
+        def generate_content(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(text='{"is_food": false}')
+
+    class MockClient:
+        models = MockModels()
+
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "service_health.json")
+    monkeypatch.setattr(telegram_bot, "_prepare_image_for_gemini", lambda image_bytes: object())
+
+    result = analyze_food_photo(MockClient(), b"fake_image_bytes")
+
+    assert result == {"is_food": False}
+    assert captured["config"].response_mime_type == "application/json"
+
+def test_handle_text_message_passes_native_json_config(monkeypatch, tmp_path):
+    """The text-handler call site must request Gemini's native JSON mode."""
+    captured = {}
+    sent = []
+
+    class FakeBot:
+        def send_message(self, chat_id, text, parse_mode="HTML", reply_markup=None):
+            sent.append(text)
+
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(text=json.dumps({"intent": "chat", "reply": "hello"}))
+
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot, "get_recent_meals", lambda chat_id, days: [])
+
+    telegram_bot.handle_text_message(SimpleNamespace(models=FakeModels()), FakeBot(), 12345, "hi")
+
+    assert captured["config"].response_mime_type == "application/json"
+    assert sent
+
+def test_prepare_image_for_gemini_downscales_and_applies_exif():
+    """Real bytes: a large EXIF-rotated JPEG comes back <=1024px, RGB, upright."""
+    src = telegram_bot.Image.new("RGB", (2000, 1500), (200, 120, 80))
+    exif = src.getexif()
+    exif[0x0112] = 6  # EXIF orientation 6: rotate 90° CW to display upright
+    buf = io.BytesIO()
+    src.save(buf, format="JPEG", exif=exif)
+
+    prepared = telegram_bot._prepare_image_for_gemini(buf.getvalue())
+
+    assert max(prepared.size) <= 1024
+    assert prepared.mode == "RGB"
+    # Orientation applied: the rotated landscape source displays as portrait.
+    assert prepared.size == (768, 1024)
+
+def test_prepare_image_for_gemini_raises_original_error_for_broken_images():
+    """Unreadable bytes must raise what the old un-resized path raised."""
+    with pytest.raises(telegram_bot.Image.UnidentifiedImageError):
+        telegram_bot._prepare_image_for_gemini(b"definitely not an image")
+
 def test_analyze_food_photo_retries_retryable_errors(monkeypatch):
     class MockResponse:
         text = '{"is_food": false}'
@@ -169,7 +267,7 @@ def test_analyze_food_photo_retries_retryable_errors(monkeypatch):
             self.models = MockModels()
 
     client = MockClient()
-    monkeypatch.setattr(telegram_bot.Image, "open", lambda image: object())
+    monkeypatch.setattr(telegram_bot, "_prepare_image_for_gemini", lambda image_bytes: object())
     monkeypatch.setattr(telegram_bot.time, "sleep", lambda seconds: None)
 
     result = telegram_bot.analyze_food_photo_with_retries(client, b"fake_image_bytes")
@@ -201,7 +299,7 @@ def test_daily_quota_error_stops_retry_and_sets_pause(monkeypatch, tmp_path):
 
     client = MockClient()
     monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "service_health.json")
-    monkeypatch.setattr(telegram_bot.Image, "open", lambda image: object())
+    monkeypatch.setattr(telegram_bot, "_prepare_image_for_gemini", lambda image_bytes: object())
     monkeypatch.setattr(telegram_bot.time, "sleep", lambda seconds: pytest.fail("daily quota should not retry"))
 
     result = telegram_bot.analyze_food_photo_with_retries(client, b"fake_image_bytes")
@@ -510,6 +608,57 @@ def test_remote_vpn_evidence_accepts_any_non_off_country(monkeypatch):
 
     assert evidence == "vpn"
     assert detail == "country:US"
+
+def test_remote_ip_country_cache_prunes_expired_entries(monkeypatch):
+    """A full cache of expired entries is emptied before the new entry lands."""
+    # NB: documentation IPs like 203.0.113.x are ipaddress.is_private and get
+    # rejected before the cache, so use a genuinely public IP here.
+    monkeypatch.setattr(telegram_bot, "VPN_GEO_LOOKUP_ENABLED", True)
+    monkeypatch.setattr(
+        telegram_bot.requests, "get",
+        lambda url, params=None, timeout=None: SimpleNamespace(
+            json=lambda: {"status": "success", "countryCode": "jp", "query": "93.184.216.34"},
+        ),
+    )
+    expired_at = telegram_bot.time.time() - telegram_bot.VPN_GEO_CACHE_TTL_SECONDS - 60
+    telegram_bot._remote_ip_country_cache.clear()
+    for i in range(300):
+        telegram_bot._remote_ip_country_cache[f"expired-{i}"] = {"country": "US", "time": expired_at}
+
+    try:
+        country = telegram_bot._remote_ip_country_code("93.184.216.34")
+
+        assert country == "JP"
+        assert len(telegram_bot._remote_ip_country_cache) <= telegram_bot.GEO_CACHE_MAX_ENTRIES
+        assert telegram_bot._remote_ip_country_cache["93.184.216.34"]["country"] == "JP"
+    finally:
+        telegram_bot._remote_ip_country_cache.clear()
+
+def test_remote_ip_country_cache_drops_oldest_fresh_entries_when_full(monkeypatch):
+    """With no expired entries to prune, the oldest fresh entries are evicted."""
+    monkeypatch.setattr(telegram_bot, "VPN_GEO_LOOKUP_ENABLED", True)
+    monkeypatch.setattr(
+        telegram_bot.requests, "get",
+        lambda url, params=None, timeout=None: SimpleNamespace(
+            json=lambda: {"status": "success", "countryCode": "jp", "query": "93.184.216.34"},
+        ),
+    )
+    now_ts = telegram_bot.time.time()
+    telegram_bot._remote_ip_country_cache.clear()
+    for i in range(300):
+        # fresh-0 is the newest entry, fresh-299 the oldest.
+        telegram_bot._remote_ip_country_cache[f"fresh-{i}"] = {"country": "US", "time": now_ts - i}
+
+    try:
+        country = telegram_bot._remote_ip_country_code("93.184.216.34")
+
+        assert country == "JP"
+        assert len(telegram_bot._remote_ip_country_cache) <= telegram_bot.GEO_CACHE_MAX_ENTRIES
+        assert "93.184.216.34" in telegram_bot._remote_ip_country_cache
+        assert "fresh-0" in telegram_bot._remote_ip_country_cache
+        assert "fresh-299" not in telegram_bot._remote_ip_country_cache
+    finally:
+        telegram_bot._remote_ip_country_cache.clear()
 
 def test_android_unreliable_vpn_check_does_not_warn_without_direct_evidence(monkeypatch):
     from flask import Flask

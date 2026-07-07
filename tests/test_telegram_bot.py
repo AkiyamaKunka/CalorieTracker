@@ -3,7 +3,7 @@ import os
 import io
 import json
 import pytest
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
@@ -315,6 +315,69 @@ def test_b10_gemini_json_parsing(mock_image_open, mock_db):
     assert analysis is not None
     assert analysis["calories"] == 95
     assert analysis["description"] == "Apple"
+
+
+def _seed_food_meal(chat_id, date_str, calories, image_hash, description="Meal"):
+    database.save_meal(
+        chat_id, date_str, "12:00 PM", datetime.now().isoformat(), "test", image_hash, "file",
+        {"is_food": True, "meal_description": description, "total_calories": calories},
+    )
+
+
+def test_today_summary_shows_median_typical_day_and_headroom(mock_db, monkeypatch):
+    """/today compares against the MEDIAN of the prior 7 user-local days."""
+    monkeypatch.setattr(database, "get_android_timezone", lambda *args, **kwargs: "+0800")
+    today = database.user_local_now().date()
+
+    _seed_food_meal(12345, today.isoformat(), 500, "hash-today")
+    _seed_food_meal(12345, (today - timedelta(days=1)).isoformat(), 1800, "hash-d1")
+    _seed_food_meal(12345, (today - timedelta(days=2)).isoformat(), 1200, "hash-d2a")
+    _seed_food_meal(12345, (today - timedelta(days=2)).isoformat(), 800, "hash-d2b")
+    _seed_food_meal(12345, (today - timedelta(days=3)).isoformat(), 1600, "hash-d3")
+    # Non-food and out-of-window rows must not shift the median.
+    database.save_meal(12345, (today - timedelta(days=1)).isoformat(), "1:00 PM",
+                       datetime.now().isoformat(), "test", "hash-notfood", "file",
+                       {"is_food": False, "total_calories": 9999})
+    _seed_food_meal(12345, (today - timedelta(days=8)).isoformat(), 5000, "hash-old")
+
+    summary = telegram_bot.format_today_summary(12345)
+
+    # Prior-day totals: 1800, 2000, 1600 -> median 1800; today 500 -> 1300 headroom.
+    assert "📊 Typical day: ~1,800 kcal" in summary
+    assert "⏳ ~1,300 kcal headroom vs typical" in summary
+    assert "above typical" not in summary
+
+
+def test_today_summary_flags_calories_above_typical(mock_db, monkeypatch):
+    monkeypatch.setattr(database, "get_android_timezone", lambda *args, **kwargs: "+0800")
+    today = database.user_local_now().date()
+
+    _seed_food_meal(12345, today.isoformat(), 2500, "hash-today")
+    _seed_food_meal(12345, (today - timedelta(days=1)).isoformat(), 1800, "hash-d1")
+    _seed_food_meal(12345, (today - timedelta(days=2)).isoformat(), 1600, "hash-d2")
+
+    summary = telegram_bot.format_today_summary(12345)
+
+    # Median of 1800 and 1600 is 1700; today 2500 -> 800 above.
+    assert "📊 Typical day: ~1,700 kcal" in summary
+    assert "📈 ~800 kcal above typical" in summary
+    assert "headroom" not in summary
+
+
+def test_today_summary_hides_typical_day_with_sparse_history(mock_db, monkeypatch):
+    """Fewer than 2 prior days with data suppresses the typical-day block."""
+    monkeypatch.setattr(database, "get_android_timezone", lambda *args, **kwargs: "+0800")
+    today = database.user_local_now().date()
+
+    _seed_food_meal(12345, today.isoformat(), 500, "hash-today")
+    _seed_food_meal(12345, (today - timedelta(days=1)).isoformat(), 1800, "hash-d1")
+
+    summary = telegram_bot.format_today_summary(12345)
+
+    assert "500 kcal" in summary
+    assert "Typical day" not in summary
+    assert "headroom" not in summary
+    assert "above typical" not in summary
 
 
 def test_b12_delete_intent_with_empty_database(mock_db, monkeypatch, tmp_path):
