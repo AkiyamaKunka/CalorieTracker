@@ -274,6 +274,22 @@ Required request shape:
 
 Do not commit exported `.shortcut` or `.wflow` files.
 
+## Failure Modes
+
+What happens when parts of the pipeline are down:
+
+| Scenario | Behavior |
+| --- | --- |
+| Photo taken while the server is unreachable (Android) | Queued in `~/.offline_queue`; drained automatically after the next successful heartbeat. Photos the server permanently rejects are quarantined in `~/.offline_queue/rejected/` instead of blocking the queue. |
+| Uploader crashes on a photo | Retried on the next polls up to 3 attempts, then recorded with a loud log line; the nightly sync can still recover it. |
+| Photo taken just before starting the watcher | Uploaded by the first polls — startup seeding skips photos newer than `SEED_FRESH_MINUTES` (default 15). Older backlog is not mass-uploaded. |
+| Photo taken while the watcher was stopped | Recovered by the nightly `--sync` (covers today and yesterday) once the watcher is running again, or by a manual `--sync`. |
+| Server crashes mid-analysis | On restart, staged uploads move to the failed store (recover with `/retry_failed`) and orphaned in-flight reservations are released so retries aren't misreported as duplicates. |
+| Phone stops reaching the server | The bot warns you in Telegram once the heartbeat is older than `HEARTBEAT_STALE_WARNING_HOURS` (default 2h). |
+| Gemini daily quota exhausted | 12h circuit breaker; failed uploads are kept with keep/discard buttons instead of being dropped. |
+| Machine asleep at report time | The next `daily_report.py` run catches up on the missed day (deduped via the health ledger). |
+| iOS upload fails | Not retried — the Shortcut is best-effort, one photo per camera close, with no queue or sync. Re-open the Camera or send the photo via Telegram. |
+
 ## VPN Detection
 
 The server records VPN evidence from client headers and remote IP geolocation. By default, `VPN_OFF_COUNTRY_CODES=CN`, so non-China exit IPs are treated as VPN-looking traffic. This avoids warnings when a VPN switches between multiple exit countries.
