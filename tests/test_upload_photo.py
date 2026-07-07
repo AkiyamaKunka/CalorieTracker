@@ -667,3 +667,59 @@ def test_camera_dir_prefers_calorie_specific_env_var(tmp_path):
 
 def test_camera_dir_default_when_no_env(tmp_path):
     assert _camera_dir_with_env(tmp_path, {}) == "/storage/emulated/0/DCIM/Camera"
+
+
+@patch('upload_photo.requests.post')
+def test_full_offline_to_online_lifecycle(mock_post, mock_queue_dir, mock_env, tmp_path):
+    """Scenario: photo taken while the server is unreachable -> queued with
+    exit 0; server comes back -> the next heartbeat drains the queue and the
+    photo is uploaded exactly once."""
+    img_path = tmp_path / "meal.jpg"
+    img_path.write_bytes(b"offline meal bytes")
+
+    server_up = {"value": False}
+    successful_uploads = []
+
+    def fake_post(url, **kwargs):
+        if not server_up["value"]:
+            raise requests.exceptions.ConnectionError("server down")
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"status": "processing_in_background"}
+        if url.endswith("/upload"):
+            successful_uploads.append(url)
+        return resp
+
+    mock_post.side_effect = fake_post
+
+    # Phase 1: server down. CLI exits 0 (photo safely queued, not lost).
+    assert upload_photo.main(["upload_photo.py", str(img_path)]) == 0
+    queued = [p for p in upload_photo.QUEUE_DIR.iterdir() if p.is_file()]
+    assert len(queued) == 1
+    assert successful_uploads == []
+
+    # Phase 2: server returns. The heartbeat probes, then drains the queue.
+    server_up["value"] = True
+    upload_photo.ping_server()
+
+    assert [p for p in upload_photo.QUEUE_DIR.iterdir() if p.is_file()] == []
+    assert len(successful_uploads) == 1
+
+
+@patch('upload_photo.requests.post')
+def test_queue_drain_unlinks_on_duplicate_reply(mock_post, mock_queue_dir, mock_env):
+    """A 200 'duplicate' reply removes the queued copy. Safe only because the
+    server releases orphaned in-flight reservations at boot — pinned here
+    because this is the data-loss edge if that guarantee ever regresses."""
+    upload_photo.QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+    queued = upload_photo.QUEUE_DIR / "dup_meal.jpg"
+    queued.write_bytes(b"already logged meal")
+
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = {"status": "duplicate"}
+    mock_post.return_value = resp
+
+    upload_photo.process_queue()
+
+    assert not queued.exists()
