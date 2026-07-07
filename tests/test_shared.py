@@ -115,6 +115,42 @@ def test_get_processing_photo_hashes_filters_by_status(tmp_path, monkeypatch):
     assert database.get_processing_photo_hashes(1) == ["aa" * 16]
 
 
+def test_meal_calorie_mismatch_flags_production_shape():
+    # The observed 2026-06-20 report bug: items sum to 135, total says 1335.
+    analysis = {
+        "total_calories": 1335,
+        "food_items": [
+            {"estimated_calories": 0},
+            {"estimated_calories": 0},
+            {"estimated_calories": 135},
+        ],
+    }
+    assert utils.meal_calorie_mismatch(analysis) == 135
+
+
+def test_meal_calorie_mismatch_consistent_and_tolerant():
+    consistent = {"total_calories": 640,
+                  "food_items": [{"estimated_calories": 400}, {"estimated_calories": 240}]}
+    assert utils.meal_calorie_mismatch(consistent) is None
+    within_tolerance = {"total_calories": 550,
+                        "food_items": [{"estimated_calories": 500}]}
+    assert utils.meal_calorie_mismatch(within_tolerance) is None
+
+
+def test_meal_calorie_mismatch_defensive_on_bad_data():
+    assert utils.meal_calorie_mismatch({}) is None
+    assert utils.meal_calorie_mismatch(None) is None
+    assert utils.meal_calorie_mismatch({"total_calories": None, "food_items": [{"estimated_calories": 500}]}) is None
+    assert utils.meal_calorie_mismatch({"total_calories": 900, "food_items": []}) is None
+    assert utils.meal_calorie_mismatch(
+        {"total_calories": 900, "food_items": [{"estimated_calories": "?"}, {"estimated_calories": True}]}
+    ) is None
+    # One bad item doesn't poison the numeric ones.
+    assert utils.meal_calorie_mismatch(
+        {"total_calories": 900, "food_items": [{"estimated_calories": "?"}, {"estimated_calories": 300}]}
+    ) == 300
+
+
 def test_parse_timezone_offset():
     assert database.parse_timezone_offset("+0800") == timedelta(hours=8)
     assert database.parse_timezone_offset("-0530") == timedelta(hours=-5, minutes=-30)

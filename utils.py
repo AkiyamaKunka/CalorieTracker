@@ -31,6 +31,38 @@ def parse_ai_json(text: str) -> dict:
         return json.loads(content[start:end + 1])
 
 
+def _as_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def meal_calorie_mismatch(analysis: dict):
+    """Return the item-calorie sum when it contradicts the stored meal total.
+
+    Gemini sometimes hallucinates a meal total that disagrees with its own
+    per-item breakdown (observed in production: items summing to 135 kcal
+    under a 1335 kcal total). Returns the item sum when the disagreement
+    exceeds max(100 kcal, 20%), else None. Missing or non-numeric data is
+    treated as consistent — a crashed warning would be worse than the bug
+    it flags.
+    """
+    items = (analysis or {}).get("food_items") or []
+    item_sum = 0
+    counted = 0
+    for item in items:
+        cal = _as_number((item or {}).get("estimated_calories"))
+        if cal is not None:
+            item_sum += cal
+            counted += 1
+    total = _as_number((analysis or {}).get("total_calories"))
+    if not counted or item_sum <= 0 or total is None:
+        return None
+    if abs(total - item_sum) > max(100, 0.2 * max(total, item_sum)):
+        return int(item_sum)
+    return None
+
+
 def telegram_message_chunks(text: str, limit: int = 3900) -> List[str]:
     """Split a Telegram message into <=limit chunks without breaking normal lines."""
     chunks = []
