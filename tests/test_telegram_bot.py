@@ -203,6 +203,55 @@ def test_reconcile_endpoint_reports_only_truly_missing_hashes(monkeypatch, tmp_p
     assert resp.get_json() == {"missing_hashes": [unknown]}
 
 
+def test_ping_endpoint_requires_api_key(monkeypatch):
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+
+    app = telegram_bot._build_api_app(FakeBot(), object())
+    resp = app.test_client().post("/ping", json={"timezone": "+0800"})
+
+    assert resp.status_code == 401
+    assert resp.get_json() == {"error": "Unauthorized"}
+
+
+def test_ping_endpoint_stores_reported_timezone(monkeypatch):
+    heartbeats = []
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+    monkeypatch.setattr(telegram_bot, "maybe_warn_android_vpn_inactive", lambda *a, **k: None)
+    monkeypatch.setattr(
+        telegram_bot.database, "update_android_heartbeat",
+        lambda timezone=None: heartbeats.append(timezone),
+    )
+
+    app = telegram_bot._build_api_app(FakeBot(), object())
+    resp = app.test_client().post(
+        "/ping", headers={"X-API-Key": "test-upload-key"}, json={"timezone": "+0530"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {"status": "ok"}
+    assert heartbeats == ["+0530"]
+
+
+def test_ping_endpoint_without_timezone_preserves_stored_offset(monkeypatch):
+    """A ping lacking a timezone must pass None so the stored offset —
+    which drives all meal dating — is not clobbered back to +0800."""
+    heartbeats = []
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+    monkeypatch.setattr(telegram_bot, "maybe_warn_android_vpn_inactive", lambda *a, **k: None)
+    monkeypatch.setattr(
+        telegram_bot.database, "update_android_heartbeat",
+        lambda timezone=None: heartbeats.append(timezone),
+    )
+
+    app = telegram_bot._build_api_app(FakeBot(), object())
+    client = app.test_client()
+    headers = {"X-API-Key": "test-upload-key"}
+
+    assert client.post("/ping", headers=headers).status_code == 200
+    assert client.post("/ping", headers=headers, json={"device": "x"}).status_code == 200
+    assert heartbeats == [None, None]
+
+
 @patch('telegram_bot.Image.open')
 def test_b10_gemini_json_parsing(mock_image_open, mock_db):
     """Test Case B10: Actual Gemini JSON Parsing fallback"""

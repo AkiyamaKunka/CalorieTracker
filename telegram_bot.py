@@ -2363,14 +2363,15 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
 
         maybe_warn_android_vpn_inactive(bot, "/ping")
 
-        tz = "+0800"
+        # None preserves the stored offset; meal dating depends on it.
+        tz = None
         if request.is_json:
             data = request.get_json(silent=True)
             if data and "timezone" in data:
                 tz = data["timezone"]
 
         database.update_android_heartbeat(timezone=tz)
-        log.info(f"📡 Heartbeat ping received from Android Watcher (TZ: {tz})")
+        log.info(f"📡 Heartbeat ping received from Android Watcher (TZ: {tz or 'unchanged'})")
         return jsonify({"status": "ok"})
 
     @app.route('/reconcile', methods=['POST'])
