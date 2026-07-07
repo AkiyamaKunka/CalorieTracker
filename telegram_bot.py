@@ -148,7 +148,6 @@ _last_stale_heartbeat_warning_at = None
 _vpn_warning_lock = threading.Lock()
 _api_upload_processing_hashes = set()
 _api_upload_processing_lock = threading.Lock()
-_service_health_lock = threading.Lock()
 _remote_ip_country_cache = {}
 # Pending natural-language deletes awaiting inline-button confirmation.
 _pending_nl_deletes: Dict[int, Dict] = {}
@@ -454,15 +453,25 @@ def _gemini_quota_pause_summary() -> str:
     )
 
 
+def _update_service_health(mutate) -> Dict:
+    """Apply a mutation under the inter-process file lock.
+
+    Serializes against the cron daily_report process as well as this
+    process's own Flask/background threads.
+    """
+    return service_health.update(mutate, SERVICE_HEALTH_PATH, warn=log.warning)
+
+
 def _set_gemini_daily_quota_pause(error: Exception) -> str:
     pause_until = datetime.now() + timedelta(seconds=GEMINI_DAILY_QUOTA_COOLDOWN_SECONDS)
-    with _service_health_lock:
-        data = _load_service_health()
+
+    def mutate(data):
         gemini = data.setdefault("gemini", {})
         gemini["quota_pause_set_at"] = _health_timestamp()
         gemini["quota_pause_until"] = pause_until.isoformat(timespec="seconds")
         gemini["quota_pause_reason"] = str(error)[:500]
-        _save_service_health(data)
+
+    _update_service_health(mutate)
     return pause_until.isoformat(timespec="seconds")
 
 
@@ -474,8 +483,7 @@ def _record_gemini_health(
     latency_seconds: Optional[float] = None,
     probe: bool = False,
 ):
-    with _service_health_lock:
-        data = _load_service_health()
+    def mutate(data):
         gemini = data.setdefault("gemini", {})
         now = _health_timestamp()
 
@@ -508,7 +516,8 @@ def _record_gemini_health(
             "probe": probe,
         })
         gemini["events"] = events[-50:]
-        _save_service_health(data)
+
+    _update_service_health(mutate)
 
 
 def _record_vpn_observation(
@@ -521,8 +530,7 @@ def _record_vpn_observation(
     evidence: str,
     evidence_detail: str,
 ):
-    with _service_health_lock:
-        data = _load_service_health()
+    def mutate(data):
         vpn = data.setdefault("vpn", {})
         vpn[client] = {
             "at": _health_timestamp(),
@@ -534,7 +542,8 @@ def _record_vpn_observation(
             "evidence": evidence,
             "evidence_detail": evidence_detail,
         }
-        _save_service_health(data)
+
+    _update_service_health(mutate)
 
 
 def _record_report_health(
@@ -545,13 +554,12 @@ def _record_report_health(
     report_path: str = "",
     error_summary: str = "",
 ):
-    with _service_health_lock:
-        data = _load_service_health()
-        service_health.apply_report_health(
+    _update_service_health(
+        lambda data: service_health.apply_report_health(
             data, ok, target_date,
             source=source, report_path=report_path, error_summary=error_summary,
         )
-        _save_service_health(data)
+    )
 
 
 def _gemini_recent_counts(hours: int = 24) -> tuple[int, int]:
