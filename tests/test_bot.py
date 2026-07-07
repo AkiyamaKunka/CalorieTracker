@@ -1777,6 +1777,86 @@ def test_stale_heartbeat_warning_can_be_disabled(monkeypatch):
     assert bot.sent == []
 
 
+def test_format_vpn_status_renders_evidence_and_empty_state(monkeypatch, tmp_path):
+    empty_path = tmp_path / "empty.json"
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", empty_path)
+    empty = telegram_bot.format_vpn_status()
+    assert "VPN Evidence" in empty
+
+    health_path = tmp_path / "health.json"
+    health_path.write_text(json.dumps({
+        "vpn": {
+            "android": {
+                "at": "2026-07-08T01:00:00",
+                "endpoint": "/ping",
+                "remote_ip": "93.184.216.34",
+                "vpn_active": True,
+                "vpn_check": "tun0",
+                "vpn_check_reliable": True,
+                "evidence": "remote_country",
+                "evidence_detail": "US exit <spicy&detail>",
+            },
+        },
+    }))
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", health_path)
+
+    rendered = telegram_bot.format_vpn_status()
+
+    assert "android" in rendered.lower()
+    assert "93.184.216.34" in rendered
+    assert "<spicy&detail>" not in rendered  # HTML-escaped before Telegram
+
+
+def test_format_meals_list_empty_and_populated(monkeypatch, tmp_path):
+    monkeypatch.setattr(telegram_bot.database, "DB_PATH", tmp_path / "meals.db")
+    telegram_bot.database.init_db()
+    monkeypatch.setattr(telegram_bot.database, "get_android_timezone",
+                        lambda device_name="android_watcher": "+0800")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+
+    assert "No meals" in telegram_bot.format_meals_list(12345)
+
+    now = telegram_bot.database.user_local_now()
+    telegram_bot.database.save_meal(
+        12345, now.date().isoformat(), "12:00 PM", datetime.now().isoformat(),
+        "telegram", "aa" * 16, "f1",
+        {"is_food": True, "total_calories": 640, "meal_description": "Beef <br> noodles"},
+    )
+
+    rendered = telegram_bot.format_meals_list(12345)
+
+    assert "640" in rendered
+    assert "Beef &lt;br&gt; noodles" in rendered
+    assert "<br>" not in rendered
+
+
+def test_run_gemini_probe_reports_classified_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+
+    class ExplodingModels:
+        def generate_content(self, **kwargs):
+            raise Exception("429 RESOURCE_EXHAUSTED rate thing")
+
+    probe = telegram_bot.run_gemini_probe(SimpleNamespace(models=ExplodingModels()))
+
+    assert "❌" in probe or "failed" in probe.lower()
+
+
+def test_handle_text_message_refuses_during_quota_pause(monkeypatch):
+    calls = []
+    monkeypatch.setattr(telegram_bot, "_gemini_quota_pause_summary",
+                        lambda: "Paused until tomorrow.")
+    monkeypatch.setattr(telegram_bot.database, "get_recent_meals",
+                        lambda *a, **k: calls.append("db") or [])
+    bot = _RecordingBot()
+
+    telegram_bot.handle_text_message(object(), bot, 12345, "I ate a burger")
+
+    assert len(bot.sent) == 1
+    assert "paused" in bot.sent[0]["text"].lower()
+    assert calls == []  # never reached the DB or Gemini
+
+
 def test_format_operational_status_with_no_state(monkeypatch, tmp_path):
     """Smoke test: /status renders cleanly on a fresh install (no health file,
     no heartbeat, no upload dirs)."""
