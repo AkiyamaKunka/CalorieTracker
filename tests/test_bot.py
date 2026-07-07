@@ -1486,3 +1486,58 @@ def test_sweep_stranded_pending_uploads_moves_files_and_notifies(monkeypatch, tm
     assert len(list(failed_dir.iterdir())) == 1
     assert statuses and statuses[0][0][2] == "failed"
     assert any("/retry_failed" in m["text"] for m in bot.sent)
+
+
+def test_sweep_stranded_pending_uploads_missing_dir_is_silent(monkeypatch, tmp_path):
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "never-created")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "failed")
+    bot = _RecordingBot()
+
+    telegram_bot._sweep_stranded_pending_uploads(bot)
+
+    assert bot.sent == []
+
+
+def test_sweep_stranded_pending_uploads_skips_unreadable_file(monkeypatch, tmp_path):
+    """One unreadable file must not abort the sweep; readable files still move."""
+    pending_dir = tmp_path / "pending"
+    failed_dir = tmp_path / "failed"
+    pending_dir.mkdir()
+    unreadable = pending_dir / "20260701T010101_aaaaaaaaaaaa.jpg"
+    unreadable.write_bytes(b"locked image")
+    unreadable.chmod(0)
+    (pending_dir / "20260701T020202_bbbbbbbbbbbb.jpg").write_bytes(b"fine image")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", pending_dir)
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", failed_dir)
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status", lambda *a, **k: None)
+    bot = _RecordingBot()
+
+    try:
+        telegram_bot._sweep_stranded_pending_uploads(bot)
+    finally:
+        unreadable.chmod(0o644)
+
+    assert len(list(failed_dir.iterdir())) == 1
+    assert unreadable.exists()
+    assert any("Recovered 1 upload" in m["text"] for m in bot.sent)
+
+
+def test_sweep_stranded_pending_uploads_truncates_long_lists(monkeypatch, tmp_path):
+    pending_dir = tmp_path / "pending"
+    failed_dir = tmp_path / "failed"
+    pending_dir.mkdir()
+    for i in range(12):
+        (pending_dir / f"20260701T0101{i:02d}_{i:012x}.jpg").write_bytes(f"img-{i}".encode())
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", pending_dir)
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", failed_dir)
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status", lambda *a, **k: None)
+    bot = _RecordingBot()
+
+    telegram_bot._sweep_stranded_pending_uploads(bot)
+
+    assert len(list(failed_dir.iterdir())) == 12
+    message = next(m["text"] for m in bot.sent if "Recovered 12 upload" in m["text"])
+    assert "...and 2 more." in message
+    assert message.count("• <code>") == 10
