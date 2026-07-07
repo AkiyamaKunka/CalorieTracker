@@ -1,8 +1,6 @@
 import pytest
 import sqlite3
-import json
 from datetime import datetime, date, timedelta
-from pathlib import Path
 import database
 
 @pytest.fixture(autouse=True)
