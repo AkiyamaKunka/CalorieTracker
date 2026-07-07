@@ -146,6 +146,63 @@ def test_b2_upload_oversized_body_returns_413_json(monkeypatch):
     assert resp.get_json() == {"error": "Photo too large"}
 
 
+def test_reconcile_endpoint_requires_api_key(monkeypatch):
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+
+    app = telegram_bot._build_api_app(FakeBot(), object())
+    resp = app.test_client().post("/reconcile", json={"hashes": ["a" * 32]})
+
+    assert resp.status_code == 401
+    assert resp.get_json() == {"error": "Unauthorized"}
+
+
+def test_reconcile_endpoint_rejects_payload_without_hashes(monkeypatch):
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+    monkeypatch.setattr(telegram_bot, "maybe_warn_android_vpn_inactive", lambda *a, **k: None)
+
+    app = telegram_bot._build_api_app(FakeBot(), object())
+    client = app.test_client()
+    headers = {"X-API-Key": "test-upload-key"}
+
+    for resp in (
+        client.post("/reconcile", headers=headers, json={"wrong": []}),
+        client.post("/reconcile", headers=headers, data="not json",
+                    content_type="application/json"),
+    ):
+        assert resp.status_code == 400
+        assert resp.get_json() == {"error": "Missing hashes array"}
+
+
+def test_reconcile_endpoint_reports_only_truly_missing_hashes(monkeypatch, tmp_path):
+    """Endpoint contract: logged, reserved, and failed-saved hashes are
+    suppressed; only hashes the server has never seen come back."""
+    logged = "aa" * 16
+    reserved = "bb" * 16
+    failed = "cc" * 16
+    unknown = "dd" * 16
+
+    failed_dir = tmp_path / "failed"
+    failed_dir.mkdir()
+    (failed_dir / f"20260707_120000_{failed[:12]}.jpg").write_bytes(b"x")
+
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", failed_dir)
+    monkeypatch.setattr(telegram_bot, "maybe_warn_android_vpn_inactive", lambda *a, **k: None)
+    monkeypatch.setattr(telegram_bot.database, "get_today_hashes", lambda chat_id: [logged])
+    monkeypatch.setattr(telegram_bot.database, "get_reserved_photo_hashes", lambda chat_id: [reserved])
+
+    app = telegram_bot._build_api_app(FakeBot(), object())
+    resp = app.test_client().post(
+        "/reconcile",
+        headers={"X-API-Key": "test-upload-key"},
+        json={"hashes": [logged, reserved, failed, unknown]},
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {"missing_hashes": [unknown]}
+
+
 @patch('telegram_bot.Image.open')
 def test_b10_gemini_json_parsing(mock_image_open, mock_db):
     """Test Case B10: Actual Gemini JSON Parsing fallback"""
