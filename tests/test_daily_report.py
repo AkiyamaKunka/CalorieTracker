@@ -55,6 +55,158 @@ def test_generate_report_escapes_dynamic_html(monkeypatch):
     assert "Fish &amp; sauce &lt;hot&gt;" in report
 
 
+def _meal(description="Meal", calories=500, protein=30, carbs=55, fat=12,
+          items=None, time="12:00", corrected=False, **extra):
+    meal = {
+        "time": time,
+        "corrected": corrected,
+        "analysis": {
+            "is_food": True,
+            "meal_description": description,
+            "total_calories": calories,
+            "total_protein_g": protein,
+            "total_carbs_g": carbs,
+            "total_fat_g": fat,
+            "food_items": items or [],
+        },
+    }
+    meal.update(extra)
+    return meal
+
+
+def _patch_meals(monkeypatch, today_meals, prior_meals=None):
+    monkeypatch.setattr(daily_report, "CHAT_ID", "12345")
+
+    def fake_get_meals(chat_id, start_date, end_date):
+        if start_date == end_date:
+            return today_meals
+        return prior_meals or []
+
+    monkeypatch.setattr(daily_report.database, "get_meals", fake_get_meals)
+
+
+def test_generate_report_warns_on_item_total_mismatch(monkeypatch):
+    # Reproduces the June-20 production shape: items 0+0+135 under total 1335.
+    items = [
+        {"name": "Soup", "estimated_calories": 0},
+        {"name": "Greens", "estimated_calories": 0},
+        {"name": "Rice", "estimated_calories": 135},
+    ]
+    _patch_meals(monkeypatch, [_meal(calories=1335, items=items)])
+
+    report = daily_report.generate_report("2026-06-20")
+
+    assert (
+        "⚠️ Item calories sum to ~135 kcal but the meal total is ~1335 kcal"
+        in report
+    )
+    assert "this entry may be wrong" in report
+
+
+def test_generate_report_no_mismatch_warning_when_consistent(monkeypatch):
+    items = [
+        {"name": "Fish", "estimated_calories": 300},
+        {"name": "Rice", "estimated_calories": 200},
+    ]
+    _patch_meals(monkeypatch, [_meal(calories=500, items=items)])
+
+    report = daily_report.generate_report("2026-06-20")
+
+    assert "Item calories sum to" not in report
+
+
+def test_generate_report_no_mismatch_warning_for_corrected_meal(monkeypatch):
+    items = [{"name": "Rice", "estimated_calories": 135}]
+    _patch_meals(monkeypatch, [_meal(calories=1335, items=items, corrected=True)])
+
+    report = daily_report.generate_report("2026-06-20")
+
+    assert "Item calories sum to" not in report
+
+
+def test_generate_report_flags_duplicate_hashless_meals(monkeypatch):
+    meals = [
+        _meal(description="Noodles", calories=600, time="12:00", image_hash=""),
+        _meal(description="Noodles", calories=600, time="12:00", image_hash=""),
+    ]
+    _patch_meals(monkeypatch, meals)
+
+    report = daily_report.generate_report("2026-06-20")
+
+    assert report.count("Possible duplicate of meal") == 1
+    assert "⚠️ Possible duplicate of meal 1." in report
+
+
+def test_generate_report_does_not_flag_distinct_meals(monkeypatch):
+    meals = [
+        _meal(description="Noodles", calories=600, time="12:00"),
+        _meal(description="Salad", calories=300, time="18:30"),
+    ]
+    _patch_meals(monkeypatch, meals)
+
+    report = daily_report.generate_report("2026-06-20")
+
+    assert "Possible duplicate" not in report
+
+
+def test_generate_report_flags_duplicate_by_image_hash(monkeypatch):
+    meals = [
+        _meal(description="Lunch photo", calories=700, time="12:00", image_hash="abc123"),
+        _meal(description="Lunch photo (again)", calories=650, time="12:05", image_hash="abc123"),
+    ]
+    _patch_meals(monkeypatch, meals)
+
+    report = daily_report.generate_report("2026-06-20")
+
+    assert "⚠️ Possible duplicate of meal 1." in report
+
+
+def test_generate_report_seven_day_average_and_delta(monkeypatch):
+    prior = [
+        _meal(calories=1800, date="2026-06-18"),
+        _meal(calories=2200, date="2026-06-18"),
+        _meal(calories=1000, date="2026-06-19"),
+    ]
+    _patch_meals(monkeypatch, [_meal(calories=3000)], prior_meals=prior)
+
+    report = daily_report.generate_report("2026-06-20")
+
+    # Two distinct prior days: 4000 and 1000 kcal -> avg 2500.
+    assert "📈 <b>7-day avg:</b> ~2,500 kcal" in report
+    assert "Today vs avg: +500 kcal (+20%)" in report
+
+
+def test_generate_report_seven_day_average_suppressed_for_single_day(monkeypatch):
+    prior = [
+        _meal(calories=1800, date="2026-06-19"),
+        _meal(calories=200, date="2026-06-19"),
+    ]
+    _patch_meals(monkeypatch, [_meal(calories=3000)], prior_meals=prior)
+
+    report = daily_report.generate_report("2026-06-20")
+
+    assert "7-day avg" not in report
+    assert "Today vs avg" not in report
+
+
+def test_generate_report_seven_day_window_bounds(monkeypatch):
+    monkeypatch.setattr(daily_report, "CHAT_ID", "12345")
+    windows = []
+
+    def fake_get_meals(chat_id, start_date, end_date):
+        windows.append((start_date, end_date))
+        if start_date == end_date:
+            return [_meal(calories=500)]
+        return []
+
+    monkeypatch.setattr(daily_report.database, "get_meals", fake_get_meals)
+
+    daily_report.generate_report("2026-06-20")
+
+    assert ("2026-06-20", "2026-06-20") in windows
+    assert ("2026-06-13", "2026-06-19") in windows
+
+
 def test_send_telegram_retries_plain_text_and_reports_failure(monkeypatch):
     calls = []
     responses = [

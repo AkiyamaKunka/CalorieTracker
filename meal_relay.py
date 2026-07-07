@@ -168,7 +168,7 @@ def main():
     server = HTTPServer((HOST, port), MealHandler)
     log.info(f"🔗 Meal Relay Server running on port {port}")
     log.info(f"   Listening on: http://{HOST}:{port}")
-    log.info(f"   Press Ctrl+C to stop.\n")
+    log.info("   Press Ctrl+C to stop.\n")
 
     try:
         server.serve_forever()
