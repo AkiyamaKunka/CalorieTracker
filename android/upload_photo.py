@@ -55,7 +55,12 @@ SERVER_URLS = (
     or ["http://YOUR_GCP_IP"]
 )
 QUEUE_DIR = Path.home() / ".offline_queue"
-QUEUE_BATCH_LIMIT = _env_int("QUEUE_BATCH_LIMIT", 3, 1, 100)
+# Heartbeats arrive every PING_INTERVAL_SECONDS (default 15 min, up from 5 —
+# see android_watcher.sh), so each ping drains up to 10 queued photos instead
+# of 3 to compensate. Trade-off: after connectivity returns, the drain can
+# start up to 15 min later, but a day-scale backlog still clears in a few
+# heartbeats.
+QUEUE_BATCH_LIMIT = _env_int("QUEUE_BATCH_LIMIT", 10, 1, 100)
 QUEUE_LOCK_STALE_SECONDS = _env_int("QUEUE_LOCK_STALE_SECONDS", 600, 30, 86400)
 SUPPORTED_QUEUE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".heif"}
 # Statuses where retrying the same file can never succeed (bad request, too

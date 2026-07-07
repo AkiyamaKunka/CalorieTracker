@@ -402,7 +402,43 @@ def test_sync_uploads_missing_hashes(mock_post, mock_queue_dir, tmp_path, mock_e
 def test_env_int_falls_back_for_bad_values(monkeypatch):
     monkeypatch.setenv("QUEUE_BATCH_LIMIT", "not-an-int")
 
-    assert upload_photo._env_int("QUEUE_BATCH_LIMIT", 3, 1, 10) == 3
+    assert upload_photo._env_int("QUEUE_BATCH_LIMIT", 10, 1, 100) == 10
+
+
+def test_queue_batch_limit_defaults_to_10(tmp_path):
+    """Heartbeats now arrive every ~15 min instead of 5, so each drain moves
+    up to 10 queued photos to keep backlog clearance time comparable."""
+    env = dict(os.environ)
+    env.pop("QUEUE_BATCH_LIMIT", None)
+    env["PYTHONPATH"] = str(ANDROID_DIR)
+    # Keep the subprocess import hermetic: no real user config file.
+    env["CALORIE_TRACKER_ANDROID_CONFIG"] = str(tmp_path / "no_such_config.json")
+    out = subprocess.check_output(
+        [sys.executable, "-c", "import upload_photo; print(upload_photo.QUEUE_BATCH_LIMIT)"],
+        env=env,
+        text=True,
+    )
+    assert out.strip().splitlines()[-1] == "10"
+
+
+def test_process_queue_default_drains_full_batch(mock_queue_dir, monkeypatch):
+    """process_queue() with no args drains QUEUE_BATCH_LIMIT items, no more."""
+    limit = upload_photo.QUEUE_BATCH_LIMIT
+    mock_queue_dir.mkdir(exist_ok=True)
+    for index in range(limit + 2):
+        (mock_queue_dir / f"queued_{index:02d}.jpg").write_bytes(b"x")
+
+    uploaded = []
+    monkeypatch.setattr(
+        upload_photo, "_upload_photo_status",
+        lambda path: uploaded.append(path) or (200, True),
+    )
+
+    upload_photo.process_queue()
+
+    assert len(uploaded) == limit
+    remaining = [item for item in mock_queue_dir.iterdir() if item.suffix == ".jpg"]
+    assert len(remaining) == 2
 
 
 def test_get_headers_includes_vpn_fields(monkeypatch):

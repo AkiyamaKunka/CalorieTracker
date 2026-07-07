@@ -11,6 +11,16 @@ FAIL_COUNT_DIR="$HOME/.calorie_upload_failures"
 MAX_UPLOAD_ATTEMPTS=3
 SCAN_LIST="$HOME/.calorie_watcher_scan.$$"
 NEW_LIST="$HOME/.calorie_watcher_new.$$"
+# Heartbeat interval (seconds). 15 min instead of 5: fewer radio wakeups and
+# less log churn. Trade-off: after connectivity returns, the offline-queue
+# drain can start up to 15 min later — compensated by the uploader draining a
+# bigger batch per heartbeat (QUEUE_BATCH_LIMIT default 10, see
+# upload_photo.py). The bot only warns about a stale heartbeat after 2h, so
+# 15-min pings stay far inside that threshold.
+PING_INTERVAL_SECONDS="${PING_INTERVAL_SECONDS:-900}"
+# Daily housekeeping (history pruning + stale fail-counter cleanup) runs once
+# per this many poll iterations; the default is one day of 5-second polls.
+CALORIE_HOUSEKEEP_POLLS="${CALORIE_HOUSEKEEP_POLLS:-17280}"
 
 # A recorded PID only counts as a live watcher if its cmdline still mentions
 # this script: after a SIGKILL or reboot the kernel can hand the same PID to
@@ -25,6 +35,18 @@ is_watcher_running() {
     *android_watcher*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# Rotate watcher.log once it exceeds 1MB, keeping a single previous
+# generation (~2MB total bound). Every writer appends per-write (>> / tee -a),
+# so renaming the live file is safe: the next append recreates a fresh log.
+rotate_log_if_needed() {
+  local size
+  size="$(stat -c %s "$LOG_FILE" 2>/dev/null || stat -f %z "$LOG_FILE" 2>/dev/null || echo 0)"
+  if [ "$size" -gt 1048576 ] 2>/dev/null; then
+    mv "$LOG_FILE" "$LOG_FILE.1"
+    echo "[$(date)] Rotated watcher.log ($size bytes) to watcher.log.1." | tee -a "$LOG_FILE"
+  fi
 }
 
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
@@ -48,7 +70,7 @@ echo $$ > "$PID_FILE"
 cleanup() {
   [ -n "$PING_PID" ] && kill "$PING_PID" 2>/dev/null
   [ -n "$SYNC_PID" ] && kill "$SYNC_PID" 2>/dev/null
-  rm -f "$PID_FILE" "$SCAN_LIST" "$NEW_LIST"
+  rm -f "$PID_FILE" "$SCAN_LIST" "$NEW_LIST" "$HOME/.history.tmp"
   rmdir "$LOCK_DIR" 2>/dev/null
   return 0
 }
@@ -59,13 +81,14 @@ trap 'exit 130' INT
 # Acquire a wake-lock so Android doesn't kill this process
 termux-wake-lock
 
+rotate_log_if_needed
 echo "[$(date)] Starting CalorieTracker Android Watcher..." | tee -a "$LOG_FILE"
 
-# Start background ping every 5 minutes
+# Start background heartbeat ping (see PING_INTERVAL_SECONDS above)
 (
   while true; do
     python3 ~/upload_photo.py --ping >> "$LOG_FILE" 2>&1
-    sleep 300
+    sleep "$PING_INTERVAL_SECONDS"
   done
 ) &
 PING_PID=$!
@@ -99,6 +122,36 @@ list_photos() {
 remember_uploaded() {
   echo "$1" >> "$HISTORY_FILE"
   LC_ALL=C sort -u "$HISTORY_FILE" -o "$HISTORY_FILE"
+}
+
+# Camera-dir mtime for the poll gate. Read this BEFORE each full scan: a photo
+# that lands mid-scan bumps the directory mtime past the cached value, so the
+# next tick sees a change and rescans (TOCTOU-safe ordering). "unknown" (stat
+# failed, e.g. storage unmounted) never matches, so those ticks always scan.
+camera_dir_mtime() {
+  stat -c %Y "$CAMERA_DIR" 2>/dev/null || stat -f %m "$CAMERA_DIR" 2>/dev/null || echo unknown
+}
+
+# True when at least one upload fail-counter exists; those files force a full
+# scan every tick because retries must not wait on a camera-dir mtime change.
+fail_counters_pending() {
+  local entry
+  for entry in "$FAIL_COUNT_DIR"/*; do
+    [ -e "$entry" ] && return 0
+  done
+  return 1
+}
+
+# Daily housekeeping: prune history entries whose photos were deleted (keeps
+# the history file bounded) and expire week-old fail counters. The caller only
+# invokes this when the scan saw at least one photo — an unmounted or empty
+# camera dir must never wipe the history, or every photo would mass re-upload
+# once storage came back.
+housekeep() {
+  LC_ALL=C comm -12 "$HISTORY_FILE" "$SCAN_LIST" > "$HOME/.history.tmp" \
+    && mv "$HOME/.history.tmp" "$HISTORY_FILE"
+  find "$FAIL_COUNT_DIR" -type f -mtime +7 -delete 2>/dev/null
+  return 0
 }
 
 # Bounded wait until the file stops growing and is non-empty (the camera app
@@ -146,12 +199,44 @@ LC_ALL=C sort -u "$HISTORY_FILE" -o "$HISTORY_FILE" 2>/dev/null || true
 
 echo "[$(date)] Started polling loop for $CAMERA_DIR" | tee -a "$LOG_FILE"
 
+# mtime-gated polling state: most 5s ticks touch nothing on flash. A full
+# find+sort+comm scan only runs when the camera-dir mtime changed, a retry is
+# pending (fail counter or a skipped-unstable file from the previous tick),
+# or every 12th tick as a 60s safety net for FUSE mtime quirks.
+LAST_DIR_MTIME=""
+TICKS_SINCE_SCAN=0
+RETRY_PENDING=0
+POLLS_SINCE_HOUSEKEEP=0
+
 while true; do
+  rotate_log_if_needed
+  TICKS_SINCE_SCAN=$((TICKS_SINCE_SCAN + 1))
+  POLLS_SINCE_HOUSEKEEP=$((POLLS_SINCE_HOUSEKEEP + 1))
+
+  # Read the dir mtime BEFORE any scan work (see camera_dir_mtime).
+  DIR_MTIME="$(camera_dir_mtime)"
+  if [ "$RETRY_PENDING" -eq 0 ] \
+      && [ "$TICKS_SINCE_SCAN" -lt 12 ] \
+      && [ "$DIR_MTIME" != "unknown" ] \
+      && [ "$DIR_MTIME" = "$LAST_DIR_MTIME" ] \
+      && ! fail_counters_pending; then
+    sleep 5
+    continue
+  fi
+  LAST_DIR_MTIME="$DIR_MTIME"
+  TICKS_SINCE_SCAN=0
+  RETRY_PENDING=0
+
   list_photos > "$SCAN_LIST"
   if [ -s "$HISTORY_FILE" ]; then
     LC_ALL=C comm -23 "$SCAN_LIST" "$HISTORY_FILE" > "$NEW_LIST"
   else
     cp "$SCAN_LIST" "$NEW_LIST"
+  fi
+
+  if [ "$POLLS_SINCE_HOUSEKEEP" -ge "$CALORIE_HOUSEKEEP_POLLS" ] && [ -s "$SCAN_LIST" ]; then
+    housekeep
+    POLLS_SINCE_HOUSEKEEP=0
   fi
 
   while IFS= read -r FILE_PATH; do
@@ -162,6 +247,7 @@ while true; do
     # A pending retry means the file already passed the stability check once.
     if [ ! -f "$FAIL_KEY" ] && ! wait_for_stable_file "$FILE_PATH"; then
       echo "[$(date)] Skipping $FILE_PATH (unreadable or never stabilized; will retry next poll)." | tee -a "$LOG_FILE"
+      RETRY_PENDING=1
       continue
     fi
     # Record to history only after the uploader handled the file (exit 0), so
