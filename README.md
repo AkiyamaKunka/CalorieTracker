@@ -70,8 +70,9 @@ flowchart LR
 
 ## Core Features
 
-- Food photo analysis with Google Gemini.
+- Food photo analysis with Google Gemini (native JSON output; photos are downscaled on the phone and again server-side before each call, so quota and bandwidth aren't spent on 25MB camera files).
 - Calories, protein, carbs, fat, meal source, photo hash, and correction state in SQLite.
+- Reports flag meals whose item calories contradict their total and likely duplicates; the daily report includes a 7-day average and `/today` shows your typical-day intake.
 - Uploads from Telegram photos, Android Termux, and iOS Shortcuts.
 - Natural-language meal corrections and deletions in Telegram (deletions ask for inline confirmation before touching data).
 - Meals are dated in the phone's reported timezone, so a midnight snack lands on the right day even when the server runs in UTC.
@@ -252,9 +253,11 @@ bash install_and_start.sh
 
 It verifies the source files before stopping the running watcher, preserves the offline upload queue across reinstalls, and restarts everything under a wake lock.
 
-Watcher behavior worth knowing: new photos are marked as handled after a successful upload or safe offline queueing; a photo that fails three consecutive attempts is recorded anyway (with a loud log line) so it cannot wedge the loop, and photos already on the phone at watcher startup are skipped rather than uploaded as a backlog — the nightly sync covers both cases. Partially-written camera files are skipped until their size stabilizes, and photos the server permanently rejects are quarantined in `~/.offline_queue/rejected/`. The nightly `--sync` reconciles today's and yesterday's photos (including HEIC) against the server.
+Watcher behavior worth knowing: new photos are marked as handled after a successful upload or safe offline queueing; a photo that fails three consecutive attempts is recorded anyway (with a loud log line) so it cannot wedge the loop, and photos already on the phone at watcher startup are skipped rather than uploaded as a backlog — the nightly sync covers both cases (photos newer than `SEED_FRESH_MINUTES`, default 15, upload immediately instead). Partially-written camera files are skipped until their size stabilizes, and photos the server permanently rejects are quarantined in `~/.offline_queue/rejected/`. The nightly `--sync` reconciles today's and yesterday's photos (including HEIC) against the server. Idle polling is mtime-gated (one `stat` per 5s tick when nothing changed), `watcher.log` rotates at 1MB, and daily housekeeping prunes history entries for deleted photos.
 
-If your camera saves somewhere other than `DCIM/Camera`, set `CAMERA_DIR` (or `CALORIE_CAMERA_DIR`) in the environment for both the watcher and manual runs. Advanced env-only knobs: `CALORIE_TRACKER_SERVER_URLS`, `CALORIE_TRACKER_ANDROID_CONFIG`, `QUEUE_BATCH_LIMIT`, `QUEUE_LOCK_STALE_SECONDS`, `ANDROID_VPN_ACTIVE`.
+If Pillow is installed in Termux (`pip install pillow`, optional), photos are recompressed to ≤1600px JPEG before upload — a 10–25MB camera shot becomes a few hundred KB on cellular — while dedup still keys on the original file's hash. Without Pillow (or for undecodable HEIC), originals upload unchanged.
+
+If your camera saves somewhere other than `DCIM/Camera`, set `CAMERA_DIR` (or `CALORIE_CAMERA_DIR`) in the environment for both the watcher and manual runs. Advanced env-only knobs: `PING_INTERVAL_SECONDS` (heartbeat, default 900), `SEED_FRESH_MINUTES`, `CALORIE_HOUSEKEEP_POLLS`, `CALORIE_RECOMPRESS_MAX_EDGE` (0 disables recompression) / `CALORIE_RECOMPRESS_JPEG_QUALITY`, `CALORIE_TRACKER_SERVER_URLS`, `CALORIE_TRACKER_ANDROID_CONFIG`, `QUEUE_BATCH_LIMIT`, `QUEUE_LOCK_STALE_SECONDS`, `ANDROID_VPN_ACTIVE`.
 
 ### iPhone
 
