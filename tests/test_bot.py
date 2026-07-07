@@ -1543,6 +1543,47 @@ def test_sweep_stranded_pending_uploads_truncates_long_lists(monkeypatch, tmp_pa
     assert message.count("• <code>") == 10
 
 
+def test_sweep_releases_orphaned_processing_reservation(monkeypatch, tmp_path):
+    """A 'processing' reservation with no staged or failed file behind it is
+    a crash orphan — the sweep must release it so phone retries stop getting
+    'duplicate' and losing their queued copy."""
+    orphan_hash = "ab" * 16
+    released = []
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "failed")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot.database, "get_processing_photo_hashes",
+                        lambda chat_id: [orphan_hash])
+    monkeypatch.setattr(telegram_bot.database, "release_photo_hash",
+                        lambda chat_id, image_hash: released.append((chat_id, image_hash)))
+    bot = _RecordingBot()
+
+    telegram_bot._sweep_stranded_pending_uploads(bot)
+
+    assert released == [(12345, orphan_hash)]
+    assert bot.sent == []
+
+
+def test_sweep_keeps_processing_reservation_backed_by_failed_file(monkeypatch, tmp_path):
+    kept_hash = "cd" * 16
+    released = []
+    failed_dir = tmp_path / "failed"
+    failed_dir.mkdir()
+    (failed_dir / f"20260707_220000_{kept_hash[:12]}.jpg").write_bytes(b"x")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", failed_dir)
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot.database, "get_processing_photo_hashes",
+                        lambda chat_id: [kept_hash])
+    monkeypatch.setattr(telegram_bot.database, "release_photo_hash",
+                        lambda chat_id, image_hash: released.append(image_hash))
+    bot = _RecordingBot()
+
+    telegram_bot._sweep_stranded_pending_uploads(bot)
+
+    assert released == []
+
+
 def test_format_operational_status_with_no_state(monkeypatch, tmp_path):
     """Smoke test: /status renders cleanly on a fresh install (no health file,
     no heartbeat, no upload dirs)."""

@@ -229,6 +229,17 @@ def discard_failed_photo_hashes_by_prefix(chat_id: int, hash_prefix: str) -> int
         return cursor.rowcount
 
 
+def get_processing_photo_hashes(chat_id: int) -> List[str]:
+    """Return hashes whose reservations are still marked 'processing'."""
+    with _connect() as conn:
+        cursor = conn.execute(
+            "SELECT image_hash FROM photo_ingestions "
+            "WHERE chat_id = ? AND status = 'processing' AND image_hash != ''",
+            (chat_id,),
+        )
+        return [row[0] for row in cursor.fetchall() if row[0]]
+
+
 def get_reserved_photo_hashes(chat_id: int) -> List[str]:
     """Return image hashes already claimed by the ingestion guard.
 

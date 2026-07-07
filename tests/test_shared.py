@@ -104,6 +104,17 @@ def test_record_daily_report_health_uses_locked_update(tmp_path, monkeypatch):
     assert (tmp_path / "health.json.lock").exists()
 
 
+def test_get_processing_photo_hashes_filters_by_status(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "meals.db")
+    database.init_db()
+
+    assert database.reserve_photo_hash(1, "aa" * 16, "test") is True
+    assert database.reserve_photo_hash(1, "bb" * 16, "test") is True
+    database.mark_photo_hash_status(1, "bb" * 16, "saved", meal_id=7)
+
+    assert database.get_processing_photo_hashes(1) == ["aa" * 16]
+
+
 def test_parse_timezone_offset():
     assert database.parse_timezone_offset("+0800") == timedelta(hours=8)
     assert database.parse_timezone_offset("-0530") == timedelta(hours=-5, minutes=-30)

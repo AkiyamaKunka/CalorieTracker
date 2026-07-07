@@ -2562,6 +2562,21 @@ def _sweep_stranded_pending_uploads(bot: TelegramBot):
         database.mark_photo_hash_status(ALLOWED_CHAT_ID, img_hash, "failed", source="startup_sweep")
         moved.append(failed_path.name)
 
+    # A crash between reserving a hash and finishing analysis leaves a
+    # 'processing' row with no file behind it; phone retries then get
+    # "duplicate" (and delete their queued copy) until the reservation goes
+    # stale. Nothing can be legitimately in flight at boot, so release any
+    # reservation that has no staged or failed file backing it.
+    failed_prefixes = _failed_upload_hash_prefixes()
+    released = 0
+    for img_hash in database.get_processing_photo_hashes(ALLOWED_CHAT_ID):
+        if _image_hash_prefix(img_hash) in failed_prefixes:
+            continue
+        database.release_photo_hash(ALLOWED_CHAT_ID, img_hash)
+        released += 1
+    if released:
+        log.info(f"♻️ Released {released} orphaned in-flight photo reservation(s) at boot.")
+
     if not moved:
         return
 
