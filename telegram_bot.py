@@ -115,6 +115,8 @@ RETRY_ALL_FAILED_MAX = _env_int("RETRY_ALL_FAILED_MAX", 10, 1, 50)
 MAX_API_UPLOAD_BYTES = _env_int("MAX_API_UPLOAD_BYTES", 25 * 1024 * 1024, 1024, 100 * 1024 * 1024)
 ANDROID_VPN_WARNING_COOLDOWN_MINUTES = _env_int("ANDROID_VPN_WARNING_COOLDOWN_MINUTES", 30, 0, 1440)
 IOS_VPN_WARNING_COOLDOWN_MINUTES = _env_int("IOS_VPN_WARNING_COOLDOWN_MINUTES", 30, 0, 1440)
+HEARTBEAT_STALE_WARNING_HOURS = _env_float("HEARTBEAT_STALE_WARNING_HOURS", 2, 0, 168)
+HEARTBEAT_STALE_WARNING_COOLDOWN_HOURS = _env_float("HEARTBEAT_STALE_WARNING_COOLDOWN_HOURS", 12, 0.1, 168)
 VPN_GEO_LOOKUP_ENABLED = os.environ.get("VPN_GEO_LOOKUP_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
 VPN_GEO_LOOKUP_TIMEOUT_SECONDS = _env_float("VPN_GEO_LOOKUP_TIMEOUT_SECONDS", 2, 0.1, 30)
 VPN_GEO_CACHE_TTL_SECONDS = _env_int("VPN_GEO_CACHE_TTL_SECONDS", 86400, 60, 604800)
@@ -142,6 +144,7 @@ TRUSTED_PROXY_ENABLED = os.environ.get("TRUSTED_PROXY_ENABLED", "").strip().lowe
 NL_DELETE_CONFIRM_TTL_SECONDS = 600
 _last_android_vpn_warning_at = None
 _last_ios_vpn_warning_at = None
+_last_stale_heartbeat_warning_at = None
 _vpn_warning_lock = threading.Lock()
 _api_upload_processing_hashes = set()
 _api_upload_processing_lock = threading.Lock()
@@ -1520,6 +1523,52 @@ def format_vpn_status() -> str:
     return "\n".join(lines)
 
 
+def maybe_warn_stale_android_heartbeat(bot: TelegramBot) -> bool:
+    """Warn once (with cooldown) when the phone stops reaching the server.
+
+    Surfaces silent failure modes — watcher dead, wrong server address,
+    blocked network — where photos pile up in the phone's offline queue
+    with no visible signal. Only fires for a heartbeat that existed and
+    went stale; a never-connected setup is a setup task, not an outage.
+    """
+    global _last_stale_heartbeat_warning_at
+    if HEARTBEAT_STALE_WARNING_HOURS <= 0:
+        return False
+
+    last_ping = database.get_last_android_heartbeat()
+    if not last_ping:
+        return False
+
+    try:
+        last_ping_dt = datetime.fromisoformat(last_ping)
+    except ValueError:
+        return False
+
+    age = datetime.now() - last_ping_dt
+    if age.total_seconds() < HEARTBEAT_STALE_WARNING_HOURS * 3600:
+        return False
+
+    now = datetime.now()
+    if (_last_stale_heartbeat_warning_at is not None
+            and (now - _last_stale_heartbeat_warning_at).total_seconds()
+            < HEARTBEAT_STALE_WARNING_COOLDOWN_HOURS * 3600):
+        return False
+    _last_stale_heartbeat_warning_at = now
+
+    hours = int(age.total_seconds() // 3600)
+    log.warning(f"Android heartbeat stale for {hours}h; notifying user.")
+    bot.send_message(
+        ALLOWED_CHAT_ID,
+        f"📵 <b>Android watcher hasn't reached the server in about {hours}h</b> "
+        f"(last ping <code>{_html(last_ping)}</code>).\n\n"
+        "The phone may be offline, the watcher may have stopped, or it can't "
+        "reach the server — new photos are piling up in the phone's offline "
+        "queue meanwhile.\n\n"
+        "Check <code>~/watcher.log</code> on the phone, or <code>/android</code> here.",
+    )
+    return True
+
+
 def format_operational_status() -> str:
     health = _load_service_health()
     last_ping = database.get_last_android_heartbeat()
@@ -2650,6 +2699,7 @@ def main():
     try:
         while True:
             updates = bot.get_updates(timeout=30)
+            maybe_warn_stale_android_heartbeat(bot)
 
             for update in updates:
                 callback_query = update.get("callback_query")

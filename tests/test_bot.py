@@ -1584,6 +1584,50 @@ def test_sweep_keeps_processing_reservation_backed_by_failed_file(monkeypatch, t
     assert released == []
 
 
+def _stale_heartbeat_setup(monkeypatch, last_ping):
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot, "_last_stale_heartbeat_warning_at", None)
+    monkeypatch.setattr(telegram_bot.database, "get_last_android_heartbeat", lambda: last_ping)
+
+
+def test_stale_heartbeat_warns_once_with_cooldown(monkeypatch):
+    stale = (datetime.now() - timedelta(hours=3)).isoformat()
+    _stale_heartbeat_setup(monkeypatch, stale)
+    bot = _RecordingBot()
+
+    assert telegram_bot.maybe_warn_stale_android_heartbeat(bot) is True
+    assert telegram_bot.maybe_warn_stale_android_heartbeat(bot) is False
+    assert len(bot.sent) == 1
+    assert "hasn't reached the server" in bot.sent[0]["text"]
+    assert "/android" in bot.sent[0]["text"]
+
+
+def test_fresh_heartbeat_does_not_warn(monkeypatch):
+    _stale_heartbeat_setup(monkeypatch, datetime.now().isoformat())
+    bot = _RecordingBot()
+
+    assert telegram_bot.maybe_warn_stale_android_heartbeat(bot) is False
+    assert bot.sent == []
+
+
+def test_never_connected_heartbeat_does_not_warn(monkeypatch):
+    _stale_heartbeat_setup(monkeypatch, None)
+    bot = _RecordingBot()
+
+    assert telegram_bot.maybe_warn_stale_android_heartbeat(bot) is False
+    assert bot.sent == []
+
+
+def test_stale_heartbeat_warning_can_be_disabled(monkeypatch):
+    stale = (datetime.now() - timedelta(hours=30)).isoformat()
+    _stale_heartbeat_setup(monkeypatch, stale)
+    monkeypatch.setattr(telegram_bot, "HEARTBEAT_STALE_WARNING_HOURS", 0)
+    bot = _RecordingBot()
+
+    assert telegram_bot.maybe_warn_stale_android_heartbeat(bot) is False
+    assert bot.sent == []
+
+
 def test_format_operational_status_with_no_state(monkeypatch, tmp_path):
     """Smoke test: /status renders cleanly on a fresh install (no health file,
     no heartbeat, no upload dirs)."""
