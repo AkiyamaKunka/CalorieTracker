@@ -1541,3 +1541,60 @@ def test_sweep_stranded_pending_uploads_truncates_long_lists(monkeypatch, tmp_pa
     message = next(m["text"] for m in bot.sent if "Recovered 12 upload" in m["text"])
     assert "...and 2 more." in message
     assert message.count("• <code>") == 10
+
+
+def test_format_operational_status_with_no_state(monkeypatch, tmp_path):
+    """Smoke test: /status renders cleanly on a fresh install (no health file,
+    no heartbeat, no upload dirs)."""
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "missing.json")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "no-pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "no-failed")
+    monkeypatch.setattr(telegram_bot.database, "get_last_android_heartbeat", lambda: None)
+
+    status = telegram_bot.format_operational_status()
+
+    assert "CalorieTracker Status" in status
+    assert "no heartbeat yet" in status
+    assert "0 pending, 0 failed" in status
+    assert "Daily report:" not in status
+
+
+def test_format_operational_status_with_full_state(monkeypatch, tmp_path):
+    import json as _json
+
+    health_path = tmp_path / "health.json"
+    health_path.write_text(_json.dumps({
+        "gemini": {"last_ok_at": datetime.now().isoformat(timespec="seconds")},
+        "daily_report": {
+            "last_ok": True,
+            "last_target_date": "2026-07-07",
+            "last_attempt_at": datetime.now().isoformat(timespec="seconds"),
+        },
+    }))
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", health_path)
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "no-pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "no-failed")
+    monkeypatch.setattr(
+        telegram_bot.database, "get_last_android_heartbeat",
+        lambda: datetime.now().isoformat(),
+    )
+
+    status = telegram_bot.format_operational_status()
+
+    assert "🟢 Android: online" in status
+    assert "Daily report: 🟢 target 2026-07-07" in status
+
+
+def test_format_operational_status_escapes_invalid_heartbeat(monkeypatch, tmp_path):
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "missing.json")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "no-pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "no-failed")
+    monkeypatch.setattr(
+        telegram_bot.database, "get_last_android_heartbeat", lambda: "corrupt<b>value",
+    )
+
+    status = telegram_bot.format_operational_status()
+
+    assert "invalid heartbeat" in status
+    assert "corrupt&lt;b&gt;value" in status
+    assert "corrupt<b>value" not in status
