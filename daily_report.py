@@ -52,12 +52,14 @@ def _save_service_health(data):
 
 
 def _record_daily_report_health(ok: bool, target_date: str, source: str = "cron", report_path: str = "", error_summary: str = ""):
-    data = _load_service_health()
-    service_health.apply_report_health(
-        data, ok, target_date,
-        source=source, report_path=report_path, error_summary=error_summary,
+    service_health.update(
+        lambda data: service_health.apply_report_health(
+            data, ok, target_date,
+            source=source, report_path=report_path, error_summary=error_summary,
+        ),
+        SERVICE_HEALTH_PATH,
+        warn=_warn,
     )
-    _save_service_health(data)
 
 
 _TELEGRAM_HTML_TAG_RE = re.compile(

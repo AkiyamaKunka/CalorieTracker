@@ -59,6 +59,51 @@ def test_report_health_wrappers_share_schema(tmp_path, monkeypatch):
     assert set(bot_data) == set(report_data)
 
 
+def test_service_health_update_persists_mutation(tmp_path):
+    path = tmp_path / "health.json"
+
+    result = service_health.update(lambda d: d.setdefault("gemini", {}).update({"x": 1}), path)
+
+    assert result["gemini"]["x"] == 1
+    assert service_health.load(path)["gemini"]["x"] == 1
+
+
+def test_service_health_update_serializes_concurrent_writers(tmp_path):
+    """Two overlapping read-modify-write cycles must not drop each other's
+    record — this is the bot-vs-cron lost-update race."""
+    import threading as _threading
+    import time as _time
+
+    path = tmp_path / "health.json"
+    barrier = _threading.Barrier(2)
+
+    def writer(name):
+        def mutate(data):
+            events = data.setdefault("events", [])
+            _time.sleep(0.05)  # widen the race window inside the critical section
+            events.append(name)
+        barrier.wait()
+        service_health.update(mutate, path)
+
+    threads = [_threading.Thread(target=writer, args=(f"w{i}",)) for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sorted(service_health.load(path)["events"]) == ["w0", "w1"]
+
+
+def test_record_daily_report_health_uses_locked_update(tmp_path, monkeypatch):
+    monkeypatch.setattr(daily_report, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+
+    daily_report._record_daily_report_health(True, "2026-07-07")
+
+    data = service_health.load(tmp_path / "health.json")
+    assert data["daily_report"]["last_ok"] is True
+    assert (tmp_path / "health.json.lock").exists()
+
+
 def test_parse_timezone_offset():
     assert database.parse_timezone_offset("+0800") == timedelta(hours=8)
     assert database.parse_timezone_offset("-0530") == timedelta(hours=-5, minutes=-30)
