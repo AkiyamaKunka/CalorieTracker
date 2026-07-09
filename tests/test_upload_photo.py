@@ -742,7 +742,7 @@ def test_full_offline_to_online_lifecycle(mock_post, mock_queue_dir, mock_env, t
     assert len(successful_uploads) == 1
 
 
-def _noise_jpeg(width=2400, height=1800, seed=42):
+def _noise_jpeg(width=2400, height=1800, seed=42, orientation=None):
     """Deterministic high-entropy JPEG that genuinely shrinks when downscaled."""
     import io as _io
     import random as _random
@@ -750,10 +750,14 @@ def _noise_jpeg(width=2400, height=1800, seed=42):
     from PIL import Image
 
     rng = _random.Random(seed)
-    img = Image.frombytes("RGB", (width, height),
-                          bytes(rng.getrandbits(8) for _ in range(width * height * 3)))
+    img = Image.frombytes("RGB", (width, height), rng.randbytes(width * height * 3))
     out = _io.BytesIO()
-    img.save(out, format="JPEG", quality=92)
+    save_kwargs = {"format": "JPEG", "quality": 92}
+    if orientation is not None:
+        exif = Image.Exif()
+        exif[0x0112] = orientation
+        save_kwargs["exif"] = exif
+    img.save(out, **save_kwargs)
     return out.getvalue()
 
 
@@ -778,6 +782,50 @@ def test_recompress_falls_back_safely(monkeypatch):
     # Feature disabled via env knob.
     monkeypatch.setattr(upload_photo, "RECOMPRESS_MAX_EDGE", 0)
     assert upload_photo._recompress_for_upload(_noise_jpeg(400, 300)) is None
+
+
+def test_recompress_honors_exif_orientation():
+    """The transpose now runs AFTER the downscale (on the small image, where
+    the EXIF tag survives on the Image object); the output must still come
+    out with swapped dimensions for a rotated orientation."""
+    import io as _io
+
+    from PIL import Image
+
+    original = _noise_jpeg(800, 600, orientation=6)
+    result = upload_photo._recompress_for_upload(original)
+
+    assert result is not None
+    decoded = Image.open(_io.BytesIO(result))
+    # Orientation 6 (90° rotation) swaps width and height.
+    assert decoded.size == (600, 800)
+
+
+def test_recompress_large_jpeg_draft_decode_respects_max_edge():
+    """A JPEG more than 2x the target edge takes the draft() reduced-scale
+    decode path; the result must still honor RECOMPRESS_MAX_EDGE."""
+    import io as _io
+
+    from PIL import Image
+
+    original = _noise_jpeg(3600, 2400)
+    result = upload_photo._recompress_for_upload(original)
+
+    assert result is not None
+    assert len(result) < len(original)
+    decoded = Image.open(_io.BytesIO(result))
+    assert max(decoded.size) <= upload_photo.RECOMPRESS_MAX_EDGE
+    assert decoded.mode == "RGB"
+
+
+def test_recompress_defers_over_budget_images_to_original(monkeypatch):
+    """Past the decode pixel budget (checked on the header, before any pixel
+    data is decoded), recompression steps aside so the original bytes upload
+    instead of exhausting phone memory."""
+    original = _noise_jpeg(400, 300)
+    monkeypatch.setattr(upload_photo, "RECOMPRESS_MAX_PIXELS", 400 * 300 - 1)
+
+    assert upload_photo._recompress_for_upload(original) is None
 
 
 @patch('upload_photo.requests.post')

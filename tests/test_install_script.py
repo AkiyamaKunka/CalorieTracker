@@ -8,6 +8,7 @@ the installer's kill sweep can never touch real processes on this machine.
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,14 @@ INSTALLER = REPO_ROOT / "android" / "install_and_start.sh"
 
 pytestmark = pytest.mark.skipif(BASH is None, reason="bash is not available")
 
-PYTHON3_SHIM = '#!/bin/sh\necho "$@" >> "$HOME/python_calls.log"\nexit 0\n'
+# `-c` invocations are the installer's payload syntax pre-flight, not an app
+# call: succeed silently so the log only records real uploader invocations.
+PYTHON3_SHIM = (
+    '#!/bin/sh\n'
+    'case "$1" in -c) exit 0 ;; esac\n'
+    'echo "$@" >> "$HOME/python_calls.log"\n'
+    'exit 0\n'
+)
 NOOP_SHIM = "#!/bin/sh\nexit 0\n"
 
 
@@ -109,7 +117,7 @@ def test_installer_installs_widget_shortcuts_when_present(tmp_path):
     result = _run(env)
 
     assert result.returncode == 0
-    assert "Termux:Widget shortcuts" in result.stdout
+    assert "Installed Termux:Widget shortcuts: start / stop / status / sync / update." in result.stdout
     installed = sorted(p.name for p in (home / ".shortcuts").iterdir())
     assert installed == ["calorie-start.sh", "calorie-status.sh",
                          "calorie-stop.sh", "calorie-sync.sh",
@@ -153,6 +161,47 @@ def test_installer_without_shortcuts_folder_still_succeeds(tmp_path):
 
     assert result.returncode == 0
     assert not (home / ".shortcuts").exists()
+
+
+def test_installer_with_empty_shortcuts_dir_notes_missing_files(tmp_path):
+    """A shortcuts/ folder with no calorie-*.sh files must not claim the
+    widget buttons were installed; it prints a no-files note instead."""
+    env, home, src = _make_env(tmp_path)
+    (home / ".calorie_tracker_upload.json").write_text(
+        '{"ANDROID_API_KEY": "k", "SERVER_URLS": ["http://example.test"]}'
+    )
+    (src / "shortcuts").mkdir()
+
+    result = _run(env)
+
+    assert result.returncode == 0
+    assert "No Termux:Widget shortcut files found" in result.stdout
+    assert "Installed Termux:Widget shortcuts" not in result.stdout
+    assert not (home / ".shortcuts").exists()
+
+
+def test_truncated_python_payload_aborts_before_touching_watcher(tmp_path):
+    """A truncated adb push (syntactically broken upload_photo.py) must abort
+    the install BEFORE the kill sweep, leaving the running watcher and its
+    PID file untouched and naming the corruption in the error."""
+    env, home, src = _make_env(tmp_path)
+    (src / "upload_photo.py").write_text("def broken(\n")
+    # Delegate to the real interpreter so the ast pre-flight actually parses.
+    _write_shim(
+        tmp_path / "bin" / "python3",
+        f'#!/bin/sh\nexec "{sys.executable}" "$@"\n',
+    )
+    pid_file = home / ".calorie_watcher.pid"
+    pid_file.write_text("12345")
+
+    result = _run(env)
+
+    assert result.returncode == 1
+    assert "truncated" in result.stderr or "corrupt" in result.stderr
+    # The kill/cleanup/copy section never ran.
+    assert pid_file.read_text() == "12345"
+    assert not (home / "android_watcher.sh").exists()
+    assert not (home / "upload_photo.py").exists()
 
 
 def test_first_run_creates_config_template_and_stops(tmp_path):
