@@ -4,7 +4,7 @@ import hashlib
 import io
 import json
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
@@ -626,3 +626,51 @@ def test_nl_delete_cancel_keeps_meals(mock_db, monkeypatch, tmp_path):
     assert len(_wide_recent_meals(12345)) == 1
     assert 12345 not in telegram_bot._pending_nl_deletes
     assert any("nothing was deleted" in m["text"] for m in bot.sent)
+
+
+@pytest.mark.parametrize("utc_now,tz_offset,expected_date", [
+    ("2026-07-08T16:30:00", "+0800", "2026-07-09"),  # 00:30 next-day local
+    ("2026-07-08T16:30:00", "-0500", "2026-07-08"),  # 11:30 same-day local
+    ("2026-07-08T18:45:00", "+0530", "2026-07-09"),  # 00:15 next-day (India)
+    ("2026-07-08T11:00:00", "+1400", "2026-07-09"),  # 01:00 next-day (Kiritimati)
+])
+def test_meal_dates_follow_the_travelers_local_calendar_day(
+        monkeypatch, tmp_path, utc_now, tz_offset, expected_date):
+    """S5 regression: a meal is dated on the user's LOCAL calendar day (from
+    the device-reported offset), not the server's UTC day, and is retrievable
+    for the daily report targeting that local date."""
+    monkeypatch.setattr(telegram_bot.database, "DB_PATH", tmp_path / "tz.db")
+    telegram_bot.database.init_db()
+    telegram_bot.database.update_android_heartbeat(timezone=tz_offset)
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+
+    fixed = datetime(*map(int, utc_now.replace("T", "-").replace(":", "-").split("-")))
+
+    class FrozenUTC(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is not None:
+                return fixed.replace(tzinfo=timezone.utc).astimezone(tz)
+            return fixed
+
+    monkeypatch.setattr(telegram_bot.database, "datetime", FrozenUTC)
+    monkeypatch.setattr(telegram_bot, "datetime", FrozenUTC)
+
+    analysis = {"is_food": True, "total_calories": 500, "meal_description": "traveler meal"}
+    meal_id = telegram_bot.save_meal(12345, analysis, "test", "f", "ab" * 16)
+
+    with telegram_bot.database._connect() as conn:
+        stored_date = conn.execute(
+            "SELECT date FROM meals WHERE id=?", (meal_id,)).fetchone()[0]
+    assert stored_date == expected_date
+
+    # And the report window for that local date retrieves it.
+    window = telegram_bot.database.get_meals(12345, expected_date, expected_date)
+    assert any(m["analysis"]["meal_description"] == "traveler meal" for m in window)
+
+
+def test_parse_timezone_offset_bounds_are_sane():
+    assert database.parse_timezone_offset("+1400") is not None   # max real east
+    assert database.parse_timezone_offset("-1200") is not None   # max real west
+    assert database.parse_timezone_offset("+1500") is None       # hours > 14
+    assert database.parse_timezone_offset("+0860") is None       # minutes > 59
