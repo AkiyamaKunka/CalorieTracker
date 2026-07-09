@@ -521,3 +521,23 @@ def test_get_local_time_applies_valid_offset():
 
     assert result.tzinfo is None
     assert abs(result - expected) < timedelta(seconds=5)
+
+
+def test_generate_report_survives_hostile_analysis_shapes(monkeypatch):
+    """Distilled from the S3 fuzzer: string calories, huge ints, non-dict
+    items, scalar food_items, and unhashable dup-key fields crashed the
+    report before the safe_number/safe_food_items armor."""
+    hostile = [
+        _meal(calories="640"),                      # str into += (TypeError)
+        _meal(protein=10 ** 400),                   # OverflowError in += 
+        _meal(items=["rice 200 kcal", {"name": "ok", "estimated_calories": 200}]),
+        {"time": [1, 2], "corrected": [], "image_hash": "",  # unhashable dup key
+         "analysis": {"is_food": True, "food_items": -1}},
+        _meal(calories=json.loads("1e400")),        # inf
+    ]
+    _patch_meals(monkeypatch, hostile)
+
+    report = daily_report.generate_report("2026-07-09")
+
+    assert "Daily Calorie Report" in report
+    assert "Daily Summary" in report  # reached the totals section

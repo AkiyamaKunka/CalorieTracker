@@ -2009,3 +2009,20 @@ def test_format_operational_status_escapes_invalid_heartbeat(monkeypatch, tmp_pa
     assert "invalid heartbeat" in status
     assert "corrupt&lt;b&gt;value" in status
     assert "corrupt<b>value" not in status
+
+
+def test_format_food_result_survives_hostile_analysis_shapes():
+    """Distilled from the S3 fuzzer: non-dict food_items entries and scalar
+    food_items crashed the photo reply before safe_food_items."""
+    hostile = {
+        "is_food": True,
+        "meal_description": False,
+        "total_calories": [],
+        "food_items": ["rice", {"name": "ok", "estimated_calories": 200}, None],
+    }
+    result = telegram_bot.format_food_result(12345, hostile)
+    assert isinstance(result, str)
+    assert "ok" in result
+
+    scalar_items = {"is_food": True, "meal_description": "x", "food_items": -1}
+    assert isinstance(telegram_bot.format_food_result(12345, scalar_items), str)

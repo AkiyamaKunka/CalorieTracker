@@ -62,7 +62,13 @@ from config import (
     REPORTS_DIR,
     SUPPORTED_EXTENSIONS,
 )
-from utils import meal_calorie_mismatch, parse_ai_json, telegram_message_chunks
+from utils import (
+    meal_calorie_mismatch,
+    parse_ai_json,
+    safe_food_items,
+    safe_number,
+    telegram_message_chunks,
+)
 
 # ─── Constants ─────────────────────────────────────────────────────
 def _parse_chat_id(value: Optional[str]) -> int:
@@ -2127,7 +2133,7 @@ def format_food_result(chat_id: int, analysis: Dict) -> str:
     desc = analysis.get("meal_description", "Unknown meal")
     lines.append(f"🍽️ <b>{_html(desc)}</b>\n")
 
-    for item in analysis.get("food_items", []):
+    for item in safe_food_items(analysis):
         name = item.get("name", "?")
         cals = item.get("estimated_calories", "?")
         p = item.get("protein_g") or 0
@@ -2166,10 +2172,10 @@ def format_daily_totals(chat_id: int) -> str:
     meals = get_todays_meals(chat_id)
     if not meals:
         return ""
-    total_cal = sum((m["analysis"].get("total_calories") or 0) for m in meals)
-    total_p = sum((m["analysis"].get("total_protein_g") or 0) for m in meals)
-    total_c = sum((m["analysis"].get("total_carbs_g") or 0) for m in meals)
-    total_f = sum((m["analysis"].get("total_fat_g") or 0) for m in meals)
+    total_cal = sum(safe_number(m["analysis"].get("total_calories")) for m in meals)
+    total_p = sum(safe_number(m["analysis"].get("total_protein_g")) for m in meals)
+    total_c = sum(safe_number(m["analysis"].get("total_carbs_g")) for m in meals)
+    total_f = sum(safe_number(m["analysis"].get("total_fat_g")) for m in meals)
     lines = [
         f"📋 <b>Today's Total ({len(meals)} meals):</b>",
         f"🔥 {total_cal:,} kcal",
@@ -2188,7 +2194,7 @@ def _daily_calorie_totals(chat_id: int, start_date: str, end_date: str) -> Dict[
         if not analysis.get("is_food"):
             continue
         d = m.get("date", "")
-        totals[d] = totals.get(d, 0) + (analysis.get("total_calories") or 0)
+        totals[d] = totals.get(d, 0) + safe_number(analysis.get("total_calories"))
     return totals
 
 
@@ -2199,10 +2205,10 @@ def format_today_summary(chat_id: int) -> str:
     if not meals:
         return "📋 <b>Today's Summary</b>\n\nNo meals logged yet today."
 
-    total_cal = sum((m["analysis"].get("total_calories") or 0) for m in meals)
-    total_p = sum((m["analysis"].get("total_protein_g") or 0) for m in meals)
-    total_c = sum((m["analysis"].get("total_carbs_g") or 0) for m in meals)
-    total_f = sum((m["analysis"].get("total_fat_g") or 0) for m in meals)
+    total_cal = sum(safe_number(m["analysis"].get("total_calories")) for m in meals)
+    total_p = sum(safe_number(m["analysis"].get("total_protein_g")) for m in meals)
+    total_c = sum(safe_number(m["analysis"].get("total_carbs_g")) for m in meals)
+    total_f = sum(safe_number(m["analysis"].get("total_fat_g")) for m in meals)
 
     lines = [
         "📋 <b>Today's Summary</b>\n",
@@ -2246,10 +2252,12 @@ def format_meals_list(chat_id: int) -> str:
     for i, meal in enumerate(meals):
         a = meal["analysis"]
         desc = a.get("meal_description", "Unknown")
-        cal = a.get("total_calories") or 0
-        p = a.get("total_protein_g") or 0
-        c = a.get("total_carbs_g") or 0
-        f = a.get("total_fat_g") or 0
+        # safe_number: hostile stored shapes ("640", [], 1e400) must not
+        # crash the accumulation.
+        cal = safe_number(a.get("total_calories"))
+        p = safe_number(a.get("total_protein_g"))
+        c = safe_number(a.get("total_carbs_g"))
+        f = safe_number(a.get("total_fat_g"))
         total_cal += cal
         corrected = " ✏️" if meal.get("corrected") else ""
         lines.append(f"{i + 1}. <b>{_html(desc)}</b> ({_html(meal.get('time', '?'))}){corrected}")

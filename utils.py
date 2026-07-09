@@ -42,6 +42,31 @@ def _as_number(value):
     return value
 
 
+def safe_number(value, default=0):
+    """Bounded numeric coercion for untrusted analysis fields.
+
+    Returns `default` for anything _as_number rejects (non-numerics, bools,
+    inf/NaN, absurd magnitudes) so accumulations can never raise.
+    """
+    number = _as_number(value)
+    return default if number is None else number
+
+
+def safe_food_items(analysis):
+    """The analysis's food_items as a list of dicts, tolerating any shape.
+
+    Gemini's JSON mode guarantees syntax, not schema: food_items may be a
+    scalar, and entries may be strings. Renderers iterate this instead of
+    trusting the raw field.
+    """
+    if not isinstance(analysis, dict):
+        return []
+    items = analysis.get("food_items")
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
 def meal_calorie_mismatch(analysis: dict):
     """Return the item-calorie sum when it contradicts the stored meal total.
 
@@ -52,17 +77,14 @@ def meal_calorie_mismatch(analysis: dict):
     treated as consistent — a crashed warning would be worse than the bug
     it flags.
     """
-    items = (analysis or {}).get("food_items") or []
     item_sum = 0
     counted = 0
-    for item in items:
-        if not isinstance(item, dict):
-            continue
+    for item in safe_food_items(analysis):
         cal = _as_number(item.get("estimated_calories"))
         if cal is not None:
             item_sum += cal
             counted += 1
-    total = _as_number((analysis or {}).get("total_calories"))
+    total = _as_number(analysis.get("total_calories")) if isinstance(analysis, dict) else None
     if not counted or item_sum <= 0 or total is None:
         return None
     if abs(total - item_sum) > max(100, 0.2 * max(total, item_sum)):

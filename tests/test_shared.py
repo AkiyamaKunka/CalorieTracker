@@ -212,3 +212,23 @@ def test_user_local_now_applies_device_offset(monkeypatch):
 def test_user_local_now_falls_back_to_server_clock(monkeypatch):
     monkeypatch.setattr(database, "get_android_timezone", lambda device_name="android_watcher": "garbage")
     assert abs((database.user_local_now() - datetime.now()).total_seconds()) < 5
+
+
+def test_safe_number_and_safe_food_items_contracts():
+    assert utils.safe_number("640") == 0
+    assert utils.safe_number(640) == 640
+    assert utils.safe_number([], default=7) == 7
+    assert utils.safe_number(float("inf")) == 0
+    assert utils.safe_number(10 ** 400) == 0
+
+    assert utils.safe_food_items("banana") == []
+    assert utils.safe_food_items({"food_items": -1}) == []
+    assert utils.safe_food_items({"food_items": ["rice", {"name": "ok"}, None]}) == [{"name": "ok"}]
+    assert utils.safe_food_items(None) == []
+
+
+def test_meal_calorie_mismatch_non_dict_analysis_is_none():
+    # Fuzzer classes: truthy non-dict analysis, non-list food_items.
+    assert utils.meal_calorie_mismatch("banana") is None
+    assert utils.meal_calorie_mismatch(["x"]) is None
+    assert utils.meal_calorie_mismatch({"food_items": -10**12, "total_calories": 500}) is None

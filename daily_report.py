@@ -31,7 +31,12 @@ from config import (
     TELEGRAM_CHAT_ID,
     REPORTS_DIR,
 )
-from utils import meal_calorie_mismatch, telegram_message_chunks as _telegram_chunks
+from utils import (
+    meal_calorie_mismatch,
+    safe_food_items,
+    safe_number,
+    telegram_message_chunks as _telegram_chunks,
+)
 
 # ─── Config ────────────────────────────────────────────────────────
 BOT_TOKEN = TELEGRAM_BOT_TOKEN or ""
@@ -143,10 +148,12 @@ def generate_report(target_date: str) -> str:
     for i, meal in enumerate(food_meals, 1):
         a = meal["analysis"]
         desc = escape(str(a.get("meal_description", "Unknown")))
-        cal = a.get("total_calories") or 0
-        p = a.get("total_protein_g") or 0
-        c = a.get("total_carbs_g") or 0
-        f = a.get("total_fat_g") or 0
+        # safe_number: stored analyses can carry hostile shapes ("640", [],
+        # 1e400) that would crash the += accumulation below.
+        cal = safe_number(a.get("total_calories"))
+        p = safe_number(a.get("total_protein_g"))
+        c = safe_number(a.get("total_carbs_g"))
+        f = safe_number(a.get("total_fat_g"))
         time_str = escape(str(meal.get("time", "??:??")))
         corrected = " ✏️" if meal.get("corrected") else ""
 
@@ -158,7 +165,7 @@ def generate_report(target_date: str) -> str:
         lines.append(f"<b>{i}. {desc}</b> — {time_str}{corrected}")
 
         # Per-item breakdown
-        for item in a.get("food_items", []):
+        for item in safe_food_items(a):
             item_name = escape(str(item.get("name", "?")))
             item_cal = item.get("estimated_calories") or 0
             item_p = item.get("protein_g") or 0
@@ -178,9 +185,11 @@ def generate_report(target_date: str) -> str:
         # Display-only duplicate flag: covers historic rows and hash-less
         # paths (manual text meals, relay payloads with empty hash) that
         # the ingestion ledger can't dedupe. No DB writes.
+        # str() keeps the fallback key hashable even for list/dict field values.
         dup_key = meal.get("image_hash") or None
-        if not dup_key:
-            dup_key = (meal.get("time"), a.get("meal_description"), a.get("total_calories"))
+        if not dup_key or not isinstance(dup_key, str):
+            dup_key = (str(meal.get("time")), str(a.get("meal_description")),
+                       str(a.get("total_calories")))
         if dup_key in seen_meal_keys:
             lines.append(f"  ⚠️ Possible duplicate of meal {seen_meal_keys[dup_key]}.")
         else:
