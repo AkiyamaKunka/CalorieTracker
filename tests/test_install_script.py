@@ -103,8 +103,8 @@ def test_installer_installs_widget_shortcuts_when_present(tmp_path):
     )
     shortcuts_src = src / "shortcuts"
     shortcuts_src.mkdir()
-    for name in ("calorie-start.sh", "calorie-stop.sh", "calorie-status.sh", "calorie-sync.sh"):
-        shutil.copy(REPO_ROOT / "android" / "shortcuts" / name, shortcuts_src / name)
+    for entry in (REPO_ROOT / "android" / "shortcuts").iterdir():
+        shutil.copy(entry, shortcuts_src / entry.name)
 
     result = _run(env)
 
@@ -112,9 +112,35 @@ def test_installer_installs_widget_shortcuts_when_present(tmp_path):
     assert "Termux:Widget shortcuts" in result.stdout
     installed = sorted(p.name for p in (home / ".shortcuts").iterdir())
     assert installed == ["calorie-start.sh", "calorie-status.sh",
-                         "calorie-stop.sh", "calorie-sync.sh"]
+                         "calorie-stop.sh", "calorie-sync.sh",
+                         "calorie-update.sh"]
     for p in (home / ".shortcuts").iterdir():
         assert os.access(p, os.X_OK)
+
+
+def test_update_shortcut_runs_installer_from_source_dir(tmp_path):
+    src = tmp_path / "payload"
+    src.mkdir()
+    (src / "install_and_start.sh").write_text('#!/bin/sh\necho "INSTALLER RAN from $0"\n')
+    env = dict(os.environ)
+    env["CALORIE_INSTALL_SRC"] = str(src)
+
+    result = subprocess.run(
+        [BASH, str(REPO_ROOT / "android" / "shortcuts" / "calorie-update.sh")],
+        env=env, capture_output=True, text=True, timeout=15,
+    )
+
+    assert result.returncode == 0
+    assert "INSTALLER RAN" in result.stdout
+
+    # Missing payload aborts loudly instead of half-installing.
+    env["CALORIE_INSTALL_SRC"] = str(tmp_path / "empty")
+    result = subprocess.run(
+        [BASH, str(REPO_ROOT / "android" / "shortcuts" / "calorie-update.sh")],
+        env=env, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 1
+    assert "push the scripts first" in result.stdout
 
 
 def test_installer_without_shortcuts_folder_still_succeeds(tmp_path):
