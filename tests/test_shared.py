@@ -232,3 +232,61 @@ def test_meal_calorie_mismatch_non_dict_analysis_is_none():
     assert utils.meal_calorie_mismatch("banana") is None
     assert utils.meal_calorie_mismatch(["x"]) is None
     assert utils.meal_calorie_mismatch({"food_items": -10**12, "total_calories": 500}) is None
+
+
+def test_reserve_photo_hash_is_atomic_under_thread_contention(tmp_path, monkeypatch):
+    """S4 regression: concurrent reservers of the same hash yield exactly one
+    winner, and after mark-failed, concurrent reclaimers yield exactly one."""
+    import concurrent.futures as cf
+
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "race.db")
+    database.init_db()
+
+    for round_no in range(8):
+        h = f"{round_no:032x}"
+        with cf.ThreadPoolExecutor(12) as pool:
+            wins = list(pool.map(lambda _: database.reserve_photo_hash(1, h, "race"), range(12)))
+        assert sum(wins) == 1, f"round {round_no}: {sum(wins)} winners"
+
+    h = "f" * 32
+    assert database.reserve_photo_hash(1, h, "race")
+    database.mark_photo_hash_status(1, h, "failed")
+    with cf.ThreadPoolExecutor(8) as pool:
+        reclaims = list(pool.map(
+            lambda _: database.reserve_photo_hash(1, h, "race", reclaim_statuses={"failed"}),
+            range(8)))
+    assert sum(reclaims) == 1
+
+
+def test_processing_set_begin_is_atomic(monkeypatch):
+    import concurrent.futures as cf
+    import telegram_bot
+
+    telegram_bot._api_upload_processing_hashes.clear()
+    wins = []
+    with cf.ThreadPoolExecutor(12) as pool:
+        list(pool.map(lambda _: wins.append(telegram_bot._begin_api_upload_processing("cc" * 16)), range(12)))
+    assert sum(1 for w in wins if w) == 1
+    telegram_bot._finish_api_upload_processing("cc" * 16)
+    assert not telegram_bot._api_upload_processing_hashes
+
+
+def test_service_health_update_survives_thread_contention(tmp_path):
+    """In-process thread hammer on the flock'd update — no lost appends."""
+    import threading
+    import service_health
+
+    path = tmp_path / "health.json"
+
+    def worker(tag):
+        for i in range(25):
+            service_health.update(
+                lambda d, t=f"{tag}-{i}": d.setdefault("events", []).append(t),
+                path, warn=lambda m: None)
+
+    threads = [threading.Thread(target=worker, args=(f"t{k}",)) for k in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(service_health.load(path).get("events", [])) == 100
