@@ -151,6 +151,26 @@ def test_update_shortcut_runs_installer_from_source_dir(tmp_path):
     assert "push the scripts first" in result.stdout
 
 
+def test_update_shortcut_rejects_truncated_installer(tmp_path):
+    """A truncated adb push of install_and_start.sh must be caught by the
+    caller before it kills the watcher — the installer can't self-protect."""
+    src = tmp_path / "payload"
+    src.mkdir()
+    # Mid-construct truncation: an unterminated if-block fails bash -n.
+    (src / "install_and_start.sh").write_text("#!/bin/sh\nif [ -f x ]; then\n  echo hi\n")
+    env = dict(os.environ)
+    env["CALORIE_INSTALL_SRC"] = str(src)
+
+    result = subprocess.run(
+        [BASH, str(REPO_ROOT / "android" / "shortcuts" / "calorie-update.sh")],
+        env=env, capture_output=True, text=True, timeout=15,
+    )
+
+    assert result.returncode == 1
+    assert "syntax check" in result.stdout
+    assert "left untouched" in result.stdout
+
+
 def test_installer_without_shortcuts_folder_still_succeeds(tmp_path):
     env, home, src = _make_env(tmp_path)
     (home / ".calorie_tracker_upload.json").write_text(
