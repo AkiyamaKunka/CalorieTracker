@@ -151,6 +151,50 @@ def test_meal_calorie_mismatch_defensive_on_bad_data():
     ) == 300
 
 
+def test_as_number_rejects_absurd_magnitudes():
+    # Hallucinated JSON has produced 400-digit ints and 1e400 (-> inf);
+    # these overflow int/float arithmetic downstream, so the helper must
+    # treat them as non-numeric instead of raising.
+    assert utils._as_number(int("9" * 400)) is None
+    assert utils._as_number(float("inf")) is None
+    assert utils._as_number(float("nan")) is None
+    assert utils._as_number(-1e12) is None
+    # Sane values still pass through unchanged.
+    assert utils._as_number(500) == 500
+    assert utils._as_number(-3.5) == -3.5
+
+
+def test_meal_calorie_mismatch_survives_absurd_values():
+    huge_int = int("9" * 400)
+    # 400-digit total under a float item sum used to raise OverflowError
+    # in the int*float tolerance arithmetic.
+    assert utils.meal_calorie_mismatch(
+        {"total_calories": huge_int, "food_items": [{"estimated_calories": 135.0}]}
+    ) is None
+    assert utils.meal_calorie_mismatch(
+        {"total_calories": float("inf"), "food_items": [{"estimated_calories": 135}]}
+    ) is None
+    assert utils.meal_calorie_mismatch(
+        {"total_calories": 1335, "food_items": [{"estimated_calories": float("nan")}]}
+    ) is None
+    assert utils.meal_calorie_mismatch(
+        {"total_calories": -1e12, "food_items": [{"estimated_calories": huge_int}]}
+    ) is None
+
+
+def test_meal_calorie_mismatch_skips_non_dict_items():
+    # The docstring promises never to crash; non-dict entries (strings,
+    # lists, None, numbers) must be skipped, not exploded on .get().
+    analysis = {
+        "total_calories": 900,
+        "food_items": ["burger", ["fries"], None, 42, {"estimated_calories": 300}],
+    }
+    assert utils.meal_calorie_mismatch(analysis) == 300
+    assert utils.meal_calorie_mismatch(
+        {"total_calories": 900, "food_items": ["a", ["b"], None, 7]}
+    ) is None
+
+
 def test_parse_timezone_offset():
     assert database.parse_timezone_offset("+0800") == timedelta(hours=8)
     assert database.parse_timezone_offset("-0530") == timedelta(hours=-5, minutes=-30)

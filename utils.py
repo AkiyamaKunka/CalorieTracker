@@ -34,6 +34,11 @@ def parse_ai_json(text: str) -> dict:
 def _as_number(value):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
+    # Magnitude guard: absurd values from hallucinated JSON (400-digit ints,
+    # 1e400 -> inf) overflow int/float arithmetic downstream, and inf/NaN are
+    # never real calorie counts. NaN fails this range test too.
+    if not (-1e9 < value < 1e9):
+        return None
     return value
 
 
@@ -51,7 +56,9 @@ def meal_calorie_mismatch(analysis: dict):
     item_sum = 0
     counted = 0
     for item in items:
-        cal = _as_number((item or {}).get("estimated_calories"))
+        if not isinstance(item, dict):
+            continue
+        cal = _as_number(item.get("estimated_calories"))
         if cal is not None:
             item_sum += cal
             counted += 1

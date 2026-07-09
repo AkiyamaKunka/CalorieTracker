@@ -83,7 +83,10 @@ def send_wechat(text, target_date):
         "token": PUSHPLUS_TOKEN,
         "title": f"📊 Daily Calorie Report ({target_date})",
         "content": _html_to_plain(text),
-        "template": "markdown",
+        # "txt" renders the content literally. _html_to_plain unescapes
+        # entities, so user-typed markup (e.g. <script>) survives into the
+        # payload — under "markdown" PushPlus would render it as HTML.
+        "template": "txt",
         "topic": PUSHPLUS_TOPIC,
     }
     try:
@@ -202,10 +205,19 @@ def generate_report(target_date: str) -> str:
         prior_analysis = m.get("analysis", {})
         if not prior_analysis.get("is_food"):
             continue
+        # Bounds-check before accumulating: hallucinated totals like a
+        # 400-digit int or 1e400 (json.loads -> inf) would blow up the
+        # average arithmetic (OverflowError) or poison it. Note: not
+        # math.isfinite — that itself raises OverflowError on huge ints.
+        cal = prior_analysis.get("total_calories") or 0
+        if not (
+            isinstance(cal, (int, float))
+            and not isinstance(cal, bool)
+            and 0 < cal < 1e9
+        ):
+            continue
         day = m.get("date")
-        prior_day_totals[day] = prior_day_totals.get(day, 0) + (
-            prior_analysis.get("total_calories") or 0
-        )
+        prior_day_totals[day] = prior_day_totals.get(day, 0) + cal
     if len(prior_day_totals) >= 2:
         avg = round(sum(prior_day_totals.values()) / len(prior_day_totals))
         lines.append(f"📈 <b>7-day avg:</b> ~{avg:,} kcal")

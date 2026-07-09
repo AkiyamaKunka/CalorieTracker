@@ -189,6 +189,44 @@ def test_generate_report_seven_day_average_suppressed_for_single_day(monkeypatch
     assert "Today vs avg" not in report
 
 
+def test_generate_report_seven_day_average_ignores_absurd_calories(monkeypatch):
+    # json.loads turns 1e400 into float inf, and Gemini has hallucinated
+    # absurdly huge integer totals; neither may crash the average
+    # arithmetic (OverflowError) nor poison it.
+    inf_cal = json.loads("1e400")
+    huge_int = int("9" * 400)
+    prior = [
+        _meal(calories=inf_cal, date="2026-06-17"),
+        _meal(calories=huge_int, date="2026-06-18"),
+        _meal(calories=1800, date="2026-06-18"),
+        _meal(calories=2200, date="2026-06-19"),
+    ]
+    _patch_meals(monkeypatch, [_meal(calories=3000)], prior_meals=prior)
+
+    report = daily_report.generate_report("2026-06-20")
+
+    # Renders without raising; the average uses only the sane meals:
+    # 06-18 -> 1800, 06-19 -> 2200 => avg 2000.
+    assert "📈 <b>7-day avg:</b> ~2,000 kcal" in report
+    assert "Today vs avg: +1,000 kcal (+50%)" in report
+
+
+def test_generate_report_seven_day_average_suppressed_when_absurd_days_leave_one(monkeypatch):
+    # If discarding absurd totals leaves fewer than two sane prior days,
+    # the block is suppressed rather than computed from garbage.
+    prior = [
+        _meal(calories=json.loads("1e400"), date="2026-06-17"),
+        _meal(calories=int("9" * 400), date="2026-06-18"),
+        _meal(calories=1800, date="2026-06-19"),
+    ]
+    _patch_meals(monkeypatch, [_meal(calories=3000)], prior_meals=prior)
+
+    report = daily_report.generate_report("2026-06-20")
+
+    assert "7-day avg" not in report
+    assert "Today vs avg" not in report
+
+
 def test_generate_report_seven_day_window_bounds(monkeypatch):
     monkeypatch.setattr(daily_report, "CHAT_ID", "12345")
     windows = []
@@ -362,6 +400,29 @@ def test_send_wechat_uses_https_and_plain_text(monkeypatch):
 
     assert captured["url"].startswith("https://")
     assert captured["payload"]["content"] == "Report & more"
+    assert captured["payload"]["template"] == "txt"
+
+
+def test_send_wechat_user_markup_is_sent_as_literal_text(monkeypatch):
+    # generate_report escapes user text for Telegram, but _html_to_plain
+    # unescapes it again, so user-typed markup like <script> reaches the
+    # PushPlus payload verbatim. Template "txt" makes PushPlus render it
+    # literally instead of as HTML/markdown.
+    captured = {}
+
+    def fake_post(url, json, timeout):
+        captured["payload"] = json
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"code": 200})
+
+    monkeypatch.setattr(daily_report, "PUSHPLUS_TOKEN", "token")
+    monkeypatch.setattr(daily_report.requests, "post", fake_post)
+
+    daily_report.send_wechat(
+        "<b>1. Meal</b> — &lt;script&gt;alert(1)&lt;/script&gt;", "2026-06-25"
+    )
+
+    assert "<script>alert(1)</script>" in captured["payload"]["content"]
+    assert captured["payload"]["template"] == "txt"
 
 
 def test_main_exception_records_health_failure(monkeypatch, tmp_path):
