@@ -229,6 +229,40 @@ def discard_failed_photo_hashes_by_prefix(chat_id: int, hash_prefix: str) -> int
         return cursor.rowcount
 
 
+def find_photo_hash_by_prefix(chat_id: int, hash_prefix: str) -> Optional[str]:
+    """Resolve a filename's 12-char hash prefix to the full ledger hash.
+
+    Staged/failed upload filenames embed only a hash prefix; when the phone
+    declares an original-file hash for a recompressed upload, the staged
+    bytes no longer hash to the ledger key, so callers must resolve through
+    the ledger instead of rehashing. Returns None when the prefix is
+    missing or ambiguous — callers fall back to hashing the bytes.
+    """
+    prefix = _normalize_image_hash(hash_prefix)
+    if not prefix:
+        return None
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT image_hash FROM photo_ingestions "
+            "WHERE chat_id = ? AND image_hash LIKE ? || '%' LIMIT 2",
+            (chat_id, prefix),
+        ).fetchall()
+    if len(rows) == 1:
+        return rows[0][0]
+    return None
+
+
+def get_processing_photo_hashes(chat_id: int) -> List[str]:
+    """Return hashes whose reservations are still marked 'processing'."""
+    with _connect() as conn:
+        cursor = conn.execute(
+            "SELECT image_hash FROM photo_ingestions "
+            "WHERE chat_id = ? AND status = 'processing' AND image_hash != ''",
+            (chat_id,),
+        )
+        return [row[0] for row in cursor.fetchall() if row[0]]
+
+
 def get_reserved_photo_hashes(chat_id: int) -> List[str]:
     """Return image hashes already claimed by the ingestion guard.
 

@@ -31,7 +31,7 @@ from config import (
     TELEGRAM_CHAT_ID,
     REPORTS_DIR,
 )
-from utils import telegram_message_chunks as _telegram_chunks
+from utils import meal_calorie_mismatch, telegram_message_chunks as _telegram_chunks
 
 # ─── Config ────────────────────────────────────────────────────────
 BOT_TOKEN = TELEGRAM_BOT_TOKEN or ""
@@ -52,12 +52,14 @@ def _save_service_health(data):
 
 
 def _record_daily_report_health(ok: bool, target_date: str, source: str = "cron", report_path: str = "", error_summary: str = ""):
-    data = _load_service_health()
-    service_health.apply_report_health(
-        data, ok, target_date,
-        source=source, report_path=report_path, error_summary=error_summary,
+    service_health.update(
+        lambda data: service_health.apply_report_health(
+            data, ok, target_date,
+            source=source, report_path=report_path, error_summary=error_summary,
+        ),
+        SERVICE_HEALTH_PATH,
+        warn=_warn,
     )
-    _save_service_health(data)
 
 
 _TELEGRAM_HTML_TAG_RE = re.compile(
@@ -115,7 +117,7 @@ def generate_report(target_date: str) -> str:
     dt = datetime.strptime(target_date, "%Y-%m-%d")
     day_name = dt.strftime("%A, %B %d, %Y")
     lines = [
-        f"📊 <b>Daily Calorie Report</b>",
+        "📊 <b>Daily Calorie Report</b>",
         f"📅 {day_name}",
         "",
     ]
@@ -133,6 +135,7 @@ def generate_report(target_date: str) -> str:
     grand_p = 0
     grand_c = 0
     grand_f = 0
+    seen_meal_keys = {}
 
     for i, meal in enumerate(food_meals, 1):
         a = meal["analysis"]
@@ -162,16 +165,55 @@ def generate_report(target_date: str) -> str:
             lines.append(f"    P:{item_p}g | C:{item_c}g | F:{item_f}g")
 
         lines.append(f"  📊 Subtotal: ~{cal} kcal | P:{p}g C:{c}g F:{f}g")
+
+        item_sum = meal_calorie_mismatch(a)
+        if item_sum is not None and not meal.get("corrected"):
+            lines.append(
+                f"  ⚠️ Item calories sum to ~{item_sum} kcal but the meal total is ~{cal} kcal — this entry may be wrong."
+            )
+
+        # Display-only duplicate flag: covers historic rows and hash-less
+        # paths (manual text meals, relay payloads with empty hash) that
+        # the ingestion ledger can't dedupe. No DB writes.
+        dup_key = meal.get("image_hash") or None
+        if not dup_key:
+            dup_key = (meal.get("time"), a.get("meal_description"), a.get("total_calories"))
+        if dup_key in seen_meal_keys:
+            lines.append(f"  ⚠️ Possible duplicate of meal {seen_meal_keys[dup_key]}.")
+        else:
+            seen_meal_keys[dup_key] = i
+
         lines.append("")
 
     # ─── Daily totals ──────────────────────────────────────────
     lines.append("━━━━━━━━━━━━━━━━━━")
-    lines.append(f"<b>📊 Daily Summary</b>\n")
+    lines.append("<b>📊 Daily Summary</b>\n")
     lines.append(f"🔥 <b>Total Calories: ~{grand_cal:,} kcal</b>")
     lines.append(f"🥩 <b>Protein:</b> {grand_p}g")
     lines.append(f"🍞 <b>Carbs:</b> {grand_c}g")
     lines.append(f"🧈 <b>Fat:</b> {grand_f}g")
     lines.append(f"📸 <b>Meals logged:</b> {len(food_meals)}")
+
+    # ─── 7-day average comparison ──────────────────────────────
+    prior_start = (dt - timedelta(days=7)).date().isoformat()
+    prior_end = (dt - timedelta(days=1)).date().isoformat()
+    prior_day_totals = {}
+    for m in database.get_meals(chat_id, prior_start, prior_end):
+        prior_analysis = m.get("analysis", {})
+        if not prior_analysis.get("is_food"):
+            continue
+        day = m.get("date")
+        prior_day_totals[day] = prior_day_totals.get(day, 0) + (
+            prior_analysis.get("total_calories") or 0
+        )
+    if len(prior_day_totals) >= 2:
+        avg = round(sum(prior_day_totals.values()) / len(prior_day_totals))
+        lines.append(f"📈 <b>7-day avg:</b> ~{avg:,} kcal")
+        delta = grand_cal - avg
+        delta_line = f"    Today vs avg: {delta:+,} kcal"
+        if avg != 0:
+            delta_line += f" ({delta / avg * 100:+.0f}%)"
+        lines.append(delta_line)
 
     # ─── Macro percentages ─────────────────────────────────────
     total_macro_cal = (grand_p * 4) + (grand_c * 4) + (grand_f * 9)
@@ -180,7 +222,7 @@ def generate_report(target_date: str) -> str:
         c_pct = round((grand_c * 4) / total_macro_cal * 100)
         f_pct = round((grand_f * 9) / total_macro_cal * 100)
         lines.append("")
-        lines.append(f"<b>Macro Split:</b>")
+        lines.append("<b>Macro Split:</b>")
         lines.append(f"  🥩 Protein: {p_pct}%")
         lines.append(f"  🍞 Carbs: {c_pct}%")
         lines.append(f"  🧈 Fat: {f_pct}%")

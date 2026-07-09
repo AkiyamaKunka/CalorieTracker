@@ -1,3 +1,4 @@
+import io
 import pytest
 import json
 import logging
@@ -59,10 +60,45 @@ def test_format_food_result_missing_fields():
     }
     
     result = format_food_result(12345, analysis)
-    
+
     assert "Apple" in result
     assert "95 kcal" in result
     assert "P: 0g" in result  # defaults to 0 for missing macros
+
+def test_format_food_result_warns_on_item_total_mismatch(monkeypatch):
+    """Item calories contradicting the meal total get a correction hint."""
+    monkeypatch.setattr(telegram_bot, "format_daily_totals", lambda chat_id: "")
+    analysis = {
+        "is_food": True,
+        "meal_description": "Big bowl",
+        "food_items": [
+            {"name": "rice", "estimated_calories": 100},
+            {"name": "egg", "estimated_calories": 35},
+        ],
+        "total_calories": 1335,
+    }
+
+    result = format_food_result(12345, analysis)
+
+    assert "⚠️ Item calories sum to ~135 kcal" in result
+    assert "meal total is ~1335 kcal" in result
+    assert "reply with a correction" in result
+
+def test_format_food_result_no_mismatch_warning_when_consistent(monkeypatch):
+    monkeypatch.setattr(telegram_bot, "format_daily_totals", lambda chat_id: "")
+    analysis = {
+        "is_food": True,
+        "meal_description": "Bowl",
+        "food_items": [
+            {"name": "rice", "estimated_calories": 300},
+            {"name": "egg", "estimated_calories": 100},
+        ],
+        "total_calories": 420,
+    }
+
+    result = format_food_result(12345, analysis)
+
+    assert "Item calories sum" not in result
 
 def test_format_daily_totals(monkeypatch):
     # Mock the database.get_meals function to return controlled data
@@ -150,6 +186,68 @@ def test_analyze_food_photo_invalid_json(monkeypatch):
     # Should gracefully return None instead of crashing on JSON decode
     assert result is None
 
+def test_analyze_food_photo_passes_native_json_config(monkeypatch, tmp_path):
+    """The photo call site must request Gemini's native JSON mode."""
+    captured = {}
+
+    class MockModels:
+        def generate_content(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(text='{"is_food": false}')
+
+    class MockClient:
+        models = MockModels()
+
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "service_health.json")
+    monkeypatch.setattr(telegram_bot, "_prepare_image_for_gemini", lambda image_bytes: object())
+
+    result = analyze_food_photo(MockClient(), b"fake_image_bytes")
+
+    assert result == {"is_food": False}
+    assert captured["config"].response_mime_type == "application/json"
+
+def test_handle_text_message_passes_native_json_config(monkeypatch, tmp_path):
+    """The text-handler call site must request Gemini's native JSON mode."""
+    captured = {}
+    sent = []
+
+    class FakeBot:
+        def send_message(self, chat_id, text, parse_mode="HTML", reply_markup=None):
+            sent.append(text)
+
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(text=json.dumps({"intent": "chat", "reply": "hello"}))
+
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot, "get_recent_meals", lambda chat_id, days: [])
+
+    telegram_bot.handle_text_message(SimpleNamespace(models=FakeModels()), FakeBot(), 12345, "hi")
+
+    assert captured["config"].response_mime_type == "application/json"
+    assert sent
+
+def test_prepare_image_for_gemini_downscales_and_applies_exif():
+    """Real bytes: a large EXIF-rotated JPEG comes back <=1024px, RGB, upright."""
+    src = telegram_bot.Image.new("RGB", (2000, 1500), (200, 120, 80))
+    exif = src.getexif()
+    exif[0x0112] = 6  # EXIF orientation 6: rotate 90° CW to display upright
+    buf = io.BytesIO()
+    src.save(buf, format="JPEG", exif=exif)
+
+    prepared = telegram_bot._prepare_image_for_gemini(buf.getvalue())
+
+    assert max(prepared.size) <= 1024
+    assert prepared.mode == "RGB"
+    # Orientation applied: the rotated landscape source displays as portrait.
+    assert prepared.size == (768, 1024)
+
+def test_prepare_image_for_gemini_raises_original_error_for_broken_images():
+    """Unreadable bytes must raise what the old un-resized path raised."""
+    with pytest.raises(telegram_bot.Image.UnidentifiedImageError):
+        telegram_bot._prepare_image_for_gemini(b"definitely not an image")
+
 def test_analyze_food_photo_retries_retryable_errors(monkeypatch):
     class MockResponse:
         text = '{"is_food": false}'
@@ -169,7 +267,7 @@ def test_analyze_food_photo_retries_retryable_errors(monkeypatch):
             self.models = MockModels()
 
     client = MockClient()
-    monkeypatch.setattr(telegram_bot.Image, "open", lambda image: object())
+    monkeypatch.setattr(telegram_bot, "_prepare_image_for_gemini", lambda image_bytes: object())
     monkeypatch.setattr(telegram_bot.time, "sleep", lambda seconds: None)
 
     result = telegram_bot.analyze_food_photo_with_retries(client, b"fake_image_bytes")
@@ -201,7 +299,7 @@ def test_daily_quota_error_stops_retry_and_sets_pause(monkeypatch, tmp_path):
 
     client = MockClient()
     monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "service_health.json")
-    monkeypatch.setattr(telegram_bot.Image, "open", lambda image: object())
+    monkeypatch.setattr(telegram_bot, "_prepare_image_for_gemini", lambda image_bytes: object())
     monkeypatch.setattr(telegram_bot.time, "sleep", lambda seconds: pytest.fail("daily quota should not retry"))
 
     result = telegram_bot.analyze_food_photo_with_retries(client, b"fake_image_bytes")
@@ -510,6 +608,57 @@ def test_remote_vpn_evidence_accepts_any_non_off_country(monkeypatch):
 
     assert evidence == "vpn"
     assert detail == "country:US"
+
+def test_remote_ip_country_cache_prunes_expired_entries(monkeypatch):
+    """A full cache of expired entries is emptied before the new entry lands."""
+    # NB: documentation IPs like 203.0.113.x are ipaddress.is_private and get
+    # rejected before the cache, so use a genuinely public IP here.
+    monkeypatch.setattr(telegram_bot, "VPN_GEO_LOOKUP_ENABLED", True)
+    monkeypatch.setattr(
+        telegram_bot.requests, "get",
+        lambda url, params=None, timeout=None: SimpleNamespace(
+            json=lambda: {"status": "success", "countryCode": "jp", "query": "93.184.216.34"},
+        ),
+    )
+    expired_at = telegram_bot.time.time() - telegram_bot.VPN_GEO_CACHE_TTL_SECONDS - 60
+    telegram_bot._remote_ip_country_cache.clear()
+    for i in range(300):
+        telegram_bot._remote_ip_country_cache[f"expired-{i}"] = {"country": "US", "time": expired_at}
+
+    try:
+        country = telegram_bot._remote_ip_country_code("93.184.216.34")
+
+        assert country == "JP"
+        assert len(telegram_bot._remote_ip_country_cache) <= telegram_bot.GEO_CACHE_MAX_ENTRIES
+        assert telegram_bot._remote_ip_country_cache["93.184.216.34"]["country"] == "JP"
+    finally:
+        telegram_bot._remote_ip_country_cache.clear()
+
+def test_remote_ip_country_cache_drops_oldest_fresh_entries_when_full(monkeypatch):
+    """With no expired entries to prune, the oldest fresh entries are evicted."""
+    monkeypatch.setattr(telegram_bot, "VPN_GEO_LOOKUP_ENABLED", True)
+    monkeypatch.setattr(
+        telegram_bot.requests, "get",
+        lambda url, params=None, timeout=None: SimpleNamespace(
+            json=lambda: {"status": "success", "countryCode": "jp", "query": "93.184.216.34"},
+        ),
+    )
+    now_ts = telegram_bot.time.time()
+    telegram_bot._remote_ip_country_cache.clear()
+    for i in range(300):
+        # fresh-0 is the newest entry, fresh-299 the oldest.
+        telegram_bot._remote_ip_country_cache[f"fresh-{i}"] = {"country": "US", "time": now_ts - i}
+
+    try:
+        country = telegram_bot._remote_ip_country_code("93.184.216.34")
+
+        assert country == "JP"
+        assert len(telegram_bot._remote_ip_country_cache) <= telegram_bot.GEO_CACHE_MAX_ENTRIES
+        assert "93.184.216.34" in telegram_bot._remote_ip_country_cache
+        assert "fresh-0" in telegram_bot._remote_ip_country_cache
+        assert "fresh-299" not in telegram_bot._remote_ip_country_cache
+    finally:
+        telegram_bot._remote_ip_country_cache.clear()
 
 def test_android_unreliable_vpn_check_does_not_warn_without_direct_evidence(monkeypatch):
     from flask import Flask
@@ -1486,3 +1635,280 @@ def test_sweep_stranded_pending_uploads_moves_files_and_notifies(monkeypatch, tm
     assert len(list(failed_dir.iterdir())) == 1
     assert statuses and statuses[0][0][2] == "failed"
     assert any("/retry_failed" in m["text"] for m in bot.sent)
+
+
+def test_sweep_stranded_pending_uploads_missing_dir_is_silent(monkeypatch, tmp_path):
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "never-created")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "failed")
+    bot = _RecordingBot()
+
+    telegram_bot._sweep_stranded_pending_uploads(bot)
+
+    assert bot.sent == []
+
+
+def test_sweep_stranded_pending_uploads_skips_unreadable_file(monkeypatch, tmp_path):
+    """One unreadable file must not abort the sweep; readable files still move."""
+    pending_dir = tmp_path / "pending"
+    failed_dir = tmp_path / "failed"
+    pending_dir.mkdir()
+    unreadable = pending_dir / "20260701T010101_aaaaaaaaaaaa.jpg"
+    unreadable.write_bytes(b"locked image")
+    unreadable.chmod(0)
+    (pending_dir / "20260701T020202_bbbbbbbbbbbb.jpg").write_bytes(b"fine image")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", pending_dir)
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", failed_dir)
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status", lambda *a, **k: None)
+    bot = _RecordingBot()
+
+    try:
+        telegram_bot._sweep_stranded_pending_uploads(bot)
+    finally:
+        unreadable.chmod(0o644)
+
+    assert len(list(failed_dir.iterdir())) == 1
+    assert unreadable.exists()
+    assert any("Recovered 1 upload" in m["text"] for m in bot.sent)
+
+
+def test_sweep_stranded_pending_uploads_truncates_long_lists(monkeypatch, tmp_path):
+    pending_dir = tmp_path / "pending"
+    failed_dir = tmp_path / "failed"
+    pending_dir.mkdir()
+    for i in range(12):
+        (pending_dir / f"20260701T0101{i:02d}_{i:012x}.jpg").write_bytes(f"img-{i}".encode())
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", pending_dir)
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", failed_dir)
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status", lambda *a, **k: None)
+    bot = _RecordingBot()
+
+    telegram_bot._sweep_stranded_pending_uploads(bot)
+
+    assert len(list(failed_dir.iterdir())) == 12
+    message = next(m["text"] for m in bot.sent if "Recovered 12 upload" in m["text"])
+    assert "...and 2 more." in message
+    assert message.count("• <code>") == 10
+
+
+def test_sweep_releases_orphaned_processing_reservation(monkeypatch, tmp_path):
+    """A 'processing' reservation with no staged or failed file behind it is
+    a crash orphan — the sweep must release it so phone retries stop getting
+    'duplicate' and losing their queued copy."""
+    orphan_hash = "ab" * 16
+    released = []
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "failed")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot.database, "get_processing_photo_hashes",
+                        lambda chat_id: [orphan_hash])
+    monkeypatch.setattr(telegram_bot.database, "release_photo_hash",
+                        lambda chat_id, image_hash: released.append((chat_id, image_hash)))
+    bot = _RecordingBot()
+
+    telegram_bot._sweep_stranded_pending_uploads(bot)
+
+    assert released == [(12345, orphan_hash)]
+    assert bot.sent == []
+
+
+def test_sweep_keeps_processing_reservation_backed_by_failed_file(monkeypatch, tmp_path):
+    kept_hash = "cd" * 16
+    released = []
+    failed_dir = tmp_path / "failed"
+    failed_dir.mkdir()
+    (failed_dir / f"20260707_220000_{kept_hash[:12]}.jpg").write_bytes(b"x")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", failed_dir)
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot.database, "get_processing_photo_hashes",
+                        lambda chat_id: [kept_hash])
+    monkeypatch.setattr(telegram_bot.database, "release_photo_hash",
+                        lambda chat_id, image_hash: released.append(image_hash))
+    bot = _RecordingBot()
+
+    telegram_bot._sweep_stranded_pending_uploads(bot)
+
+    assert released == []
+
+
+def _stale_heartbeat_setup(monkeypatch, last_ping):
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot, "_last_stale_heartbeat_warning_at", None)
+    monkeypatch.setattr(telegram_bot.database, "get_last_android_heartbeat", lambda: last_ping)
+
+
+def test_stale_heartbeat_warns_once_with_cooldown(monkeypatch):
+    stale = (datetime.now() - timedelta(hours=3)).isoformat()
+    _stale_heartbeat_setup(monkeypatch, stale)
+    bot = _RecordingBot()
+
+    assert telegram_bot.maybe_warn_stale_android_heartbeat(bot) is True
+    assert telegram_bot.maybe_warn_stale_android_heartbeat(bot) is False
+    assert len(bot.sent) == 1
+    assert "hasn't reached the server" in bot.sent[0]["text"]
+    assert "/android" in bot.sent[0]["text"]
+
+
+def test_fresh_heartbeat_does_not_warn(monkeypatch):
+    _stale_heartbeat_setup(monkeypatch, datetime.now().isoformat())
+    bot = _RecordingBot()
+
+    assert telegram_bot.maybe_warn_stale_android_heartbeat(bot) is False
+    assert bot.sent == []
+
+
+def test_never_connected_heartbeat_does_not_warn(monkeypatch):
+    _stale_heartbeat_setup(monkeypatch, None)
+    bot = _RecordingBot()
+
+    assert telegram_bot.maybe_warn_stale_android_heartbeat(bot) is False
+    assert bot.sent == []
+
+
+def test_stale_heartbeat_warning_can_be_disabled(monkeypatch):
+    stale = (datetime.now() - timedelta(hours=30)).isoformat()
+    _stale_heartbeat_setup(monkeypatch, stale)
+    monkeypatch.setattr(telegram_bot, "HEARTBEAT_STALE_WARNING_HOURS", 0)
+    bot = _RecordingBot()
+
+    assert telegram_bot.maybe_warn_stale_android_heartbeat(bot) is False
+    assert bot.sent == []
+
+
+def test_format_vpn_status_renders_evidence_and_empty_state(monkeypatch, tmp_path):
+    empty_path = tmp_path / "empty.json"
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", empty_path)
+    empty = telegram_bot.format_vpn_status()
+    assert "VPN Evidence" in empty
+
+    health_path = tmp_path / "health.json"
+    health_path.write_text(json.dumps({
+        "vpn": {
+            "android": {
+                "at": "2026-07-08T01:00:00",
+                "endpoint": "/ping",
+                "remote_ip": "93.184.216.34",
+                "vpn_active": True,
+                "vpn_check": "tun0",
+                "vpn_check_reliable": True,
+                "evidence": "remote_country",
+                "evidence_detail": "US exit <spicy&detail>",
+            },
+        },
+    }))
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", health_path)
+
+    rendered = telegram_bot.format_vpn_status()
+
+    assert "android" in rendered.lower()
+    assert "93.184.216.34" in rendered
+    assert "<spicy&detail>" not in rendered  # HTML-escaped before Telegram
+
+
+def test_format_meals_list_empty_and_populated(monkeypatch, tmp_path):
+    monkeypatch.setattr(telegram_bot.database, "DB_PATH", tmp_path / "meals.db")
+    telegram_bot.database.init_db()
+    monkeypatch.setattr(telegram_bot.database, "get_android_timezone",
+                        lambda device_name="android_watcher": "+0800")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+
+    assert "No meals" in telegram_bot.format_meals_list(12345)
+
+    now = telegram_bot.database.user_local_now()
+    telegram_bot.database.save_meal(
+        12345, now.date().isoformat(), "12:00 PM", datetime.now().isoformat(),
+        "telegram", "aa" * 16, "f1",
+        {"is_food": True, "total_calories": 640, "meal_description": "Beef <br> noodles"},
+    )
+
+    rendered = telegram_bot.format_meals_list(12345)
+
+    assert "640" in rendered
+    assert "Beef &lt;br&gt; noodles" in rendered
+    assert "<br>" not in rendered
+
+
+def test_run_gemini_probe_reports_classified_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+
+    class ExplodingModels:
+        def generate_content(self, **kwargs):
+            raise Exception("429 RESOURCE_EXHAUSTED rate thing")
+
+    probe = telegram_bot.run_gemini_probe(SimpleNamespace(models=ExplodingModels()))
+
+    assert "❌" in probe or "failed" in probe.lower()
+
+
+def test_handle_text_message_refuses_during_quota_pause(monkeypatch):
+    calls = []
+    monkeypatch.setattr(telegram_bot, "_gemini_quota_pause_summary",
+                        lambda: "Paused until tomorrow.")
+    monkeypatch.setattr(telegram_bot.database, "get_recent_meals",
+                        lambda *a, **k: calls.append("db") or [])
+    bot = _RecordingBot()
+
+    telegram_bot.handle_text_message(object(), bot, 12345, "I ate a burger")
+
+    assert len(bot.sent) == 1
+    assert "paused" in bot.sent[0]["text"].lower()
+    assert calls == []  # never reached the DB or Gemini
+
+
+def test_format_operational_status_with_no_state(monkeypatch, tmp_path):
+    """Smoke test: /status renders cleanly on a fresh install (no health file,
+    no heartbeat, no upload dirs)."""
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "missing.json")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "no-pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "no-failed")
+    monkeypatch.setattr(telegram_bot.database, "get_last_android_heartbeat", lambda: None)
+
+    status = telegram_bot.format_operational_status()
+
+    assert "CalorieTracker Status" in status
+    assert "no heartbeat yet" in status
+    assert "0 pending, 0 failed" in status
+    assert "Daily report:" not in status
+
+
+def test_format_operational_status_with_full_state(monkeypatch, tmp_path):
+    import json as _json
+
+    health_path = tmp_path / "health.json"
+    health_path.write_text(_json.dumps({
+        "gemini": {"last_ok_at": datetime.now().isoformat(timespec="seconds")},
+        "daily_report": {
+            "last_ok": True,
+            "last_target_date": "2026-07-07",
+            "last_attempt_at": datetime.now().isoformat(timespec="seconds"),
+        },
+    }))
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", health_path)
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "no-pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "no-failed")
+    monkeypatch.setattr(
+        telegram_bot.database, "get_last_android_heartbeat",
+        lambda: datetime.now().isoformat(),
+    )
+
+    status = telegram_bot.format_operational_status()
+
+    assert "🟢 Android: online" in status
+    assert "Daily report: 🟢 target 2026-07-07" in status
+
+
+def test_format_operational_status_escapes_invalid_heartbeat(monkeypatch, tmp_path):
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "missing.json")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "no-pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "no-failed")
+    monkeypatch.setattr(
+        telegram_bot.database, "get_last_android_heartbeat", lambda: "corrupt<b>value",
+    )
+
+    status = telegram_bot.format_operational_status()
+
+    assert "invalid heartbeat" in status
+    assert "corrupt&lt;b&gt;value" in status
+    assert "corrupt<b>value" not in status

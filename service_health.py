@@ -5,6 +5,7 @@ mechanics and the daily_report record schema live here so the two writers
 cannot drift.
 """
 
+import fcntl
 import json
 import os
 import threading
@@ -39,6 +40,28 @@ def save(data, path=DEFAULT_PATH, warn=print):
         tmp_path.replace(path)
     except OSError as e:
         warn(f"Could not write service health file: {e}")
+
+
+def update(mutate, path=DEFAULT_PATH, warn=print) -> dict:
+    """Read-modify-write the health file under an inter-process lock.
+
+    The bot process and the cron daily_report process write the same file;
+    without the lock, overlapping read-modify-write cycles can silently drop
+    the other writer's record (e.g. erase an active Gemini quota pause).
+    """
+    path = Path(path)
+    lock_path = path.with_name(path.name + ".lock")
+    data = {}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "w") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            data = load(path, warn=warn)
+            mutate(data)
+            save(data, path, warn=warn)
+    except OSError as e:
+        warn(f"Could not update service health file: {e}")
+    return data
 
 
 def apply_report_health(data: dict, ok: bool, target_date: str, *, source: str,

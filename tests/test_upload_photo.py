@@ -402,7 +402,43 @@ def test_sync_uploads_missing_hashes(mock_post, mock_queue_dir, tmp_path, mock_e
 def test_env_int_falls_back_for_bad_values(monkeypatch):
     monkeypatch.setenv("QUEUE_BATCH_LIMIT", "not-an-int")
 
-    assert upload_photo._env_int("QUEUE_BATCH_LIMIT", 3, 1, 10) == 3
+    assert upload_photo._env_int("QUEUE_BATCH_LIMIT", 10, 1, 100) == 10
+
+
+def test_queue_batch_limit_defaults_to_10(tmp_path):
+    """Heartbeats now arrive every ~15 min instead of 5, so each drain moves
+    up to 10 queued photos to keep backlog clearance time comparable."""
+    env = dict(os.environ)
+    env.pop("QUEUE_BATCH_LIMIT", None)
+    env["PYTHONPATH"] = str(ANDROID_DIR)
+    # Keep the subprocess import hermetic: no real user config file.
+    env["CALORIE_TRACKER_ANDROID_CONFIG"] = str(tmp_path / "no_such_config.json")
+    out = subprocess.check_output(
+        [sys.executable, "-c", "import upload_photo; print(upload_photo.QUEUE_BATCH_LIMIT)"],
+        env=env,
+        text=True,
+    )
+    assert out.strip().splitlines()[-1] == "10"
+
+
+def test_process_queue_default_drains_full_batch(mock_queue_dir, monkeypatch):
+    """process_queue() with no args drains QUEUE_BATCH_LIMIT items, no more."""
+    limit = upload_photo.QUEUE_BATCH_LIMIT
+    mock_queue_dir.mkdir(exist_ok=True)
+    for index in range(limit + 2):
+        (mock_queue_dir / f"queued_{index:02d}.jpg").write_bytes(b"x")
+
+    uploaded = []
+    monkeypatch.setattr(
+        upload_photo, "_upload_photo_status",
+        lambda path: uploaded.append(path) or (200, True),
+    )
+
+    upload_photo.process_queue()
+
+    assert len(uploaded) == limit
+    remaining = [item for item in mock_queue_dir.iterdir() if item.suffix == ".jpg"]
+    assert len(remaining) == 2
 
 
 def test_get_headers_includes_vpn_fields(monkeypatch):
@@ -667,3 +703,136 @@ def test_camera_dir_prefers_calorie_specific_env_var(tmp_path):
 
 def test_camera_dir_default_when_no_env(tmp_path):
     assert _camera_dir_with_env(tmp_path, {}) == "/storage/emulated/0/DCIM/Camera"
+
+
+@patch('upload_photo.requests.post')
+def test_full_offline_to_online_lifecycle(mock_post, mock_queue_dir, mock_env, tmp_path):
+    """Scenario: photo taken while the server is unreachable -> queued with
+    exit 0; server comes back -> the next heartbeat drains the queue and the
+    photo is uploaded exactly once."""
+    img_path = tmp_path / "meal.jpg"
+    img_path.write_bytes(b"offline meal bytes")
+
+    server_up = {"value": False}
+    successful_uploads = []
+
+    def fake_post(url, **kwargs):
+        if not server_up["value"]:
+            raise requests.exceptions.ConnectionError("server down")
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"status": "processing_in_background"}
+        if url.endswith("/upload"):
+            successful_uploads.append(url)
+        return resp
+
+    mock_post.side_effect = fake_post
+
+    # Phase 1: server down. CLI exits 0 (photo safely queued, not lost).
+    assert upload_photo.main(["upload_photo.py", str(img_path)]) == 0
+    queued = [p for p in upload_photo.QUEUE_DIR.iterdir() if p.is_file()]
+    assert len(queued) == 1
+    assert successful_uploads == []
+
+    # Phase 2: server returns. The heartbeat probes, then drains the queue.
+    server_up["value"] = True
+    upload_photo.ping_server()
+
+    assert [p for p in upload_photo.QUEUE_DIR.iterdir() if p.is_file()] == []
+    assert len(successful_uploads) == 1
+
+
+def _noise_jpeg(width=2400, height=1800, seed=42):
+    """Deterministic high-entropy JPEG that genuinely shrinks when downscaled."""
+    import io as _io
+    import random as _random
+
+    from PIL import Image
+
+    rng = _random.Random(seed)
+    img = Image.frombytes("RGB", (width, height),
+                          bytes(rng.getrandbits(8) for _ in range(width * height * 3)))
+    out = _io.BytesIO()
+    img.save(out, format="JPEG", quality=92)
+    return out.getvalue()
+
+
+def test_recompress_shrinks_large_jpeg():
+    import io as _io
+
+    from PIL import Image
+
+    original = _noise_jpeg()
+    result = upload_photo._recompress_for_upload(original)
+
+    assert result is not None
+    assert len(result) < len(original)
+    decoded = Image.open(_io.BytesIO(result))
+    assert max(decoded.size) <= upload_photo.RECOMPRESS_MAX_EDGE
+    assert decoded.mode == "RGB"
+
+
+def test_recompress_falls_back_safely(monkeypatch):
+    # Non-image bytes: decode fails, original kept.
+    assert upload_photo._recompress_for_upload(b"not an image at all") is None
+    # Feature disabled via env knob.
+    monkeypatch.setattr(upload_photo, "RECOMPRESS_MAX_EDGE", 0)
+    assert upload_photo._recompress_for_upload(_noise_jpeg(400, 300)) is None
+
+
+@patch('upload_photo.requests.post')
+def test_upload_sends_original_hash_with_recompressed_bytes(mock_post, mock_env, tmp_path):
+    original = _noise_jpeg()
+    img_path = tmp_path / "meal.heic"  # name keeps original ext; upload becomes .jpg
+    img_path.write_bytes(original)
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = {"status": "processing_in_background"}
+    mock_post.return_value = resp
+
+    status, body_is_json = upload_photo._upload_photo_status(str(img_path))
+
+    assert (status, body_is_json) == (200, True)
+    kwargs = mock_post.call_args.kwargs
+    assert kwargs["data"] == {"original_hash": hashlib.md5(original).hexdigest()}
+    upload_name, upload_bytes = kwargs["files"]["photo"]
+    assert upload_name == "meal.jpg"
+    assert len(upload_bytes) < len(original)
+
+
+@patch('upload_photo.requests.post')
+def test_upload_falls_back_to_original_bytes(mock_post, mock_env, tmp_path, monkeypatch):
+    monkeypatch.setattr(upload_photo, "_recompress_for_upload", lambda original_bytes: None)
+    original = b"undecodable original bytes"
+    img_path = tmp_path / "meal.jpg"
+    img_path.write_bytes(original)
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = {"status": "processing_in_background"}
+    mock_post.return_value = resp
+
+    status, _ = upload_photo._upload_photo_status(str(img_path))
+
+    assert status == 200
+    kwargs = mock_post.call_args.kwargs
+    assert kwargs["files"]["photo"] == ("meal.jpg", original)
+    assert kwargs["data"] == {"original_hash": hashlib.md5(original).hexdigest()}
+
+
+@patch('upload_photo.requests.post')
+def test_queue_drain_unlinks_on_duplicate_reply(mock_post, mock_queue_dir, mock_env):
+    """A 200 'duplicate' reply removes the queued copy. Safe only because the
+    server releases orphaned in-flight reservations at boot — pinned here
+    because this is the data-loss edge if that guarantee ever regresses."""
+    upload_photo.QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+    queued = upload_photo.QUEUE_DIR / "dup_meal.jpg"
+    queued.write_bytes(b"already logged meal")
+
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = {"status": "duplicate"}
+    mock_post.return_value = resp
+
+    upload_photo.process_queue()
+
+    assert not queued.exists()

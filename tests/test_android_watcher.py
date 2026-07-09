@@ -86,13 +86,26 @@ def test_watcher_end_to_end_lifecycle(tmp_path):
     calls = home / "python_calls.log"
     history = home / "uploaded_files.log"
 
+    # Pre-seed a >1MB log: startup must rotate it to watcher.log.1 before the
+    # banner, and keep logging into a fresh watcher.log.
+    log.write_bytes(b"OLDLOG line from a previous long run\n" * 30000)
+
     # Stale state from a SIGKILL'd previous run: lock dir present, PID file
     # pointing at a live-but-unrelated process (no /proc cmdline entry).
     decoy = subprocess.Popen(["/bin/sleep", "30"])
     (home / ".calorie_watcher.pid").write_text(str(decoy.pid))
     (home / ".calorie_watcher.lock").mkdir()
 
-    (camera / "existing.jpg").write_bytes(b"seeded before startup")
+    # True backlog (old mtime): seeded at startup, never uploaded.
+    existing = camera / "existing.jpg"
+    existing.write_bytes(b"seeded before startup")
+    two_hours_ago = time.time() - 2 * 3600
+    os.utime(existing, (two_hours_ago, two_hours_ago))
+
+    # Fresh photo taken just before the watcher starts (mtime now): must be
+    # uploaded by the first polls, not seeded away until the 11 PM sync.
+    fresh_before_start = camera / "fresh_before_start.jpg"
+    fresh_before_start.write_bytes(b"meal snapped right before startup")
 
     proc = subprocess.Popen(
         [BASH, str(WATCHER)],
@@ -105,6 +118,13 @@ def test_watcher_end_to_end_lifecycle(tmp_path):
         assert _wait_for(lambda: _file_contains(log, "Started polling loop"))
         assert (home / ".calorie_watcher.pid").read_text().strip() == str(proc.pid)
 
+        # --- log rotation: the >1MB pre-seeded log moved to watcher.log.1
+        # at startup and the watcher keeps logging into a fresh file ---
+        rotated = home / "watcher.log.1"
+        assert rotated.exists()
+        assert rotated.stat().st_size > 1_048_576
+        assert "OLDLOG" not in log.read_text()
+
         # --- success path: new photo uploaded, then recorded in history ---
         new_photo = camera / "new_meal.jpg"
         (camera / ".pending-123.jpg").write_bytes(b"mediastore partial")
@@ -112,8 +132,10 @@ def test_watcher_end_to_end_lifecycle(tmp_path):
 
         assert _wait_for(lambda: _file_contains(calls, f"UPLOAD {new_photo}"))
         assert _wait_for(lambda: _file_contains(history, str(new_photo)))
+        # Fresh pre-start photo is uploaded (scenario C), old backlog is not.
+        assert _wait_for(lambda: _file_contains(calls, f"UPLOAD {fresh_before_start}"))
         text = calls.read_text()
-        assert "existing.jpg" not in text  # seeded at startup, never uploaded
+        assert "existing.jpg" not in text  # old backlog seeded at startup, never uploaded
         assert ".pending-123" not in text  # in-progress MediaStore names excluded
         assert _file_contains(history, str(camera / "existing.jpg"))
 
@@ -142,6 +164,27 @@ def test_watcher_end_to_end_lifecycle(tmp_path):
         assert calls.read_text().count(f"UPLOAD {cursed}") == 3
         time.sleep(0.25)  # no hot retry loop after giving up
         assert calls.read_text().count(f"UPLOAD {cursed}") == 3
+
+        # --- mtime-gated polling: after a quiet stretch (well past the
+        # 12-tick safety-net cycle, so the watcher has settled into the
+        # skip-to-sleep path) a brand-new photo is still detected ---
+        (home / "upload_exit").write_text("0")
+        time.sleep(0.9)  # > 12 shimmed ticks with no camera-dir changes
+        quiet = camera / "quiet_after_idle.jpg"
+        quiet.write_bytes(b"photo taken after a long quiet period")
+        assert _wait_for(lambda: _file_contains(calls, f"UPLOAD {quiet}"))
+        assert _wait_for(lambda: _file_contains(history, str(quiet)))
+
+        # --- mtime-gated polling: a failed upload is retried even though
+        # the camera-dir mtime does not change between attempts (the fail
+        # counter forces a rescan) ---
+        (home / "upload_exit").write_text("1")
+        flaky = camera / "flaky_retry.jpg"
+        flaky.write_bytes(b"first attempts fail, then the upload works")
+        assert _wait_for(lambda: _file_contains(log, f"Upload attempt 1 failed for {flaky}"))
+        (home / "upload_exit").write_text("0")
+        assert _wait_for(lambda: _file_contains(history, str(flaky)))
+        assert f"UPLOAD {flaky}" in calls.read_text()
     finally:
         proc.terminate()
         proc.wait(timeout=10)
@@ -158,6 +201,56 @@ def test_watcher_end_to_end_lifecycle(tmp_path):
     size_after_exit = calls.stat().st_size
     time.sleep(0.35)
     assert calls.stat().st_size == size_after_exit
+
+
+def test_housekeeping_prunes_deleted_photos_and_stale_fail_counters(tmp_path):
+    """Every CALORIE_HOUSEKEEP_POLLS iterations (3 here) the watcher prunes
+    history entries whose photos are gone from disk and deletes week-old
+    fail counters, while keeping entries for photos that still exist."""
+    env, home, camera, fake_proc = _make_env(tmp_path)
+    env["CALORIE_HOUSEKEEP_POLLS"] = "3"
+    log = home / "watcher.log"
+    history = home / "uploaded_files.log"
+
+    # A real photo, old enough to be seeded into history (not uploaded).
+    keeper = camera / "keeper.jpg"
+    keeper.write_bytes(b"still on disk")
+    two_hours_ago = time.time() - 2 * 3600
+    os.utime(keeper, (two_hours_ago, two_hours_ago))
+
+    # History entry for a photo that was deleted from the camera roll.
+    ghost = camera / "ghost.jpg"
+    history.write_text(f"{ghost}\n")
+
+    # A week-old fail counter left behind by some long-gone photo. Its
+    # presence also forces a full scan every tick, so housekeeping triggers
+    # quickly under the shimmed sleeps.
+    fail_dir = home / ".calorie_upload_failures"
+    fail_dir.mkdir()
+    stale_counter = fail_dir / "stale_counter"
+    stale_counter.write_text("2")
+    eight_days_ago = time.time() - 8 * 86400
+    os.utime(stale_counter, (eight_days_ago, eight_days_ago))
+
+    proc = subprocess.Popen(
+        [BASH, str(WATCHER)],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert _wait_for(lambda: _file_contains(log, "Started polling loop"))
+        # Housekeeping pruned the deleted photo's entry and the stale counter.
+        assert _wait_for(lambda: not _file_contains(history, str(ghost)))
+        assert _wait_for(lambda: not stale_counter.exists())
+        # The photo still on disk keeps its history entry (no re-upload).
+        assert _file_contains(history, str(keeper))
+        calls = home / "python_calls.log"
+        if calls.exists():
+            assert f"UPLOAD {keeper}" not in calls.read_text()
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
 
 
 def test_live_watcher_blocks_second_instance(tmp_path):

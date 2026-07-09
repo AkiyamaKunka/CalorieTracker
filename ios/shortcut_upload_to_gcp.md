@@ -40,7 +40,7 @@ Trigger:
 
 4. Optional: Get Dictionary from Contents of URL
    - If `status` is `processing_in_background`, do nothing.
-   - If `status` is `duplicate` or `already_processing`, do nothing.
+   - If `status` is `duplicate`, `already_processing`, or `already_saved_for_retry`, do nothing.
    - Otherwise show a notification with the response.
 
 ## Why This Shape

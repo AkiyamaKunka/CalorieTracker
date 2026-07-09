@@ -70,12 +70,15 @@ flowchart LR
 
 ## Core Features
 
-- Food photo analysis with Google Gemini.
+- Food photo analysis with Google Gemini (native JSON output; photos are downscaled on the phone and again server-side before each call, so quota and bandwidth aren't spent on 25MB camera files).
 - Calories, protein, carbs, fat, meal source, photo hash, and correction state in SQLite.
+- Reports flag meals whose item calories contradict their total and likely duplicates; the daily report includes a 7-day average and `/today` shows your typical-day intake.
 - Uploads from Telegram photos, Android Termux, and iOS Shortcuts.
-- Natural-language meal corrections and deletions in Telegram.
-- Daily Telegram reports, with optional PushPlus/WeChat forwarding.
+- Natural-language meal corrections and deletions in Telegram (deletions ask for inline confirmation before touching data).
+- Meals are dated in the phone's reported timezone, so a midnight snack lands on the right day even when the server runs in UTC.
+- Daily Telegram reports with missed-day catch-up, plus optional PushPlus/WeChat forwarding.
 - Saved failed uploads with user-controlled retry or delete.
+- Graceful shutdown, plus a startup sweep that recovers uploads stranded mid-analysis by a crash.
 - Runtime health written to `logs/service_health.json`.
 - Duplicate protection through a photo-hash reservation guard.
 
@@ -102,13 +105,15 @@ bash scripts/check_public_safety.sh
 ## Setup
 
 ```bash
-git clone <your-repo-url> CalorieTracker
-cd CalorieTracker
+git clone <your-repo-url> ~/CalorieTracker
+cd ~/CalorieTracker
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 ```
+
+Install at `~/CalorieTracker`: runtime data (`meals.db`, `logs/`, `reports/`, `dietary_profile.txt`) is always read from and written under `~/CalorieTracker`, regardless of where the scripts are launched from.
 
 Edit `.env`:
 
@@ -240,6 +245,20 @@ python3 ~/upload_photo.py --sync
 python3 ~/upload_photo.py /storage/emulated/0/DCIM/Camera/example.jpg
 ```
 
+Or automate install and restarts with the bundled installer: put `upload_photo.py` and `android_watcher.sh` in `/sdcard/Download`, copy `android/install_and_start.sh` to the phone, and run:
+
+```bash
+bash install_and_start.sh
+```
+
+It verifies the source files before stopping the running watcher, preserves the offline upload queue across reinstalls, and restarts everything under a wake lock.
+
+Watcher behavior worth knowing: new photos are marked as handled after a successful upload or safe offline queueing; a photo that fails three consecutive attempts is recorded anyway (with a loud log line) so it cannot wedge the loop, and photos already on the phone at watcher startup are skipped rather than uploaded as a backlog — the nightly sync covers both cases (photos newer than `SEED_FRESH_MINUTES`, default 15, upload immediately instead). Partially-written camera files are skipped until their size stabilizes, and photos the server permanently rejects are quarantined in `~/.offline_queue/rejected/`. The nightly `--sync` reconciles today's and yesterday's photos (including HEIC) against the server. Idle polling is mtime-gated (one `stat` per 5s tick when nothing changed), `watcher.log` rotates at 1MB, and daily housekeeping prunes history entries for deleted photos.
+
+If Pillow is installed in Termux (`pip install pillow`, optional), photos are recompressed to ≤1600px JPEG before upload — a 10–25MB camera shot becomes a few hundred KB on cellular — while dedup still keys on the original file's hash. Without Pillow (or for undecodable HEIC), originals upload unchanged.
+
+If your camera saves somewhere other than `DCIM/Camera`, set `CAMERA_DIR` (or `CALORIE_CAMERA_DIR`) in the environment for both the watcher and manual runs. Advanced env-only knobs: `PING_INTERVAL_SECONDS` (heartbeat, default 900), `SEED_FRESH_MINUTES`, `CALORIE_HOUSEKEEP_POLLS`, `CALORIE_RECOMPRESS_MAX_EDGE` (0 disables recompression) / `CALORIE_RECOMPRESS_JPEG_QUALITY`, `CALORIE_TRACKER_SERVER_URLS`, `CALORIE_TRACKER_ANDROID_CONFIG`, `QUEUE_BATCH_LIMIT`, `QUEUE_LOCK_STALE_SECONDS`, `ANDROID_VPN_ACTIVE`.
+
 ### iPhone
 
 Use the logic in [ios/shortcut_upload_to_gcp.md](ios/shortcut_upload_to_gcp.md).
@@ -258,6 +277,22 @@ Required request shape:
 
 Do not commit exported `.shortcut` or `.wflow` files.
 
+## Failure Modes
+
+What happens when parts of the pipeline are down:
+
+| Scenario | Behavior |
+| --- | --- |
+| Photo taken while the server is unreachable (Android) | Queued in `~/.offline_queue`; drained automatically after the next successful heartbeat. Photos the server permanently rejects are quarantined in `~/.offline_queue/rejected/` instead of blocking the queue. |
+| Uploader crashes on a photo | Retried on the next polls up to 3 attempts, then recorded with a loud log line; the nightly sync can still recover it. |
+| Photo taken just before starting the watcher | Uploaded by the first polls — startup seeding skips photos newer than `SEED_FRESH_MINUTES` (default 15). Older backlog is not mass-uploaded. |
+| Photo taken while the watcher was stopped | Recovered by the nightly `--sync` (covers today and yesterday) once the watcher is running again, or by a manual `--sync`. |
+| Server crashes mid-analysis | On restart, staged uploads move to the failed store (recover with `/retry_failed`) and orphaned in-flight reservations are released so retries aren't misreported as duplicates. |
+| Phone stops reaching the server | The bot warns you in Telegram once the heartbeat is older than `HEARTBEAT_STALE_WARNING_HOURS` (default 2h). |
+| Gemini daily quota exhausted | 12h circuit breaker; failed uploads are kept with keep/discard buttons instead of being dropped. |
+| Machine asleep at report time | The next `daily_report.py` run catches up on the missed day (deduped via the health ledger). |
+| iOS upload fails | Not retried — the Shortcut is best-effort, one photo per camera close, with no queue or sync. Re-open the Camera or send the photo via Telegram. |
+
 ## VPN Detection
 
 The server records VPN evidence from client headers and remote IP geolocation. By default, `VPN_OFF_COUNTRY_CODES=CN`, so non-China exit IPs are treated as VPN-looking traffic. This avoids warnings when a VPN switches between multiple exit countries.
@@ -267,6 +302,8 @@ Use these only when needed:
 - `VPN_REMOTE_CIDRS` for known VPN provider ranges
 - `VPN_OFF_REMOTE_CIDRS` for known direct/non-VPN ranges
 - `/vpn` in Telegram to inspect the latest evidence
+
+The upload API trusts the direct peer IP and ignores `X-Forwarded-For`. If you ever put a reverse proxy in front of it, set `TRUSTED_PROXY_ENABLED=1` so the forwarded address is honored.
 
 ## Telegram Commands
 
@@ -289,13 +326,13 @@ python3 daily_report.py
 python3 daily_report.py 2026-06-28
 ```
 
-When run without a date, `daily_report.py` checks the last Android-reported timezone and only sends during the local 23:00 hour. Use cron/systemd timers/launchd around 23:30 local time.
+When run without a date, `daily_report.py` resolves the target date from the last phone-reported timezone: at 23:00 local or later it reports on the current day; earlier in the day it catches up on the previous day instead. A date the scheduler already sent successfully is skipped (tracked in `logs/service_health.json`), so a machine that was asleep at report time delivers the missed report on its next run rather than dropping it. Schedule it around 23:30 local time with cron/systemd timers/launchd. Failures are recorded in the health ledger and alerted to Telegram.
 
 ## Tests
 
 ```bash
 bash scripts/check_public_safety.sh
-python3 -m py_compile config.py telegram_bot.py daily_report.py android/upload_photo.py database.py meal_relay.py migrate_to_sqlite.py utils.py
+python3 -m py_compile config.py telegram_bot.py daily_report.py android/upload_photo.py database.py meal_relay.py migrate_to_sqlite.py utils.py service_health.py
 python3 -m pytest -q
 ```
 
@@ -306,6 +343,7 @@ Ignored local data:
 - `.env`
 - `logs/`
 - `reports/`
+- `outputs/`
 - `*.db`
 - `dietary_profile.txt`
 - `*.shortcut`

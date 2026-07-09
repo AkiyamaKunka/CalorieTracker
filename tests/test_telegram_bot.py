@@ -1,9 +1,10 @@
 import sys
 import os
+import hashlib
 import io
 import json
 import pytest
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
@@ -130,6 +131,134 @@ def test_b1_upload_analysis_failure_moves_to_failed_dir(monkeypatch, tmp_path):
     assert any("could not be analyzed" in m["text"] for m in bot.sent)
 
 
+def test_b1b_upload_during_quota_pause_offers_keep_or_discard(monkeypatch, tmp_path):
+    """During a Gemini quota pause, a failed /upload keeps the photo and asks
+    the user to keep or discard via inline keyboard instead of a plain error."""
+    pending_dir = tmp_path / "pending"
+    failed_dir = tmp_path / "failed"
+    statuses = []
+    bot = FakeBot()
+
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", pending_dir)
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", failed_dir)
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "service_health.json")
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", lambda client, image_bytes: None)
+    monkeypatch.setattr(telegram_bot, "_gemini_quota_pause",
+                        lambda: {"until": datetime.now(), "reason": "daily quota", "set_at": ""})
+    monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        telegram_bot.database, "mark_photo_hash_status",
+        lambda *args, **kwargs: statuses.append((args, kwargs)),
+    )
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
+
+    app = telegram_bot._build_api_app(bot, object())
+    resp = app.test_client().post(
+        "/upload",
+        headers={"X-API-Key": "test-upload-key"},
+        data={"photo": (io.BytesIO(b"quota-paused-upload-bytes"), "meal.jpg")},
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {"status": "processing_in_background"}
+    assert list(pending_dir.iterdir()) == []
+    assert len(list(failed_dir.iterdir())) == 1
+    assert statuses and statuses[0][0][2] == "failed"
+
+    decision = bot.sent[-1]
+    assert decision["reply_markup"] is not None
+    callbacks = [
+        button["callback_data"]
+        for row in decision["reply_markup"]["inline_keyboard"]
+        for button in row
+    ]
+    assert any(data.startswith("quota_keep:") for data in callbacks)
+    assert any(data.startswith("quota_discard:") for data in callbacks)
+
+
+def test_upload_uses_declared_original_hash(monkeypatch, tmp_path):
+    """A recompressing client declares the ORIGINAL file's hash; the ledger,
+    staged filename, and saved meal must all key on it, not on the received
+    (recompressed) bytes."""
+    declared = "ab" * 16
+    reserved, saved = [], []
+    bot = FakeBot()
+
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "failed")
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries",
+                        lambda client, image_bytes: {"is_food": True, "total_calories": 500})
+    monkeypatch.setattr(telegram_bot, "save_meal",
+                        lambda chat_id, analysis, source, file_id, img_hash: saved.append(img_hash) or 77)
+    monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash",
+                        lambda chat_id, image_hash, *a, **k: reserved.append(image_hash) or True)
+    monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status", lambda *a, **k: None)
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
+
+    app = telegram_bot._build_api_app(bot, object())
+    resp = app.test_client().post(
+        "/upload",
+        headers={"X-API-Key": "test-upload-key"},
+        data={"photo": (io.BytesIO(b"recompressed jpeg bytes"), "meal.jpg"),
+              "original_hash": declared.upper()},  # case-insensitive
+    )
+
+    assert resp.status_code == 200
+    assert reserved == [declared]
+    assert saved == [declared]
+
+
+def test_upload_ignores_malformed_original_hash(monkeypatch, tmp_path):
+    reserved = []
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "failed")
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash",
+                        lambda chat_id, image_hash, *a, **k: reserved.append(image_hash) or False)
+
+    body = b"plain old client bytes"
+    expected = hashlib.md5(body).hexdigest()
+    app = telegram_bot._build_api_app(FakeBot(), object())
+    for bad in ("zz" * 16, "abc123", ""):
+        resp = app.test_client().post(
+            "/upload",
+            headers={"X-API-Key": "test-upload-key"},
+            data={"photo": (io.BytesIO(body), "meal.jpg"), "original_hash": bad},
+        )
+        assert resp.status_code == 200  # duplicate path (reserve False)
+
+    assert reserved == [expected] * 3  # fell back to hashing the bytes
+
+
+def test_retry_and_sweep_resolve_ledger_hash_from_filename(monkeypatch, tmp_path):
+    """Staged bytes of a recompressed upload hash differently than the ledger
+    key; retry and the startup sweep must resolve through the ledger via the
+    filename prefix instead of rehashing."""
+    declared = "cd" * 16
+    failed_dir = tmp_path / "failed"
+    failed_dir.mkdir()
+    staged = failed_dir / f"20260708_010000_{declared[:12]}.jpg"
+    staged.write_bytes(b"recompressed bytes that hash differently")
+
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot.database, "find_photo_hash_by_prefix",
+                        lambda chat_id, prefix: declared if prefix == declared[:12] else None)
+
+    assert telegram_bot._upload_file_ledger_hash(staged, staged.read_bytes()) == declared
+
+    # Legacy file (no ledger row): falls back to hashing the bytes.
+    monkeypatch.setattr(telegram_bot.database, "find_photo_hash_by_prefix",
+                        lambda chat_id, prefix: None)
+    legacy_bytes = staged.read_bytes()
+    assert telegram_bot._upload_file_ledger_hash(staged, legacy_bytes) == hashlib.md5(legacy_bytes).hexdigest()
+
+
 def test_b2_upload_oversized_body_returns_413_json(monkeypatch):
     """Test Case B2: oversized multipart bodies are rejected with the JSON error shape."""
     monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
@@ -144,6 +273,112 @@ def test_b2_upload_oversized_body_returns_413_json(monkeypatch):
 
     assert resp.status_code == 413
     assert resp.get_json() == {"error": "Photo too large"}
+
+
+def test_reconcile_endpoint_requires_api_key(monkeypatch):
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+
+    app = telegram_bot._build_api_app(FakeBot(), object())
+    resp = app.test_client().post("/reconcile", json={"hashes": ["a" * 32]})
+
+    assert resp.status_code == 401
+    assert resp.get_json() == {"error": "Unauthorized"}
+
+
+def test_reconcile_endpoint_rejects_payload_without_hashes(monkeypatch):
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+    monkeypatch.setattr(telegram_bot, "maybe_warn_android_vpn_inactive", lambda *a, **k: None)
+
+    app = telegram_bot._build_api_app(FakeBot(), object())
+    client = app.test_client()
+    headers = {"X-API-Key": "test-upload-key"}
+
+    for resp in (
+        client.post("/reconcile", headers=headers, json={"wrong": []}),
+        client.post("/reconcile", headers=headers, data="not json",
+                    content_type="application/json"),
+    ):
+        assert resp.status_code == 400
+        assert resp.get_json() == {"error": "Missing hashes array"}
+
+
+def test_reconcile_endpoint_reports_only_truly_missing_hashes(monkeypatch, tmp_path):
+    """Endpoint contract: logged, reserved, and failed-saved hashes are
+    suppressed; only hashes the server has never seen come back."""
+    logged = "aa" * 16
+    reserved = "bb" * 16
+    failed = "cc" * 16
+    unknown = "dd" * 16
+
+    failed_dir = tmp_path / "failed"
+    failed_dir.mkdir()
+    (failed_dir / f"20260707_120000_{failed[:12]}.jpg").write_bytes(b"x")
+
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", failed_dir)
+    monkeypatch.setattr(telegram_bot, "maybe_warn_android_vpn_inactive", lambda *a, **k: None)
+    monkeypatch.setattr(telegram_bot.database, "get_today_hashes", lambda chat_id: [logged])
+    monkeypatch.setattr(telegram_bot.database, "get_reserved_photo_hashes", lambda chat_id: [reserved])
+
+    app = telegram_bot._build_api_app(FakeBot(), object())
+    resp = app.test_client().post(
+        "/reconcile",
+        headers={"X-API-Key": "test-upload-key"},
+        json={"hashes": [logged, reserved, failed, unknown]},
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {"missing_hashes": [unknown]}
+
+
+def test_ping_endpoint_requires_api_key(monkeypatch):
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+
+    app = telegram_bot._build_api_app(FakeBot(), object())
+    resp = app.test_client().post("/ping", json={"timezone": "+0800"})
+
+    assert resp.status_code == 401
+    assert resp.get_json() == {"error": "Unauthorized"}
+
+
+def test_ping_endpoint_stores_reported_timezone(monkeypatch):
+    heartbeats = []
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+    monkeypatch.setattr(telegram_bot, "maybe_warn_android_vpn_inactive", lambda *a, **k: None)
+    monkeypatch.setattr(
+        telegram_bot.database, "update_android_heartbeat",
+        lambda timezone=None: heartbeats.append(timezone),
+    )
+
+    app = telegram_bot._build_api_app(FakeBot(), object())
+    resp = app.test_client().post(
+        "/ping", headers={"X-API-Key": "test-upload-key"}, json={"timezone": "+0530"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {"status": "ok"}
+    assert heartbeats == ["+0530"]
+
+
+def test_ping_endpoint_without_timezone_preserves_stored_offset(monkeypatch):
+    """A ping lacking a timezone must pass None so the stored offset —
+    which drives all meal dating — is not clobbered back to +0800."""
+    heartbeats = []
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+    monkeypatch.setattr(telegram_bot, "maybe_warn_android_vpn_inactive", lambda *a, **k: None)
+    monkeypatch.setattr(
+        telegram_bot.database, "update_android_heartbeat",
+        lambda timezone=None: heartbeats.append(timezone),
+    )
+
+    app = telegram_bot._build_api_app(FakeBot(), object())
+    client = app.test_client()
+    headers = {"X-API-Key": "test-upload-key"}
+
+    assert client.post("/ping", headers=headers).status_code == 200
+    assert client.post("/ping", headers=headers, json={"device": "x"}).status_code == 200
+    assert heartbeats == [None, None]
 
 
 @patch('telegram_bot.Image.open')
@@ -162,6 +397,69 @@ def test_b10_gemini_json_parsing(mock_image_open, mock_db):
     assert analysis is not None
     assert analysis["calories"] == 95
     assert analysis["description"] == "Apple"
+
+
+def _seed_food_meal(chat_id, date_str, calories, image_hash, description="Meal"):
+    database.save_meal(
+        chat_id, date_str, "12:00 PM", datetime.now().isoformat(), "test", image_hash, "file",
+        {"is_food": True, "meal_description": description, "total_calories": calories},
+    )
+
+
+def test_today_summary_shows_median_typical_day_and_headroom(mock_db, monkeypatch):
+    """/today compares against the MEDIAN of the prior 7 user-local days."""
+    monkeypatch.setattr(database, "get_android_timezone", lambda *args, **kwargs: "+0800")
+    today = database.user_local_now().date()
+
+    _seed_food_meal(12345, today.isoformat(), 500, "hash-today")
+    _seed_food_meal(12345, (today - timedelta(days=1)).isoformat(), 1800, "hash-d1")
+    _seed_food_meal(12345, (today - timedelta(days=2)).isoformat(), 1200, "hash-d2a")
+    _seed_food_meal(12345, (today - timedelta(days=2)).isoformat(), 800, "hash-d2b")
+    _seed_food_meal(12345, (today - timedelta(days=3)).isoformat(), 1600, "hash-d3")
+    # Non-food and out-of-window rows must not shift the median.
+    database.save_meal(12345, (today - timedelta(days=1)).isoformat(), "1:00 PM",
+                       datetime.now().isoformat(), "test", "hash-notfood", "file",
+                       {"is_food": False, "total_calories": 9999})
+    _seed_food_meal(12345, (today - timedelta(days=8)).isoformat(), 5000, "hash-old")
+
+    summary = telegram_bot.format_today_summary(12345)
+
+    # Prior-day totals: 1800, 2000, 1600 -> median 1800; today 500 -> 1300 headroom.
+    assert "📊 Typical day: ~1,800 kcal" in summary
+    assert "⏳ ~1,300 kcal headroom vs typical" in summary
+    assert "above typical" not in summary
+
+
+def test_today_summary_flags_calories_above_typical(mock_db, monkeypatch):
+    monkeypatch.setattr(database, "get_android_timezone", lambda *args, **kwargs: "+0800")
+    today = database.user_local_now().date()
+
+    _seed_food_meal(12345, today.isoformat(), 2500, "hash-today")
+    _seed_food_meal(12345, (today - timedelta(days=1)).isoformat(), 1800, "hash-d1")
+    _seed_food_meal(12345, (today - timedelta(days=2)).isoformat(), 1600, "hash-d2")
+
+    summary = telegram_bot.format_today_summary(12345)
+
+    # Median of 1800 and 1600 is 1700; today 2500 -> 800 above.
+    assert "📊 Typical day: ~1,700 kcal" in summary
+    assert "📈 ~800 kcal above typical" in summary
+    assert "headroom" not in summary
+
+
+def test_today_summary_hides_typical_day_with_sparse_history(mock_db, monkeypatch):
+    """Fewer than 2 prior days with data suppresses the typical-day block."""
+    monkeypatch.setattr(database, "get_android_timezone", lambda *args, **kwargs: "+0800")
+    today = database.user_local_now().date()
+
+    _seed_food_meal(12345, today.isoformat(), 500, "hash-today")
+    _seed_food_meal(12345, (today - timedelta(days=1)).isoformat(), 1800, "hash-d1")
+
+    summary = telegram_bot.format_today_summary(12345)
+
+    assert "500 kcal" in summary
+    assert "Typical day" not in summary
+    assert "headroom" not in summary
+    assert "above typical" not in summary
 
 
 def test_b12_delete_intent_with_empty_database(mock_db, monkeypatch, tmp_path):

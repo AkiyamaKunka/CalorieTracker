@@ -25,6 +25,7 @@ import logging
 import os
 import re
 import signal
+import statistics
 import subprocess
 import sys
 import time
@@ -39,7 +40,8 @@ from flask import Flask, request, jsonify
 
 import requests
 from google import genai
-from PIL import Image
+from google.genai import types
+from PIL import Image, ImageOps
 try:
     import pillow_heif
     pillow_heif.register_heif_opener()
@@ -60,7 +62,7 @@ from config import (
     REPORTS_DIR,
     SUPPORTED_EXTENSIONS,
 )
-from utils import parse_ai_json, telegram_message_chunks
+from utils import meal_calorie_mismatch, parse_ai_json, telegram_message_chunks
 
 # ─── Constants ─────────────────────────────────────────────────────
 def _parse_chat_id(value: Optional[str]) -> int:
@@ -107,6 +109,10 @@ GEMINI_ANALYSIS_MAX_ATTEMPTS = _env_int("GEMINI_ANALYSIS_MAX_ATTEMPTS", 3, 1, 10
 GEMINI_RETRY_BASE_DELAY_SECONDS = _env_int("GEMINI_RETRY_BASE_DELAY_SECONDS", 5, 0, 3600)
 GEMINI_RETRY_MAX_DELAY_SECONDS = _env_int("GEMINI_RETRY_MAX_DELAY_SECONDS", 60, 1, 3600)
 GEMINI_DAILY_QUOTA_COOLDOWN_SECONDS = _env_int("GEMINI_DAILY_QUOTA_COOLDOWN_SECONDS", 12 * 3600, 60, 7 * 24 * 3600)
+# Native JSON mode for JSON-producing Gemini calls: a malformed free-form
+# response terminally burns a free-tier request, so ask the API to enforce
+# JSON output. parse_ai_json stays as the fallback for wrapped responses.
+GEMINI_JSON_CONFIG = types.GenerateContentConfig(response_mime_type="application/json")
 API_UPLOAD_PENDING_DIR = Path.home() / "CalorieTracker" / "logs" / "pending_uploads"
 API_UPLOAD_FAILED_DIR = Path.home() / "CalorieTracker" / "logs" / "failed_uploads"
 SERVICE_HEALTH_PATH = service_health.DEFAULT_PATH
@@ -115,6 +121,8 @@ RETRY_ALL_FAILED_MAX = _env_int("RETRY_ALL_FAILED_MAX", 10, 1, 50)
 MAX_API_UPLOAD_BYTES = _env_int("MAX_API_UPLOAD_BYTES", 25 * 1024 * 1024, 1024, 100 * 1024 * 1024)
 ANDROID_VPN_WARNING_COOLDOWN_MINUTES = _env_int("ANDROID_VPN_WARNING_COOLDOWN_MINUTES", 30, 0, 1440)
 IOS_VPN_WARNING_COOLDOWN_MINUTES = _env_int("IOS_VPN_WARNING_COOLDOWN_MINUTES", 30, 0, 1440)
+HEARTBEAT_STALE_WARNING_HOURS = _env_float("HEARTBEAT_STALE_WARNING_HOURS", 2, 0, 168)
+HEARTBEAT_STALE_WARNING_COOLDOWN_HOURS = _env_float("HEARTBEAT_STALE_WARNING_COOLDOWN_HOURS", 12, 0.1, 168)
 VPN_GEO_LOOKUP_ENABLED = os.environ.get("VPN_GEO_LOOKUP_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
 VPN_GEO_LOOKUP_TIMEOUT_SECONDS = _env_float("VPN_GEO_LOOKUP_TIMEOUT_SECONDS", 2, 0.1, 30)
 VPN_GEO_CACHE_TTL_SECONDS = _env_int("VPN_GEO_CACHE_TTL_SECONDS", 86400, 60, 604800)
@@ -142,11 +150,13 @@ TRUSTED_PROXY_ENABLED = os.environ.get("TRUSTED_PROXY_ENABLED", "").strip().lowe
 NL_DELETE_CONFIRM_TTL_SECONDS = 600
 _last_android_vpn_warning_at = None
 _last_ios_vpn_warning_at = None
+_last_stale_heartbeat_warning_at = None
 _vpn_warning_lock = threading.Lock()
 _api_upload_processing_hashes = set()
 _api_upload_processing_lock = threading.Lock()
-_service_health_lock = threading.Lock()
 _remote_ip_country_cache = {}
+GEO_CACHE_MAX_ENTRIES = 256
+_geo_cache_lock = threading.Lock()
 # Pending natural-language deletes awaiting inline-button confirmation.
 _pending_nl_deletes: Dict[int, Dict] = {}
 
@@ -451,15 +461,25 @@ def _gemini_quota_pause_summary() -> str:
     )
 
 
+def _update_service_health(mutate) -> Dict:
+    """Apply a mutation under the inter-process file lock.
+
+    Serializes against the cron daily_report process as well as this
+    process's own Flask/background threads.
+    """
+    return service_health.update(mutate, SERVICE_HEALTH_PATH, warn=log.warning)
+
+
 def _set_gemini_daily_quota_pause(error: Exception) -> str:
     pause_until = datetime.now() + timedelta(seconds=GEMINI_DAILY_QUOTA_COOLDOWN_SECONDS)
-    with _service_health_lock:
-        data = _load_service_health()
+
+    def mutate(data):
         gemini = data.setdefault("gemini", {})
         gemini["quota_pause_set_at"] = _health_timestamp()
         gemini["quota_pause_until"] = pause_until.isoformat(timespec="seconds")
         gemini["quota_pause_reason"] = str(error)[:500]
-        _save_service_health(data)
+
+    _update_service_health(mutate)
     return pause_until.isoformat(timespec="seconds")
 
 
@@ -471,8 +491,7 @@ def _record_gemini_health(
     latency_seconds: Optional[float] = None,
     probe: bool = False,
 ):
-    with _service_health_lock:
-        data = _load_service_health()
+    def mutate(data):
         gemini = data.setdefault("gemini", {})
         now = _health_timestamp()
 
@@ -505,7 +524,8 @@ def _record_gemini_health(
             "probe": probe,
         })
         gemini["events"] = events[-50:]
-        _save_service_health(data)
+
+    _update_service_health(mutate)
 
 
 def _record_vpn_observation(
@@ -518,8 +538,7 @@ def _record_vpn_observation(
     evidence: str,
     evidence_detail: str,
 ):
-    with _service_health_lock:
-        data = _load_service_health()
+    def mutate(data):
         vpn = data.setdefault("vpn", {})
         vpn[client] = {
             "at": _health_timestamp(),
@@ -531,7 +550,8 @@ def _record_vpn_observation(
             "evidence": evidence,
             "evidence_detail": evidence_detail,
         }
-        _save_service_health(data)
+
+    _update_service_health(mutate)
 
 
 def _record_report_health(
@@ -542,13 +562,12 @@ def _record_report_health(
     report_path: str = "",
     error_summary: str = "",
 ):
-    with _service_health_lock:
-        data = _load_service_health()
-        service_health.apply_report_health(
+    _update_service_health(
+        lambda data: service_health.apply_report_health(
             data, ok, target_date,
             source=source, report_path=report_path, error_summary=error_summary,
         )
-        _save_service_health(data)
+    )
 
 
 def _gemini_recent_counts(hours: int = 24) -> tuple[int, int]:
@@ -608,12 +627,32 @@ def _gemini_failure_context() -> str:
     return "\n".join(lines)
 
 
+def _prepare_image_for_gemini(image_bytes: bytes) -> Image.Image:
+    """Downscale a photo before sending it to Gemini.
+
+    Phone photos can be 25MB; Gemini needs nowhere near that, and >20MB
+    inline requests hard-fail. EXIF orientation is baked in first so the
+    thumbnail is not sideways. If anything about resizing goes wrong, fall
+    back to the original un-resized image — but let a genuinely unreadable
+    image raise the same error the un-resized path would have raised.
+    """
+    img = Image.open(io.BytesIO(image_bytes))
+    try:
+        img = ImageOps.exif_transpose(img)
+        img.thumbnail((1024, 1024))
+        return img.convert("RGB")
+    except Exception as e:
+        log.warning(f"Could not downscale image for Gemini; sending original: {e}")
+        return Image.open(io.BytesIO(image_bytes))
+
+
 def _analyze_food_photo_once(client: genai.Client, image_bytes: bytes) -> Dict:
     """Analyze a food photo once with Gemini, letting callers handle failures."""
-    img = Image.open(io.BytesIO(image_bytes))
+    img = _prepare_image_for_gemini(image_bytes)
     response = client.models.generate_content(
         model=GEMINI_MODEL,
         contents=[FOOD_DETECTION_PROMPT, img],
+        config=GEMINI_JSON_CONFIG,
     )
     return parse_ai_json(response.text)
 
@@ -919,11 +958,13 @@ def _remote_ip_country_code(remote_ip: str) -> Optional[str]:
     if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
         return None
 
-    cached = _remote_ip_country_cache.get(str(ip))
     now_ts = time.time()
-    if cached and now_ts - cached["time"] < VPN_GEO_CACHE_TTL_SECONDS:
-        return cached["country"]
+    with _geo_cache_lock:
+        cached = _remote_ip_country_cache.get(str(ip))
+        if cached and now_ts - cached["time"] < VPN_GEO_CACHE_TTL_SECONDS:
+            return cached["country"]
 
+    # Never hold the lock across the blocking network call.
     try:
         response = requests.get(
             f"http://ip-api.com/json/{ip}",
@@ -936,8 +977,36 @@ def _remote_ip_country_code(remote_ip: str) -> Optional[str]:
         log.info(f"Could not geolocate remote IP {ip}: {e}")
         country = None
 
-    _remote_ip_country_cache[str(ip)] = {"country": country, "time": now_ts}
+    with _geo_cache_lock:
+        _prune_geo_cache_locked(now_ts)
+        _remote_ip_country_cache[str(ip)] = {"country": country, "time": now_ts}
     return country
+
+
+def _prune_geo_cache_locked(now_ts: float):
+    """Bound the geo cache before an insert; caller must hold _geo_cache_lock.
+
+    Drops expired entries first and, if the cache is still full, the oldest
+    entries by stored time, leaving room for one new entry.
+    """
+    if len(_remote_ip_country_cache) < GEO_CACHE_MAX_ENTRIES:
+        return
+
+    expired = [
+        key for key, entry in _remote_ip_country_cache.items()
+        if now_ts - entry["time"] >= VPN_GEO_CACHE_TTL_SECONDS
+    ]
+    for key in expired:
+        del _remote_ip_country_cache[key]
+
+    overflow = len(_remote_ip_country_cache) - (GEO_CACHE_MAX_ENTRIES - 1)
+    if overflow > 0:
+        oldest = sorted(
+            _remote_ip_country_cache,
+            key=lambda key: _remote_ip_country_cache[key]["time"],
+        )[:overflow]
+        for key in oldest:
+            del _remote_ip_country_cache[key]
 
 
 def _remote_vpn_evidence(remote_ip: str) -> tuple[str, str]:
@@ -1254,6 +1323,26 @@ def _select_failed_upload(selector: str) -> Optional[Path]:
     return None
 
 
+_ORIGINAL_HASH_RE = re.compile(r"^[0-9a-f]{32}$")
+_UPLOAD_NAME_HASH_RE = re.compile(r"_([0-9a-fA-F]{12})(?:\.[^.]+)?$")
+
+
+def _upload_file_ledger_hash(path: Path, image_bytes: bytes) -> str:
+    """Ledger hash for a staged/failed upload file.
+
+    When the phone recompresses before upload it declares the ORIGINAL
+    file's hash, which becomes the ledger key and the filename prefix —
+    the staged bytes hash differently. Resolve through the ledger first;
+    fall back to hashing the bytes for legacy files.
+    """
+    match = _UPLOAD_NAME_HASH_RE.search(path.name)
+    if match:
+        ledger_hash = database.find_photo_hash_by_prefix(ALLOWED_CHAT_ID, match.group(1))
+        if ledger_hash:
+            return ledger_hash
+    return hashlib.md5(image_bytes).hexdigest()
+
+
 def _retry_failed_upload_path(gemini_client, path: Path) -> Dict:
     pause = _gemini_quota_pause()
     if pause:
@@ -1272,7 +1361,7 @@ def _retry_failed_upload_path(gemini_client, path: Path) -> Dict:
             "message": f"could not read file: {e}",
         }
 
-    img_hash = hashlib.md5(image_bytes).hexdigest()
+    img_hash = _upload_file_ledger_hash(path, image_bytes)
 
     if database.meal_image_hash_exists(ALLOWED_CHAT_ID, img_hash):
         database.mark_photo_hash_status(ALLOWED_CHAT_ID, img_hash, "saved", source="api_retry")
@@ -1518,6 +1607,52 @@ def format_vpn_status() -> str:
         + "</code>"
     )
     return "\n".join(lines)
+
+
+def maybe_warn_stale_android_heartbeat(bot: TelegramBot) -> bool:
+    """Warn once (with cooldown) when the phone stops reaching the server.
+
+    Surfaces silent failure modes — watcher dead, wrong server address,
+    blocked network — where photos pile up in the phone's offline queue
+    with no visible signal. Only fires for a heartbeat that existed and
+    went stale; a never-connected setup is a setup task, not an outage.
+    """
+    global _last_stale_heartbeat_warning_at
+    if HEARTBEAT_STALE_WARNING_HOURS <= 0:
+        return False
+
+    last_ping = database.get_last_android_heartbeat()
+    if not last_ping:
+        return False
+
+    try:
+        last_ping_dt = datetime.fromisoformat(last_ping)
+    except ValueError:
+        return False
+
+    age = datetime.now() - last_ping_dt
+    if age.total_seconds() < HEARTBEAT_STALE_WARNING_HOURS * 3600:
+        return False
+
+    now = datetime.now()
+    if (_last_stale_heartbeat_warning_at is not None
+            and (now - _last_stale_heartbeat_warning_at).total_seconds()
+            < HEARTBEAT_STALE_WARNING_COOLDOWN_HOURS * 3600):
+        return False
+    _last_stale_heartbeat_warning_at = now
+
+    hours = int(age.total_seconds() // 3600)
+    log.warning(f"Android heartbeat stale for {hours}h; notifying user.")
+    bot.send_message(
+        ALLOWED_CHAT_ID,
+        f"📵 <b>Android watcher hasn't reached the server in about {hours}h</b> "
+        f"(last ping <code>{_html(last_ping)}</code>).\n\n"
+        "The phone may be offline, the watcher may have stopped, or it can't "
+        "reach the server — new photos are piling up in the phone's offline "
+        "queue meanwhile.\n\n"
+        "Check <code>~/watcher.log</code> on the phone, or <code>/android</code> here.",
+    )
+    return True
 
 
 def format_operational_status() -> str:
@@ -1994,10 +2129,19 @@ def format_food_result(chat_id: int, analysis: Dict) -> str:
     lines.append(f"\n📊 <b>This meal: ~{_html(total)} kcal</b>")
     lines.append(f"🥩 P: {_html(tp)}g | 🍞 C: {_html(tc)}g | 🧈 F: {_html(tf)}g")
 
+    # Gemini sometimes hallucinates a meal total that contradicts its own
+    # per-item breakdown; flag it so the user can correct it right away.
+    item_sum = meal_calorie_mismatch(analysis)
+    if item_sum is not None:
+        lines.append(
+            f"⚠️ Item calories sum to ~{item_sum} kcal but the meal total is "
+            f"~{_html(total)} kcal — reply with a correction if this looks wrong."
+        )
+
     # Daily totals
     daily = format_daily_totals(chat_id)
     if daily:
-        lines.append(f"\n━━━━━━━━━━━━━━━━━━")
+        lines.append("\n━━━━━━━━━━━━━━━━━━")
         lines.append(daily)
 
     return "\n".join(lines)
@@ -2021,6 +2165,19 @@ def format_daily_totals(chat_id: int) -> str:
 
 
 # ─── Formatting ────────────────────────────────────────────────────
+def _daily_calorie_totals(chat_id: int, start_date: str, end_date: str) -> Dict[str, int]:
+    """Sum food-meal calories per user-local day over an inclusive date window."""
+    meals = database.get_meals(chat_id, start_date, end_date)
+    totals: Dict[str, int] = {}
+    for m in meals:
+        analysis = m.get("analysis", {})
+        if not analysis.get("is_food"):
+            continue
+        d = m.get("date", "")
+        totals[d] = totals.get(d, 0) + (analysis.get("total_calories") or 0)
+    return totals
+
+
 def format_today_summary(chat_id: int) -> str:
     """Format today's calorie & macro summary."""
     meals = get_todays_meals(chat_id)
@@ -2041,6 +2198,24 @@ def format_today_summary(chat_id: int) -> str:
         f"🧈 Fat: {total_f}g",
         f"📸 Meals: {len(meals)}",
     ]
+
+    # Typical-day comparison over the prior 7 user-local days (today excluded).
+    # Median rather than mean: under-logged days would bias a mean low.
+    local_today = database.user_local_now().date()
+    prior_totals = _daily_calorie_totals(
+        chat_id,
+        (local_today - timedelta(days=7)).isoformat(),
+        (local_today - timedelta(days=1)).isoformat(),
+    )
+    if len(prior_totals) >= 2:
+        typical = int(statistics.median(prior_totals.values()))
+        lines.append("")
+        lines.append(f"📊 Typical day: ~{typical:,} kcal")
+        if total_cal <= typical:
+            lines.append(f"⏳ ~{typical - total_cal:,} kcal headroom vs typical")
+        else:
+            lines.append(f"📈 ~{total_cal - typical:,} kcal above typical")
+
     return "\n".join(lines)
 
 
@@ -2066,7 +2241,7 @@ def format_meals_list(chat_id: int) -> str:
         lines.append(f"{i + 1}. <b>{_html(desc)}</b> ({_html(meal.get('time', '?'))}){corrected}")
         lines.append(f"   ~{cal} kcal | P:{p}g C:{c}g F:{f}g")
 
-    lines.append(f"\n━━━━━━━━━━━━━━━━━━")
+    lines.append("\n━━━━━━━━━━━━━━━━━━")
     lines.append(f"🔥 <b>Total: ~{total_cal:,} kcal</b> ({len(meals)} meals)")
     return "\n".join(lines)
 
@@ -2077,18 +2252,11 @@ def format_history(chat_id: int, days: int = 7) -> str:
     # days - 1 back plus today = an inclusive N-day window
     cutoff_date = (local_today - timedelta(days=days - 1)).isoformat()
     today_str = local_today.isoformat()
-    all_meals = database.get_meals(chat_id, cutoff_date, today_str)
-    meals = [m for m in all_meals if m.get("analysis", {}).get("is_food")]
-    
-    if not meals:
+    daily_cals = _daily_calorie_totals(chat_id, cutoff_date, today_str)
+
+    if not daily_cals:
         return f"📅 <b>{days}-Day History</b>\n\nNo meals logged in the past {days} days."
 
-    daily_cals = {}
-    for m in meals:
-        d = m.get("date", "")
-        cal = m.get("analysis", {}).get("total_calories") or 0
-        daily_cals[d] = daily_cals.get(d, 0) + cal
-        
     lines = [f"📅 <b>{days}-Day History</b>\n"]
     for d in sorted(daily_cals.keys(), reverse=True):
         try:
@@ -2149,6 +2317,7 @@ def handle_text_message(
         response = gemini_client.models.generate_content(
             model=GEMINI_MODEL,
             contents=[prompt],
+            config=GEMINI_JSON_CONFIG,
         )
         result = parse_ai_json(response.text)
     except json.JSONDecodeError as e:
@@ -2192,7 +2361,7 @@ def handle_text_message(
         diff_str = f"+{diff}" if diff > 0 else str(diff)
         reply_lines = [
             f"✏️ <b>Corrected meal {meal_index + 1}!</b>",
-            f"",
+            "",
             f"<b>{_html(old_desc)}</b> → <b>{_html(new_desc)}</b>",
             f"🔥 {_html(old_cal)} kcal → {_html(new_cal)} kcal ({_html(diff_str)})",
         ]
@@ -2269,7 +2438,7 @@ def handle_text_message(
         # chat
         reply = result.get("reply", "I'm not sure what you mean. Try describing a meal or correction!")
         bot.send_message(chat_id, _html(reply))
-        log.info(f"  💬 Chat response sent")
+        log.info("  💬 Chat response sent")
 
 
 def handle_callback_query(gemini_client, bot: TelegramBot, callback_query: Dict) -> bool:
@@ -2363,14 +2532,15 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
 
         maybe_warn_android_vpn_inactive(bot, "/ping")
 
-        tz = "+0800"
+        # None preserves the stored offset; meal dating depends on it.
+        tz = None
         if request.is_json:
             data = request.get_json(silent=True)
             if data and "timezone" in data:
                 tz = data["timezone"]
 
         database.update_android_heartbeat(timezone=tz)
-        log.info(f"📡 Heartbeat ping received from Android Watcher (TZ: {tz})")
+        log.info(f"📡 Heartbeat ping received from Android Watcher (TZ: {tz or 'unchanged'})")
         return jsonify({"status": "ok"})
 
     @app.route('/reconcile', methods=['POST'])
@@ -2413,6 +2583,11 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
             return jsonify({"error": "Empty photo"}), 400
 
         img_hash = hashlib.md5(image_bytes).hexdigest()
+        declared_hash = (request.form.get("original_hash") or "").strip().lower()
+        if _ORIGINAL_HASH_RE.match(declared_hash):
+            # The phone may recompress before uploading; dedup, /reconcile,
+            # and the meals ledger must key on the ORIGINAL file's hash.
+            img_hash = declared_hash
 
         existing_failed = _find_failed_upload_by_hash(img_hash)
         if existing_failed:
@@ -2553,13 +2728,28 @@ def _sweep_stranded_pending_uploads(bot: TelegramBot):
     moved = []
     for path in _pending_upload_items():
         try:
-            img_hash = hashlib.md5(path.read_bytes()).hexdigest()
+            img_hash = _upload_file_ledger_hash(path, path.read_bytes())
         except OSError as e:
             log.warning(f"Could not read stranded pending upload {path}: {e}")
             continue
         failed_path = _keep_failed_api_upload(path, img_hash)
         database.mark_photo_hash_status(ALLOWED_CHAT_ID, img_hash, "failed", source="startup_sweep")
         moved.append(failed_path.name)
+
+    # A crash between reserving a hash and finishing analysis leaves a
+    # 'processing' row with no file behind it; phone retries then get
+    # "duplicate" (and delete their queued copy) until the reservation goes
+    # stale. Nothing can be legitimately in flight at boot, so release any
+    # reservation that has no staged or failed file backing it.
+    failed_prefixes = _failed_upload_hash_prefixes()
+    released = 0
+    for img_hash in database.get_processing_photo_hashes(ALLOWED_CHAT_ID):
+        if _image_hash_prefix(img_hash) in failed_prefixes:
+            continue
+        database.release_photo_hash(ALLOWED_CHAT_ID, img_hash)
+        released += 1
+    if released:
+        log.info(f"♻️ Released {released} orphaned in-flight photo reservation(s) at boot.")
 
     if not moved:
         return
@@ -2634,6 +2824,7 @@ def main():
     try:
         while True:
             updates = bot.get_updates(timeout=30)
+            maybe_warn_stale_android_heartbeat(bot)
 
             for update in updates:
                 callback_query = update.get("callback_query")
@@ -2816,7 +3007,7 @@ def main():
                         # Duplicate detection
                         img_hash = hashlib.md5(image_bytes).hexdigest()
                         if is_duplicate_photo(chat_id, img_hash):
-                            log.info(f"  🔄 Duplicate photo detected, skipping")
+                            log.info("  🔄 Duplicate photo detected, skipping")
                             bot.send_message(
                                 chat_id,
                                 "🔄 This looks like the same photo you already sent!\n"
@@ -2833,7 +3024,7 @@ def main():
                             "telegram",
                             reclaim_statuses={"failed", "skipped", "deleted"},
                         ):
-                            log.info(f"  🔄 Photo already reserved or logged, skipping")
+                            log.info("  🔄 Photo already reserved or logged, skipping")
                             bot.send_message(
                                 chat_id,
                                 "🔄 This photo is already being processed or was already logged.\n"

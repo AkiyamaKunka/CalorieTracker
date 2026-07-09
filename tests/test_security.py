@@ -168,3 +168,55 @@ def test_do_post_save_failure_releases_hash_and_hides_error(monkeypatch):
     assert handler.wfile.getvalue() == b'{"error": "internal error"}'
     assert b"secret" not in handler.wfile.getvalue()
     assert released == [(12345, "abc123")]
+
+
+def test_meal_relay_happy_path_saves_meal_and_dedupes(monkeypatch, tmp_path):
+    """End to end against a real temp DB: a valid POST saves the meal on the
+    user-local date with a normalized hash and a 'saved' ingestion row; an
+    identical retry gets 'duplicate' and no second row."""
+    import database
+
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "relay.db")
+    database.init_db()
+    monkeypatch.setattr(database, "get_android_timezone",
+                        lambda device_name="android_watcher": "+0800")
+    monkeypatch.setattr(meal_relay, "RELAY_API_KEY", "relay-key")
+    monkeypatch.setattr(meal_relay, "TELEGRAM_CHAT_ID", "12345")
+
+    payload = {
+        "analysis": {"is_food": True, "total_calories": 640,
+                     "meal_description": "Beef noodles"},
+        "filename": "IMG_0042.jpg",
+        "source": "android",
+        "image_hash": "AB" * 16,  # uppercase pins hash normalization end to end
+    }
+    body = json.dumps(payload).encode()
+    headers = {"X-API-Key": "relay-key", "Content-Length": str(len(body))}
+
+    handler, statuses = _make_handler(headers, body)
+    handler.do_POST()
+
+    assert statuses == [200]
+    assert json.loads(handler.wfile.getvalue()) == {"status": "saved"}
+
+    expected_date = database.user_local_now().date().isoformat()
+    meals = database.get_meals(12345, expected_date, expected_date)
+    assert len(meals) == 1
+    assert meals[0]["image_hash"] == "ab" * 16
+    assert meals[0]["analysis"]["total_calories"] == 640
+    assert meals[0]["source"] == "android"
+
+    # The ingestion ledger holds a 'saved' row pointing at the meal.
+    import sqlite3
+    with sqlite3.connect(database.DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT status, meal_id FROM photo_ingestions WHERE chat_id = 12345"
+        ).fetchone()
+    assert row == ("saved", meals[0]["id"])
+
+    # An identical retry (e.g. Android queue re-send) dedupes cleanly.
+    handler2, statuses2 = _make_handler(headers, body)
+    handler2.do_POST()
+    assert statuses2 == [200]
+    assert json.loads(handler2.wfile.getvalue()) == {"status": "duplicate"}
+    assert len(database.get_meals(12345, expected_date, expected_date)) == 1
