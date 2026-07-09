@@ -37,6 +37,15 @@ cp "$SRC_DIR/upload_photo.py" "$HOME/upload_photo.py"
 cp "$SRC_DIR/android_watcher.sh" "$HOME/android_watcher.sh"
 chmod +x "$HOME/upload_photo.py" "$HOME/android_watcher.sh"
 
+# Optional: one-tap home-screen buttons via the Termux:Widget app. Shortcuts
+# ship in a shortcuts/ folder next to the payload; absence is not an error.
+if [ -d "$SRC_DIR/shortcuts" ]; then
+  mkdir -p "$HOME/.shortcuts"
+  cp "$SRC_DIR"/shortcuts/calorie-*.sh "$HOME/.shortcuts/" 2>/dev/null || true
+  chmod +x "$HOME"/.shortcuts/calorie-*.sh 2>/dev/null || true
+  echo "Installed Termux:Widget shortcuts: start / stop / status / sync."
+fi
+
 CONFIG_FILE="${CALORIE_TRACKER_ANDROID_CONFIG:-$HOME/.calorie_tracker_upload.json}"
 if [ ! -f "$CONFIG_FILE" ]; then
   cat > "$CONFIG_FILE" <<'JSON'

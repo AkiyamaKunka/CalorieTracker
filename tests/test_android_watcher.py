@@ -253,6 +253,76 @@ def test_housekeeping_prunes_deleted_photos_and_stale_fail_counters(tmp_path):
         proc.wait(timeout=10)
 
 
+def test_widget_shortcuts_start_status_stop(tmp_path):
+    """The Termux:Widget one-tap scripts drive the real watcher: start brings
+    it up (and reports the PID), status reflects running/stopped, and stop
+    terminates it gracefully so the trap cleans PID/lock state."""
+    env, home, camera, fake_proc = _make_env(tmp_path)
+    shortcuts = REPO_ROOT / "android" / "shortcuts"
+    # The widget scripts expect the watcher at ~/android_watcher.sh.
+    shutil.copy(WATCHER, home / "android_watcher.sh")
+
+    def run_shortcut(name):
+        return subprocess.run(
+            [BASH, str(shortcuts / name)], env=env,
+            capture_output=True, text=True, timeout=15,
+        )
+
+    status = run_shortcut("calorie-status.sh")
+    assert "🔴 Watcher stopped" in status.stdout
+
+    start = run_shortcut("calorie-start.sh")
+    assert start.returncode == 0
+    assert "🟢 Watcher running (PID" in start.stdout
+    pid = int((home / ".calorie_watcher.pid").read_text().strip())
+
+    try:
+        status = run_shortcut("calorie-status.sh")
+        assert "🟢 Watcher running" in status.stdout
+
+        # On Android /proc is real; mirror that in the fake proc dir so the
+        # liveness check can see the first watcher (otherwise a second start
+        # would wrongly treat the lock as stale).
+        cmdline_dir = fake_proc / str(pid)
+        cmdline_dir.mkdir()
+        (cmdline_dir / "cmdline").write_bytes(
+            f"bash\x00{home}/android_watcher.sh\x00".encode()
+        )
+
+        # Double-tap on start is a no-op: same watcher instance keeps the lock.
+        again = run_shortcut("calorie-start.sh")
+        assert again.returncode == 0
+        assert int((home / ".calorie_watcher.pid").read_text().strip()) == pid
+
+        stop = run_shortcut("calorie-stop.sh")
+        assert stop.returncode == 0
+        assert "Watcher stopped" in stop.stdout or "force-killed" in stop.stdout
+        assert _wait_for(lambda: not _pid_alive(pid))
+        assert not (home / ".calorie_watcher.pid").exists()
+        assert not (home / ".calorie_watcher.lock").exists()
+
+        status = run_shortcut("calorie-status.sh")
+        assert "🔴 Watcher stopped" in status.stdout
+
+        # Stop when nothing runs is informative, not an error.
+        idle_stop = run_shortcut("calorie-stop.sh")
+        assert idle_stop.returncode == 0
+        assert "not running" in idle_stop.stdout
+    finally:
+        # Belt and braces: reap anything still holding this test's temp HOME.
+        subprocess.run(["pkill", "-9", "-f", str(home)], capture_output=True)
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
 def test_live_watcher_blocks_second_instance(tmp_path):
     env, home, camera, fake_proc = _make_env(tmp_path)
 

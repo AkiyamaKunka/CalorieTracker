@@ -96,6 +96,39 @@ def test_reinstall_preserves_offline_queue_and_clears_stale_lock(tmp_path):
     assert os.access(home / "android_watcher.sh", os.X_OK)
 
 
+def test_installer_installs_widget_shortcuts_when_present(tmp_path):
+    env, home, src = _make_env(tmp_path)
+    (home / ".calorie_tracker_upload.json").write_text(
+        '{"ANDROID_API_KEY": "k", "SERVER_URLS": ["http://example.test"]}'
+    )
+    shortcuts_src = src / "shortcuts"
+    shortcuts_src.mkdir()
+    for name in ("calorie-start.sh", "calorie-stop.sh", "calorie-status.sh", "calorie-sync.sh"):
+        shutil.copy(REPO_ROOT / "android" / "shortcuts" / name, shortcuts_src / name)
+
+    result = _run(env)
+
+    assert result.returncode == 0
+    assert "Termux:Widget shortcuts" in result.stdout
+    installed = sorted(p.name for p in (home / ".shortcuts").iterdir())
+    assert installed == ["calorie-start.sh", "calorie-status.sh",
+                         "calorie-stop.sh", "calorie-sync.sh"]
+    for p in (home / ".shortcuts").iterdir():
+        assert os.access(p, os.X_OK)
+
+
+def test_installer_without_shortcuts_folder_still_succeeds(tmp_path):
+    env, home, src = _make_env(tmp_path)
+    (home / ".calorie_tracker_upload.json").write_text(
+        '{"ANDROID_API_KEY": "k", "SERVER_URLS": ["http://example.test"]}'
+    )
+
+    result = _run(env)
+
+    assert result.returncode == 0
+    assert not (home / ".shortcuts").exists()
+
+
 def test_first_run_creates_config_template_and_stops(tmp_path):
     env, home, src = _make_env(tmp_path)
 
