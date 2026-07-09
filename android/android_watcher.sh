@@ -116,11 +116,18 @@ PING_PID=$!
 SYNC_PID=$!
 
 # MediaStore writes in-progress captures as '.pending-*'; skip those.
+# The scan pipeline is line-based (sort/comm/history), so a filename
+# containing a newline would shatter into phantom entries; the awk guard
+# drops any line that isn't a full camera-dir path with a photo extension
+# (the nightly sync iterates in Python and still covers such files).
 list_photos() {
   find "$CAMERA_DIR" -maxdepth 1 -type f \
     ! -name '.pending-*' \
     \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.heic' -o -iname '*.heif' \) \
-    2>/dev/null | LC_ALL=C sort
+    2>/dev/null \
+    | LC_ALL=C awk -v dir="$CAMERA_DIR" \
+        'index($0, dir) == 1 && tolower($0) ~ /\.(jpg|jpeg|png|heic|heif)$/' \
+    | LC_ALL=C sort
 }
 
 # History stays sorted so each poll can diff it against the scan with comm.

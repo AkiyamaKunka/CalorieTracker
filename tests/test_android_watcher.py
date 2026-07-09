@@ -484,6 +484,53 @@ def _pid_alive(pid):
         return True
 
 
+def test_hostile_filenames_upload_cleanly_and_newlines_never_shatter(tmp_path):
+    """Spaces/unicode/quotes/$() names upload; a newline-containing filename
+    must not shatter into phantom scan entries that burn stability retries
+    and poison the history (the Python-side nightly sync still covers it)."""
+    env, home, camera, fake_proc = _make_env(tmp_path)
+    calls = home / "python_calls.log"
+    history = home / "uploaded_files.log"
+    log = home / "watcher.log"
+
+    proc = subprocess.Popen(
+        [BASH, str(WATCHER)], env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert _wait_for(lambda: _file_contains(log, "Started polling loop"))
+
+        hostile_ok = [
+            camera / "meal photo.jpg",
+            camera / "晚餐 面条.jpg",
+            camera / "cafe'au lait.jpg",
+            camera / "weird$(name).jpg",
+        ]
+        for path in hostile_ok:
+            path.write_bytes(b"imagebytes")
+        (camera / "bad\nname.jpg").write_bytes(b"imagebytes")
+
+        for path in hostile_ok:
+            assert _wait_for(lambda p=path: _file_contains(calls, f"UPLOAD {p}"))
+            assert _wait_for(lambda p=path: _file_contains(history, str(p)))
+
+        # No phantom fragments from the newline name anywhere.
+        text = calls.read_text()
+        assert f"UPLOAD {camera}/bad\n" not in text
+        assert "UPLOAD name.jpg" not in text
+        history_lines = history.read_text().splitlines()
+        assert "name.jpg" not in history_lines
+        assert str(camera / "bad") not in history_lines
+        assert "GIVING UP" not in log.read_text()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        subprocess.run(["pkill", "-9", "-f", str(home)], capture_output=True)
+
+
 def test_live_watcher_blocks_second_instance(tmp_path):
     env, home, camera, fake_proc = _make_env(tmp_path)
 
