@@ -236,6 +236,81 @@ def test_upload_ignores_malformed_original_hash(monkeypatch, tmp_path):
     assert reserved == [expected] * 3  # fell back to hashing the bytes
 
 
+def test_upload_staged_read_failure_keeps_file_as_failed_under_declared_hash(monkeypatch, tmp_path):
+    """If the staged file cannot be read back, the upload must land in the
+    failed dir keyed under the DECLARED hash with a 'failed' ledger row —
+    NOT release the reservation while the file lingers in pending, where the
+    boot sweep's md5 fallback would re-key it (recompressed bytes hash
+    differently) and enable duplicate meals and double Gemini spend."""
+    declared = "ef" * 16
+    pending_dir = tmp_path / "pending"
+    failed_dir = tmp_path / "failed"
+    statuses, released = [], []
+    bot = FakeBot()
+
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", pending_dir)
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", failed_dir)
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "service_health.json")
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(
+        telegram_bot, "analyze_food_photo_with_retries",
+        lambda client, image_bytes: pytest.fail("must not analyze when the staged read fails"),
+    )
+    monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        telegram_bot.database, "mark_photo_hash_status",
+        lambda *args, **kwargs: statuses.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        telegram_bot.database, "release_photo_hash",
+        lambda chat_id, image_hash: released.append(image_hash),
+    )
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
+
+    # Stage normally, then make the staged bytes unreadable before the
+    # background read.
+    original_stage = telegram_bot._stage_api_upload
+
+    def stage_then_lock(image_bytes, image_hash, filename):
+        path = original_stage(image_bytes, image_hash, filename)
+        path.chmod(0)
+        return path
+
+    monkeypatch.setattr(telegram_bot, "_stage_api_upload", stage_then_lock)
+
+    app = telegram_bot._build_api_app(bot, object())
+    try:
+        resp = app.test_client().post(
+            "/upload",
+            headers={"X-API-Key": "test-upload-key"},
+            data={"photo": (io.BytesIO(b"recompressed bytes, hash differs from declared"), "meal.jpg"),
+                  "original_hash": declared},
+        )
+
+        assert resp.status_code == 200
+        assert resp.get_json() == {"status": "processing_in_background"}
+
+        # File moved out of pending into failed, still keyed by the DECLARED hash.
+        assert list(pending_dir.iterdir()) == []
+        failed_files = list(failed_dir.iterdir())
+        assert len(failed_files) == 1
+        assert f"_{declared[:12]}" in failed_files[0].name
+
+        # Ledger row flipped to 'failed' for the declared hash; the
+        # reservation was NOT released.
+        assert statuses and statuses[0][0] == (12345, declared, "failed")
+        assert statuses[0][1].get("source") == "api_upload"
+        assert released == []
+
+        # The user is told how to recover.
+        assert any("/retry_failed" in m["text"] for m in bot.sent)
+    finally:
+        for path in list(pending_dir.iterdir() if pending_dir.exists() else []) + \
+                list(failed_dir.iterdir() if failed_dir.exists() else []):
+            path.chmod(0o644)
+
+
 def test_retry_and_sweep_resolve_ledger_hash_from_filename(monkeypatch, tmp_path):
     """Staged bytes of a recompressed upload hash differently than the ledger
     key; retry and the startup sweep must resolve through the ledger via the

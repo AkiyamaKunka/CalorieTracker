@@ -1632,6 +1632,9 @@ def maybe_warn_stale_android_heartbeat(bot: TelegramBot) -> bool:
 
     age = datetime.now() - last_ping_dt
     if age.total_seconds() < HEARTBEAT_STALE_WARNING_HOURS * 3600:
+        # The phone recovered; clear the cooldown so the NEXT outage warns
+        # promptly instead of staying silent for the rest of the window.
+        _last_stale_heartbeat_warning_at = None
         return False
 
     now = datetime.now()
@@ -1639,11 +1642,12 @@ def maybe_warn_stale_android_heartbeat(bot: TelegramBot) -> bool:
             and (now - _last_stale_heartbeat_warning_at).total_seconds()
             < HEARTBEAT_STALE_WARNING_COOLDOWN_HOURS * 3600):
         return False
+    # Stamp before sending so a slow/looping caller can't spam per tick.
     _last_stale_heartbeat_warning_at = now
 
     hours = int(age.total_seconds() // 3600)
     log.warning(f"Android heartbeat stale for {hours}h; notifying user.")
-    bot.send_message(
+    sent = bot.send_message(
         ALLOWED_CHAT_ID,
         f"📵 <b>Android watcher hasn't reached the server in about {hours}h</b> "
         f"(last ping <code>{_html(last_ping)}</code>).\n\n"
@@ -1652,6 +1656,16 @@ def maybe_warn_stale_android_heartbeat(bot: TelegramBot) -> bool:
         "queue meanwhile.\n\n"
         "Check <code>~/watcher.log</code> on the phone, or <code>/android</code> here.",
     )
+    if sent is None:
+        # send_message swallows errors and returns None; don't let a failed
+        # delivery consume the whole cooldown. Roll the stamp back so the
+        # warning retries in ~15 minutes instead of going silent for hours.
+        _last_stale_heartbeat_warning_at = (
+            now
+            - timedelta(hours=HEARTBEAT_STALE_WARNING_COOLDOWN_HOURS)
+            + timedelta(minutes=15)
+        )
+        return False
     return True
 
 
@@ -2637,12 +2651,31 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
                     log.error(f"  ❌ API Upload: Could not read staged upload: {e}")
                     if processing_msg and processing_msg.get("message_id"):
                         bot.delete_message(ALLOWED_CHAT_ID, processing_msg["message_id"])
-                    database.release_photo_hash(ALLOWED_CHAT_ID, hsh)
-                    bot.send_message(
-                        ALLOWED_CHAT_ID,
-                        f"⚠️ <b>Auto-upload from {device_display} failed before analysis.</b>\n\n"
-                        "The server could not read the staged image file, so it was not logged.",
-                    )
+                    # Mirror the unhandled-exception path: if the staged file
+                    # still exists, keep it (under the declared hash) and mark
+                    # the reservation failed. Releasing the reservation while
+                    # the file stays in pending would let the boot sweep's md5
+                    # fallback re-key it under the recompressed bytes' hash,
+                    # enabling duplicate meals and double Gemini spend.
+                    if staged_path.exists():
+                        failed_path = _keep_failed_api_upload(staged_path, hsh)
+                        database.mark_photo_hash_status(ALLOWED_CHAT_ID, hsh, "failed", source="api_upload")
+                        bot.send_message(
+                            ALLOWED_CHAT_ID,
+                            f"⚠️ <b>Auto-upload from {device_display} failed before analysis.</b>\n\n"
+                            "The server could not read the staged image file, so it was not logged. "
+                            "I kept the file on the server for manual retry/debugging:\n"
+                            f"<code>{_html(failed_path)}</code>\n"
+                            f"Hash: <code>{_html(hsh)}</code>\n\n"
+                            f"Retry later: <code>/retry_failed {_html(_failed_upload_selector(failed_path, hsh))}</code>",
+                        )
+                    else:
+                        database.release_photo_hash(ALLOWED_CHAT_ID, hsh)
+                        bot.send_message(
+                            ALLOWED_CHAT_ID,
+                            f"⚠️ <b>Auto-upload from {device_display} failed before analysis.</b>\n\n"
+                            "The server could not read the staged image file, so it was not logged.",
+                        )
                     return
 
                 analysis = analyze_food_photo_with_retries(gemini_client, bytes_data)
@@ -2742,9 +2775,18 @@ def _sweep_stranded_pending_uploads(bot: TelegramBot):
     # stale. Nothing can be legitimately in flight at boot, so release any
     # reservation that has no staged or failed file backing it.
     failed_prefixes = _failed_upload_hash_prefixes()
+    # Files still in the pending dir (e.g. their bytes were unreadable above)
+    # DO back their reservation — parse the hash prefix from the filename so
+    # we never release a row whose file merely failed to read.
+    pending_prefixes = set()
+    for path in _pending_upload_items():
+        match = _UPLOAD_NAME_HASH_RE.search(path.name)
+        if match:
+            pending_prefixes.add(match.group(1).lower())
     released = 0
     for img_hash in database.get_processing_photo_hashes(ALLOWED_CHAT_ID):
-        if _image_hash_prefix(img_hash) in failed_prefixes:
+        prefix = _image_hash_prefix(img_hash)
+        if prefix in failed_prefixes or prefix in pending_prefixes:
             continue
         database.release_photo_hash(ALLOWED_CHAT_ID, img_hash)
         released += 1
