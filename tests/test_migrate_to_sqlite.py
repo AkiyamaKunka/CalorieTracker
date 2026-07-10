@@ -111,3 +111,45 @@ def test_migrate_missing_file_is_noop(monkeypatch, tmp_path, capsys):
 
     assert "No json file found." in capsys.readouterr().out
     assert database.get_meals(TEST_CHAT_ID, "2026-01-01", "2026-12-31") == []
+
+
+def test_migrate_skips_malformed_entries_instead_of_crashing(monkeypatch, tmp_path, capsys):
+    """S12 regression: legacy files can contain non-dict entries or non-dict
+    analyses; one bad element must not abort the whole migration."""
+    meals_file = tmp_path / "legacy.json"
+    meals_file.write_text(json.dumps([
+        "banana",
+        42,
+        None,
+        {"analysis": "not a dict", "timestamp": "2026-01-02T10:00:00"},
+        {"analysis": {"is_food": True, "total_calories": 400},
+         "timestamp": "2026-01-03T10:00:00"},
+    ]))
+    monkeypatch.setattr(migrate_to_sqlite, "MEALS_FILE", meals_file)
+    monkeypatch.setattr(migrate_to_sqlite, "ALLOWED_CHAT_ID", TEST_CHAT_ID)
+
+    migrate_to_sqlite.migrate()
+
+    out = capsys.readouterr().out
+    assert "Migrated 1 meals" in out
+    assert "Ignored 4 malformed entries" in out
+    assert len(database.get_meals(TEST_CHAT_ID, "2026-01-01", "2026-12-31")) == 1
+
+
+def test_migrate_rejects_invalid_json_cleanly(monkeypatch, tmp_path):
+    import pytest
+
+    bad = tmp_path / "trunc.json"
+    bad.write_text('[{"analysis": {"is_food": true')
+    monkeypatch.setattr(migrate_to_sqlite, "MEALS_FILE", bad)
+    monkeypatch.setattr(migrate_to_sqlite, "ALLOWED_CHAT_ID", TEST_CHAT_ID)
+    with pytest.raises(SystemExit, match="not valid JSON"):
+        migrate_to_sqlite.migrate()
+
+    not_list = tmp_path / "dict.json"
+    not_list.write_text('{"analysis": {"is_food": true}}')
+    monkeypatch.setattr(migrate_to_sqlite, "MEALS_FILE", not_list)
+    with pytest.raises(SystemExit, match="JSON array"):
+        migrate_to_sqlite.migrate()
+
+    assert database.get_meals(TEST_CHAT_ID, "2026-01-01", "2026-12-31") == []

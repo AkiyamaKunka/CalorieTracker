@@ -17,11 +17,17 @@ def migrate():
         print("No json file found.")
         return
 
-    with open(MEALS_FILE, 'r') as f:
-        meals = json.load(f)
+    try:
+        with open(MEALS_FILE, 'r') as f:
+            meals = json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise SystemExit(f"ERROR: {MEALS_FILE} is not valid JSON ({e}); nothing migrated.")
+    if not isinstance(meals, list):
+        raise SystemExit(f"ERROR: {MEALS_FILE} must contain a JSON array of meals; nothing migrated.")
 
     migrated = 0
     skipped = 0
+    skipped_bad = 0
     with database._connect() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -46,6 +52,11 @@ def migrate():
                 existing_fallback_keys.add((date_val or "", time_val or "", analysis_key))
 
         for meal in meals:
+            # Legacy files can contain malformed entries; skip rather than
+            # letting one bad element abort the whole migration.
+            if not isinstance(meal, dict) or not isinstance(meal.get("analysis"), dict):
+                skipped_bad += 1
+                continue
             # Avoid migrating completely non-food items
             if not meal.get("analysis", {}).get("is_food"):
                 continue
@@ -103,7 +114,10 @@ def migrate():
 
         conn.commit()
 
-    print(f"Migrated {migrated} meals to SQLite; skipped {skipped} already-migrated entries.")
+    summary = f"Migrated {migrated} meals to SQLite; skipped {skipped} already-migrated entries."
+    if skipped_bad:
+        summary += f" Ignored {skipped_bad} malformed entr{'y' if skipped_bad == 1 else 'ies'}."
+    print(summary)
 
 if __name__ == "__main__":
     migrate()
