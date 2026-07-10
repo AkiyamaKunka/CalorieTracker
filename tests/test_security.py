@@ -220,3 +220,45 @@ def test_meal_relay_happy_path_saves_meal_and_dedupes(monkeypatch, tmp_path):
     assert statuses2 == [200]
     assert json.loads(handler2.wfile.getvalue()) == {"status": "duplicate"}
     assert len(database.get_meals(12345, expected_date, expected_date)) == 1
+
+
+def test_do_post_not_food_is_skipped(monkeypatch):
+    """The relay's not-food branch returns a skipped status without saving."""
+    monkeypatch.setattr(meal_relay, "RELAY_API_KEY", "k")
+    monkeypatch.setattr(meal_relay, "TELEGRAM_CHAT_ID", "12345")
+    saved = []
+    monkeypatch.setattr(meal_relay.database, "save_meal",
+                        lambda *a, **k: saved.append(a) or 1)
+
+    body = json.dumps({"analysis": {"is_food": False}}).encode()
+    handler, statuses = _make_handler(
+        {"X-API-Key": "k", "Content-Length": str(len(body))}, body)
+    handler.do_POST()
+
+    assert statuses == [200]
+    assert b'"status": "skipped"' in handler.wfile.getvalue()
+    assert saved == []
+
+
+def test_do_post_without_configured_chat_id_returns_500(monkeypatch):
+    """A relay with auth but no TELEGRAM_CHAT_ID fails closed with 500."""
+    monkeypatch.setattr(meal_relay, "RELAY_API_KEY", "k")
+    monkeypatch.setattr(meal_relay, "TELEGRAM_CHAT_ID", "")
+
+    body = json.dumps({"analysis": {"is_food": True}}).encode()
+    handler, statuses = _make_handler(
+        {"X-API-Key": "k", "Content-Length": str(len(body))}, body)
+    handler.do_POST()
+
+    assert statuses == [500]
+    assert b"TELEGRAM_CHAT_ID is not configured" in handler.wfile.getvalue()
+
+
+def test_drain_body_stops_at_eof():
+    """_drain_body must terminate when the socket yields no more bytes, even
+    if the declared length is larger (truncated client)."""
+    handler = object.__new__(meal_relay.MealHandler)
+    handler.rfile = _FakeRFile(b"only 12 bytes")  # 13 bytes available
+    handler._drain_body(10_000)                    # claims far more
+    # Returns (does not hang) and consumed only what was available.
+    assert handler.rfile.read_called
