@@ -674,3 +674,92 @@ def test_parse_timezone_offset_bounds_are_sane():
     assert database.parse_timezone_offset("-1200") is not None   # max real west
     assert database.parse_timezone_offset("+1500") is None       # hours > 14
     assert database.parse_timezone_offset("+0860") is None       # minutes > 59
+
+
+def _intent_client(payload):
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            return SimpleNamespace(text=json.dumps(payload))
+    return SimpleNamespace(models=FakeModels())
+
+
+@pytest.mark.parametrize("bad_indices", [
+    ["x"], [0.5], [None], [True], [[]], [{"a": 1}], ["999999999999"], [999, -1],
+])
+def test_nl_delete_all_invalid_indices_never_crash_or_stash(mock_db, monkeypatch, tmp_path, bad_indices):
+    """S14 security regression: a crafted/hallucinated Gemini delete payload
+    whose meal_indices are all non-integer or out-of-range must not crash the
+    handler (TypeError) and must stash nothing for confirmation."""
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(database, "get_android_timezone", lambda *a, **k: "+0800")
+    monkeypatch.setattr(telegram_bot, "get_recent_meals", _wide_recent_meals)
+    telegram_bot._pending_nl_deletes.clear()
+
+    today = database.user_local_now().date().isoformat()
+    now_iso = datetime.now().isoformat()
+    database.save_meal(12345, today, "12:00", now_iso, "t", "h1", "f1",
+                       {"is_food": True, "meal_description": "Apple", "total_calories": 95})
+    database.save_meal(12345, today, "12:01", now_iso, "t", "h2", "f2",
+                       {"is_food": True, "meal_description": "Banana", "total_calories": 105})
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(
+        {"intent": "delete", "meal_indices": bad_indices, "reason": "x"}), bot, 12345, "delete")
+
+    assert len(_wide_recent_meals(12345)) == 2         # nothing deleted
+    assert 12345 not in telegram_bot._pending_nl_deletes  # nothing stashed
+
+
+def test_nl_delete_mixed_indices_honors_only_the_valid_ones(mock_db, monkeypatch, tmp_path):
+    """A mixed list ([0, "y", 2.0]) coerces to the valid integer indices and
+    ignores the junk — without crashing."""
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(database, "get_android_timezone", lambda *a, **k: "+0800")
+    monkeypatch.setattr(telegram_bot, "get_recent_meals", _wide_recent_meals)
+    telegram_bot._pending_nl_deletes.clear()
+
+    today = database.user_local_now().date().isoformat()
+    now_iso = datetime.now().isoformat()
+    for i in range(3):
+        database.save_meal(12345, today, f"12:0{i}", now_iso, "t", f"h{i}", f"f{i}",
+                           {"is_food": True, "meal_description": f"m{i}", "total_calories": 100})
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(
+        {"intent": "delete", "meal_indices": [0, "y", 2.0], "reason": "x"}), bot, 12345, "delete")
+
+    pending = telegram_bot._pending_nl_deletes[12345]
+    assert len(pending["ids"]) == 2                    # indices 0 and 2, not "y"
+
+
+@pytest.mark.parametrize("bad_index", ["x", None, 1.5, [0], {"a": 1}, True])
+def test_nl_correction_hostile_index_never_crashes(mock_db, monkeypatch, tmp_path, bad_index):
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(database, "get_android_timezone", lambda *a, **k: "+0800")
+    monkeypatch.setattr(telegram_bot, "get_recent_meals", _wide_recent_meals)
+
+    today = database.user_local_now().date().isoformat()
+    database.save_meal(12345, today, "12:00", datetime.now().isoformat(), "t", "h1", "f1",
+                       {"is_food": True, "meal_description": "Apple", "total_calories": 95})
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(
+        {"intent": "correction", "meal_index": bad_index,
+         "analysis": {"is_food": True, "total_calories": 9}, "reason": "x"}), bot, 12345, "fix")
+
+    # Reported as an invalid index rather than crashing; meal unchanged.
+    assert any("Invalid meal index" in m["text"] for m in bot.sent)
+    assert _wide_recent_meals(12345)[0]["analysis"]["total_calories"] == 95
+
+
+def test_coerce_meal_index_contract():
+    assert telegram_bot._coerce_meal_index(3) == 3
+    assert telegram_bot._coerce_meal_index("3") == 3
+    assert telegram_bot._coerce_meal_index(2.0) == 2
+    assert telegram_bot._coerce_meal_index(2.5) is None
+    assert telegram_bot._coerce_meal_index(True) is None
+    for bad in ("x", None, [], {}, "", "1.5"):
+        assert telegram_bot._coerce_meal_index(bad) is None

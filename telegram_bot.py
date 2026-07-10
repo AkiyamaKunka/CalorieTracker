@@ -2295,6 +2295,27 @@ def format_history(chat_id: int, days: int = 7) -> str:
     return "\n".join(lines)
 
 
+def _coerce_meal_index(value) -> Optional[int]:
+    """Coerce a Gemini-supplied meal index to int, or None if it isn't one.
+
+    JSON mode guarantees syntax, not that the model returns integers — a
+    hallucinated string/float/null index must not crash correction/delete
+    with a TypeError; it is simply treated as no match.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except (ValueError, AttributeError):
+            return None
+    return None
+
+
 def handle_text_message(
     gemini_client: genai.Client,
     bot: TelegramBot,
@@ -2354,7 +2375,7 @@ def handle_text_message(
     intent = result.get("intent")
 
     if intent == "correction":
-        meal_index = result.get("meal_index", 0)
+        meal_index = _coerce_meal_index(result.get("meal_index", 0))
         new_analysis = result.get("analysis", {})
         reason = result.get("reason", "")
 
@@ -2362,8 +2383,8 @@ def handle_text_message(
             bot.send_message(chat_id, "❌ Cannot correct because no meals are logged recently.")
             return
 
-        if meal_index < 0 or meal_index >= len(meals):
-            bot.send_message(chat_id, f"❌ Invalid meal index ({meal_index}). You have {len(meals)} recent meals.")
+        if meal_index is None or meal_index < 0 or meal_index >= len(meals):
+            bot.send_message(chat_id, f"❌ Invalid meal index ({result.get('meal_index')}). You have {len(meals)} recent meals.")
             return
 
         # Get old values for the diff
@@ -2409,7 +2430,8 @@ def handle_text_message(
         # confirmation before destroying any rows.
         ids = []
         labels = []
-        for index in sorted(set(meal_indices)):
+        valid_indices = {i for i in (_coerce_meal_index(x) for x in meal_indices) if i is not None}
+        for index in sorted(valid_indices):
             if 0 <= index < len(meals):
                 meal = meals[index]
                 analysis = meal.get("analysis", {})
