@@ -22,6 +22,9 @@ Trigger:
    - Limit: 1 photo
 
 2. If Find Photos has no value
+   - Show Alert: "No photo from the last 10 minutes is visible to Shortcuts"
+     (names the Full Access settings path — a silent stop here is
+     indistinguishable from success, which cost a debugging session on 2026-07-14)
    - Stop This Shortcut
 
 3. Get Contents of URL
