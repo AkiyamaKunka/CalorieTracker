@@ -763,3 +763,39 @@ def test_coerce_meal_index_contract():
     assert telegram_bot._coerce_meal_index(True) is None
     for bad in ("x", None, [], {}, "", "1.5"):
         assert telegram_bot._coerce_meal_index(bad) is None
+
+
+def test_text_handler_injects_relative_date_context(mock_db, monkeypatch, tmp_path):
+    """Feature 1: the intent prompt tells Gemini today's/yesterday's local
+    date so 'yesterday' resolves reliably, and the window reaches back far
+    enough to include yesterday's meals."""
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(database, "get_android_timezone", lambda *a, **k: "+0800")
+    monkeypatch.setattr(telegram_bot, "_gemini_quota_pause_summary", lambda: None)
+
+    local_today = database.user_local_now().date()
+    yesterday = (local_today - timedelta(days=1)).isoformat()
+    # A meal logged yesterday must be visible to the correction prompt.
+    database.save_meal(12345, yesterday, "08:00 AM", datetime.now().isoformat(),
+                       "t", "yh", "yf",
+                       {"is_food": True, "meal_description": "Yesterday breakfast",
+                        "total_calories": 400, "food_items": []})
+
+    captured = {}
+
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            captured["prompt"] = kwargs["contents"][0]
+            return SimpleNamespace(text=json.dumps({"intent": "chat", "reply": "ok"}))
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(SimpleNamespace(models=FakeModels()), bot, 12345,
+                                     "what did I eat yesterday?")
+
+    prompt = captured["prompt"]
+    assert f"today is {local_today.isoformat()}" in prompt
+    assert f"yesterday was {yesterday}" in prompt
+    assert local_today.strftime("%A") in prompt
+    assert "Yesterday breakfast" in prompt          # yesterday's meal is in-window
+    assert f"Date: {yesterday}" in prompt

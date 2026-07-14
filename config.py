@@ -149,7 +149,10 @@ DUPLICATE_WINDOW_MINUTES = 5
 # ─── Unified Text Handler Prompt ────────────────────────────────────
 TEXT_HANDLER_PROMPT = """You are a calorie tracking assistant. The user sent a text message.
 
-Here are the recently logged meals (across the last few days):
+Date context (the user's local time): today is {today} ({weekday}); yesterday was {yesterday}.
+Use this to resolve relative references like "yesterday", "this morning", or "last night" to the matching Date in the meals list below.
+
+Here are the recently logged meals (each line shows its Date so you can match relative references):
 {meals_list}
 
 The user says: "{user_message}"

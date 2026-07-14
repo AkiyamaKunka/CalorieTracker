@@ -125,6 +125,9 @@ SERVICE_HEALTH_PATH = service_health.DEFAULT_PATH
 BOT_SERVICE_NAME = os.environ.get("CALORIE_BOT_SERVICE_NAME", "caloriebot.service")
 RETRY_ALL_FAILED_MAX = _env_int("RETRY_ALL_FAILED_MAX", 10, 1, 50)
 MAX_API_UPLOAD_BYTES = _env_int("MAX_API_UPLOAD_BYTES", 25 * 1024 * 1024, 1024, 100 * 1024 * 1024)
+# How many days of meals a natural-language correction/delete can reach back
+# over (widened from 3 so "earlier this week" resolves, not just "yesterday").
+TEXT_EDIT_WINDOW_DAYS = _env_int("TEXT_EDIT_WINDOW_DAYS", 7, 1, 31)
 ANDROID_VPN_WARNING_COOLDOWN_MINUTES = _env_int("ANDROID_VPN_WARNING_COOLDOWN_MINUTES", 30, 0, 1440)
 IOS_VPN_WARNING_COOLDOWN_MINUTES = _env_int("IOS_VPN_WARNING_COOLDOWN_MINUTES", 30, 0, 1440)
 HEARTBEAT_STALE_WARNING_HOURS = _env_float("HEARTBEAT_STALE_WARNING_HOURS", 2, 0, 168)
@@ -2333,7 +2336,7 @@ def handle_text_message(
         )
         return
 
-    meals = get_recent_meals(chat_id, days=3)
+    meals = get_recent_meals(chat_id, days=TEXT_EDIT_WINDOW_DAYS)
 
     meals_list_str = "No meals logged recently."
     if meals:
@@ -2350,10 +2353,16 @@ def handle_text_message(
             )
         meals_list_str = "\n".join(meals_list_parts)
 
-    # Call Gemini
+    # Relative-date context lets Gemini resolve "yesterday"/"this morning" to
+    # the right Date in the list instead of guessing from raw dates.
+    local_now = database.user_local_now()
+    today_local = local_now.date()
     prompt = TEXT_HANDLER_PROMPT.format(
         meals_list=meals_list_str,
         user_message=text,
+        today=today_local.isoformat(),
+        weekday=today_local.strftime("%A"),
+        yesterday=(today_local - timedelta(days=1)).isoformat(),
     )
 
     try:
