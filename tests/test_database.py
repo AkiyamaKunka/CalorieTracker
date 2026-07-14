@@ -418,3 +418,63 @@ def test_delete_meal_marks_photo_ingestion_deleted(mock_db_path):
     assert row == ("deleted", None)
     # The hash must stay reserved so /reconcile does not auto re-log the photo
     assert normalized in database.get_reserved_photo_hashes(chat_id)
+
+
+def test_body_weight_upsert_one_per_day():
+    assert database.save_body_weight(1, "2026-07-10", 72.5, note="am")
+    database.save_body_weight(1, "2026-07-10", 72.1, source="telegram")  # same day overwrites
+    database.save_body_weight(1, "2026-07-11", 71.9)
+
+    weights = database.get_body_weights(1, "2026-07-01", "2026-07-31")
+    assert len(weights) == 2                          # one row per day
+    by_date = {w["date"]: w for w in weights}
+    assert by_date["2026-07-10"]["weight_kg"] == 72.1  # last write wins
+    assert by_date["2026-07-10"]["source"] == "telegram"
+    assert database.get_latest_body_weight(1)["date"] == "2026-07-11"
+    assert database.get_latest_body_weight(999) is None
+
+
+def test_workouts_append_and_range():
+    database.save_workout(1, "2026-07-10", "strength", muscle_groups="legs", duration_min=45)
+    database.save_workout(1, "2026-07-10", "mobility", notes="stretch",
+                          details={"exercises": ["squat"]})
+    database.save_workout(1, "2026-07-09", "strength", muscle_groups="chest")
+
+    same_day = database.get_workouts(1, "2026-07-10", "2026-07-10")
+    assert len(same_day) == 2                          # append-only, both kept
+    assert same_day[1]["details"] == {"exercises": ["squat"]}  # JSON round-trips
+    assert len(database.get_workouts(1, "2026-07-01", "2026-07-31")) == 3
+
+
+def test_activities_upsert_by_external_id_and_manual_inserts():
+    # A re-synced Garmin activity (same source+external_id) updates in place.
+    database.save_activity(1, "2026-07-10", "run", source="garmin",
+                           active_calories=600, distance_km=9.0, external_id="g123")
+    database.save_activity(1, "2026-07-10", "run", source="garmin",
+                           active_calories=640, distance_km=9.2, external_id="g123")
+    garmin_rows = database.get_activities(1, "2026-07-10", "2026-07-10")
+    assert len(garmin_rows) == 1
+    assert garmin_rows[0]["active_calories"] == 640
+
+    # Manual rows (external_id NULL) always insert — no false collision.
+    database.save_activity(1, "2026-07-10", "walk", source="manual", active_calories=100)
+    database.save_activity(1, "2026-07-10", "walk", source="manual", active_calories=120)
+    assert len(database.get_activities(1, "2026-07-10", "2026-07-10")) == 3
+
+
+def test_fitness_profile_partial_upsert_preserves_unset_columns():
+    assert database.get_fitness_profile(1) is None
+    database.save_fitness_profile(1, diet_mode="keto", target_protein_g=140)
+    database.save_fitness_profile(1, vdot=50.0, goal_race_date="2026-11-01")  # different columns
+
+    profile = database.get_fitness_profile(1)
+    assert profile["diet_mode"] == "keto"             # not clobbered by the second upsert
+    assert profile["target_protein_g"] == 140
+    assert profile["vdot"] == 50.0
+    assert profile["goal_race_date"] == "2026-11-01"
+
+    database.save_fitness_profile(1, extra={"note": "cutting"})
+    assert database.get_fitness_profile(1)["extra"] == {"note": "cutting"}  # JSON round-trips
+    # Non-whitelisted keys are ignored, not injected.
+    database.save_fitness_profile(1, evil="DROP TABLE meals")
+    assert "evil" not in database.get_fitness_profile(1)
