@@ -30,17 +30,25 @@ Diet Targets · Energy Balance (net = consumed − active burn) · Weight trend 
 
 ## Build sequence
 
-| # | Step | Needs Garmin |
-|---|------|:---:|
-| 0 | ✅ Feature 1: relative-date NL meal edits (`1476da7`) | — |
-| 1 | DB foundation: 4 tables + accessors | no |
-| 2 | `nutrition.py` + tests | no |
-| 3 | `fitness_plan.py` (Daniels) + tests | no |
-| 4 | Diet/weight commands + `log_weight` intent | no |
-| 5 | Running commands (`/plan`, `/train_run`, `/workout`) | no |
-| 6 | Report integration (`_fitness_sections`) | no |
-| 7 | Manual + HealthKit activity (`/activity`, POST route, net line) | no |
-| 8 | `garmin.py` live pull + `/status` sync line | **yes** |
+| # | Step | Status |
+|---|------|--------|
+| 0 | Feature 1: relative-date NL meal edits | ✅ `1476da7` |
+| 1 | DB foundation: 4 tables + accessors | ✅ `0e0bb35` |
+| 2 | `nutrition.py` + tests | ✅ `37d9c74` |
+| 3 | `fitness_plan.py` (Daniels) + tests | ✅ `37d9c74` |
+| 4 | Diet/weight commands + `log_weight` intent | ✅ `99615d2` |
+| 5 | Running commands (`/plan`, `/train_run`, `/workout`, `/train`) | ✅ `99615d2` |
+| 6 | Report integration (`_fitness_sections`) | ✅ `41edb5b` |
+| 7 | Manual + HealthKit activity (`/activity`, POST route, net line) | ✅ `99615d2`/`41edb5b` |
+| 8 | `garmin.py` module built (`37d9c74`); **live pull needs VM deploy** | ⏳ needs your Garmin token |
+
+## Garmin activation (Step 8, when ready)
+
+The `garmin.py` module and its wiring are done and tested; only the live connection remains, and it happens at deploy time on the VM:
+1. `pip install garminconnect` into the VM venv.
+2. Mint the token **once, off-server** (interactive, supplies email/password + MFA): `Garmin(email, password).login()` then `g.garth.dump('~/.garminconnect')`.
+3. `scp -r ~/.garminconnect vm:~/.garminconnect` (a gitignored path — the password never touches the VM).
+4. Set `GARMIN_ENABLED=1` and `GARMIN_TOKEN_DIR=~/.garminconnect` on the VM. garth auto-refreshes the session.
 
 ## Decisions taken (adjustable later)
 
