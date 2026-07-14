@@ -21,13 +21,16 @@ WATCHER = REPO_ROOT / "android" / "android_watcher.sh"
 pytestmark = pytest.mark.skipif(BASH is None, reason="bash is not available")
 
 # Upload exit code is read from a file so one watcher session can exercise
-# both the success path and the retry/give-up path.
+# both the success path and the retry/give-up path. Creating $HOME/upload_block
+# makes every upload hang (real sleep, not the shimmed one) long enough for
+# the stop shortcut's grace window to expire and force the kill -9 escalation.
 PYTHON3_SHIM = """#!/bin/sh
 case "$*" in
   *--ping*) echo "PING" >> "$HOME/python_calls.log" ;;
   *--sync*) echo "SYNC" >> "$HOME/python_calls.log" ;;
   *)
     echo "UPLOAD $2" >> "$HOME/python_calls.log"
+    [ -f "$HOME/upload_block" ] && /bin/sleep 15
     exit "$(cat "$HOME/upload_exit" 2>/dev/null || echo 0)"
     ;;
 esac
@@ -185,6 +188,17 @@ def test_watcher_end_to_end_lifecycle(tmp_path):
         (home / "upload_exit").write_text("0")
         assert _wait_for(lambda: _file_contains(history, str(flaky)))
         assert f"UPLOAD {flaky}" in calls.read_text()
+
+        # --- unstable-file cap: a file that stays 0-byte past the cap is
+        # given up on loudly, lands in history (so it stops forcing rescans
+        # and stability stalls) and leaves no counter file behind ---
+        void = camera / "void.jpg"
+        void.write_bytes(b"")
+        assert _wait_for(lambda: _file_contains(log, f"GIVING UP on {void}"), timeout=30)
+        assert _wait_for(lambda: _file_contains(history, str(void)))
+        assert f"UPLOAD {void}" not in calls.read_text()
+        fail_dir = home / ".calorie_upload_failures"
+        assert _wait_for(lambda: not any(fail_dir.iterdir()))
     finally:
         proc.terminate()
         proc.wait(timeout=10)
@@ -251,6 +265,270 @@ def test_housekeeping_prunes_deleted_photos_and_stale_fail_counters(tmp_path):
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+
+
+def test_scan_prunes_fail_counters_for_deleted_photos(tmp_path):
+    """A fail counter (plain or .unstable) whose photo was deleted used to
+    survive until the 7-day housekeeping expiry and force a full rescan every
+    tick the whole time; now any scan prunes counters whose source path is no
+    longer present, while counters for photos still on disk are kept."""
+    env, home, camera, fake_proc = _make_env(tmp_path)
+    log = home / "watcher.log"
+
+    def counter_key(path):
+        return subprocess.check_output(
+            [BASH, "-c", r'printf %s "$1" | cksum | tr -s " \t" _', "_", str(path)],
+            text=True,
+        ).strip()
+
+    # Old photos: seeded into history at startup, never uploaded.
+    two_hours_ago = time.time() - 2 * 3600
+    kept = camera / "kept.jpg"
+    doomed = camera / "doomed.jpg"
+    for photo in (kept, doomed):
+        photo.write_bytes(b"photo bytes")
+        os.utime(photo, (two_hours_ago, two_hours_ago))
+
+    fail_dir = home / ".calorie_upload_failures"
+    fail_dir.mkdir()
+    kept_counter = fail_dir / counter_key(kept)
+    doomed_counter = fail_dir / counter_key(doomed)
+    doomed_unstable = fail_dir / (counter_key(doomed) + ".unstable")
+    kept_counter.write_text("1")
+    doomed_counter.write_text("1")
+    doomed_unstable.write_text("2")
+
+    proc = subprocess.Popen(
+        [BASH, str(WATCHER)],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert _wait_for(lambda: _file_contains(log, "Started polling loop"))
+        # While both photos exist, several scans keep every counter.
+        time.sleep(0.5)
+        assert kept_counter.exists()
+        assert doomed_counter.exists()
+        assert doomed_unstable.exists()
+
+        # Deleting the photo orphans its counters; the next scan prunes both
+        # forms but leaves the surviving photo's counter alone.
+        doomed.unlink()
+        assert _wait_for(lambda: not doomed_counter.exists())
+        assert _wait_for(lambda: not doomed_unstable.exists())
+        assert kept_counter.exists()
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def test_widget_shortcuts_start_status_stop(tmp_path):
+    """The Termux:Widget one-tap scripts drive the real watcher: start brings
+    it up (and reports the PID), status reflects running/stopped, and stop
+    terminates it gracefully so the trap cleans PID/lock state."""
+    env, home, camera, fake_proc = _make_env(tmp_path)
+    shortcuts = REPO_ROOT / "android" / "shortcuts"
+    # The widget scripts expect the watcher at ~/android_watcher.sh.
+    shutil.copy(WATCHER, home / "android_watcher.sh")
+
+    def run_shortcut(name):
+        return subprocess.run(
+            [BASH, str(shortcuts / name)], env=env,
+            capture_output=True, text=True, timeout=15,
+        )
+
+    status = run_shortcut("calorie-status.sh")
+    assert "🔴 Watcher stopped" in status.stdout
+
+    start = run_shortcut("calorie-start.sh")
+    assert start.returncode == 0
+    assert "🟢 Watcher running (PID" in start.stdout
+    pid = int((home / ".calorie_watcher.pid").read_text().strip())
+
+    try:
+        status = run_shortcut("calorie-status.sh")
+        assert "🟢 Watcher running" in status.stdout
+
+        # On Android /proc is real; mirror that in the fake proc dir so the
+        # liveness check can see the first watcher (otherwise a second start
+        # would wrongly treat the lock as stale).
+        cmdline_dir = fake_proc / str(pid)
+        cmdline_dir.mkdir()
+        (cmdline_dir / "cmdline").write_bytes(
+            f"bash\x00{home}/android_watcher.sh\x00".encode()
+        )
+
+        # Double-tap on start is a no-op: same watcher instance keeps the lock.
+        again = run_shortcut("calorie-start.sh")
+        assert again.returncode == 0
+        assert int((home / ".calorie_watcher.pid").read_text().strip()) == pid
+
+        stop = run_shortcut("calorie-stop.sh")
+        assert stop.returncode == 0
+        assert "Watcher stopped" in stop.stdout or "force-killed" in stop.stdout
+        assert _wait_for(lambda: not _pid_alive(pid))
+        assert not (home / ".calorie_watcher.pid").exists()
+        assert not (home / ".calorie_watcher.lock").exists()
+
+        status = run_shortcut("calorie-status.sh")
+        assert "🔴 Watcher stopped" in status.stdout
+
+        # Stop when nothing runs is informative, not an error.
+        idle_stop = run_shortcut("calorie-stop.sh")
+        assert idle_stop.returncode == 0
+        assert "not running" in idle_stop.stdout
+
+        # --- PID reuse: a live PID whose cmdline is not the watcher must be
+        # reported as stopped by status, and stop must refuse to kill it ---
+        decoy = subprocess.Popen(["/bin/sleep", "30"])
+        try:
+            (home / ".calorie_watcher.pid").write_text(str(decoy.pid))
+            (home / ".calorie_watcher.lock").mkdir()
+            decoy_proc = fake_proc / str(decoy.pid)
+            decoy_proc.mkdir()
+            (decoy_proc / "cmdline").write_bytes(b"/bin/sleep\x0030\x00")
+
+            status = run_shortcut("calorie-status.sh")
+            assert "🔴 Watcher stopped" in status.stdout
+
+            reuse_stop = run_shortcut("calorie-stop.sh")
+            assert reuse_stop.returncode == 0
+            assert "refusing to kill" in reuse_stop.stdout
+            assert _pid_alive(decoy.pid)  # the innocent process survived
+            # The stale state was still cleared so a fresh start can work.
+            assert not (home / ".calorie_watcher.pid").exists()
+            assert not (home / ".calorie_watcher.lock").exists()
+        finally:
+            decoy.kill()
+            decoy.wait()
+    finally:
+        # Belt and braces: reap anything still holding this test's temp HOME.
+        subprocess.run(["pkill", "-9", "-f", str(home)], capture_output=True)
+
+
+def _watcher_processes_alive(home):
+    """True while any process under this test HOME (watcher, its ping/sync
+    subshells, or an uploader invocation) is still running."""
+    out = subprocess.run(["ps", "-ef"], capture_output=True, text=True).stdout
+    return any(
+        f"{home}/android_watcher.sh" in line or f"{home}/upload_photo.py" in line
+        for line in out.splitlines()
+    )
+
+
+def test_widget_stop_escalates_and_reaps_orphaned_loops(tmp_path):
+    """bash defers the TERM trap while a foreground upload runs, so a wedged
+    upload forces calorie-stop.sh past its grace window into kill -9 — which
+    bypasses the watcher's cleanup trap. The stop shortcut must then reap the
+    orphaned ping/sync subshells (and the stuck uploader) instead of leaving
+    a 'stopped' watcher heartbeating forever."""
+    env, home, camera, fake_proc = _make_env(tmp_path)
+    shortcuts = REPO_ROOT / "android" / "shortcuts"
+    shutil.copy(WATCHER, home / "android_watcher.sh")
+    calls = home / "python_calls.log"
+
+    # Every upload now hangs far longer than stop's whole grace window.
+    (home / "upload_block").write_text("1")
+
+    def run_shortcut(name):
+        return subprocess.run(
+            [BASH, str(shortcuts / name)], env=env,
+            capture_output=True, text=True, timeout=30,
+        )
+
+    start = run_shortcut("calorie-start.sh")
+    assert start.returncode == 0
+    pid = int((home / ".calorie_watcher.pid").read_text().strip())
+
+    try:
+        # Mirror the real /proc so the shortcuts can identify the watcher.
+        cmdline_dir = fake_proc / str(pid)
+        cmdline_dir.mkdir()
+        (cmdline_dir / "cmdline").write_bytes(
+            f"bash\x00{home}/android_watcher.sh\x00".encode()
+        )
+
+        # A new photo wedges the main loop inside the blocking upload.
+        photo = camera / "wedged_meal.jpg"
+        photo.write_bytes(b"upload blocks for a long time")
+        assert _wait_for(lambda: _file_contains(calls, f"UPLOAD {photo}"))
+
+        stop = run_shortcut("calorie-stop.sh")
+        assert stop.returncode == 0
+        assert "force-killed" in stop.stdout
+        assert not (home / ".calorie_watcher.pid").exists()
+        assert not (home / ".calorie_watcher.lock").exists()
+
+        # Neither the watcher, its ping/sync subshells, nor the stuck
+        # uploader survive the escalation.
+        assert _wait_for(lambda: not _pid_alive(pid))
+        assert _wait_for(lambda: not _watcher_processes_alive(home))
+
+        # The orphaned ping loop is really gone: the calls log stops growing.
+        size_after_stop = calls.stat().st_size
+        time.sleep(0.35)
+        assert calls.stat().st_size == size_after_stop
+    finally:
+        # Belt and braces: reap anything still holding this test's temp HOME.
+        subprocess.run(["pkill", "-9", "-f", str(home)], capture_output=True)
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def test_hostile_filenames_upload_cleanly_and_newlines_never_shatter(tmp_path):
+    """Spaces/unicode/quotes/$() names upload; a newline-containing filename
+    must not shatter into phantom scan entries that burn stability retries
+    and poison the history (the Python-side nightly sync still covers it)."""
+    env, home, camera, fake_proc = _make_env(tmp_path)
+    calls = home / "python_calls.log"
+    history = home / "uploaded_files.log"
+    log = home / "watcher.log"
+
+    proc = subprocess.Popen(
+        [BASH, str(WATCHER)], env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert _wait_for(lambda: _file_contains(log, "Started polling loop"))
+
+        hostile_ok = [
+            camera / "meal photo.jpg",
+            camera / "晚餐 面条.jpg",
+            camera / "cafe'au lait.jpg",
+            camera / "weird$(name).jpg",
+        ]
+        for path in hostile_ok:
+            path.write_bytes(b"imagebytes")
+        (camera / "bad\nname.jpg").write_bytes(b"imagebytes")
+
+        for path in hostile_ok:
+            assert _wait_for(lambda p=path: _file_contains(calls, f"UPLOAD {p}"))
+            assert _wait_for(lambda p=path: _file_contains(history, str(p)))
+
+        # No phantom fragments from the newline name anywhere.
+        text = calls.read_text()
+        assert f"UPLOAD {camera}/bad\n" not in text
+        assert "UPLOAD name.jpg" not in text
+        history_lines = history.read_text().splitlines()
+        assert "name.jpg" not in history_lines
+        assert str(camera / "bad") not in history_lines
+        assert "GIVING UP" not in log.read_text()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        subprocess.run(["pkill", "-9", "-f", str(home)], capture_output=True)
 
 
 def test_live_watcher_blocks_second_instance(tmp_path):

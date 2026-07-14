@@ -1,7 +1,7 @@
 import sqlite3
 import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -64,13 +64,93 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_photo_ingestions_status "
             "ON photo_ingestions(chat_id, status)"
         )
-        
+
+        # ─── Fitness expansion tables (all additive) ──────────────
+        # One canonical weigh-in per user-local day; re-logging overwrites.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS body_weight (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                weight_kg REAL NOT NULL,
+                source TEXT DEFAULT 'manual',
+                note TEXT DEFAULT '',
+                logged_at TEXT NOT NULL,
+                UNIQUE(chat_id, date)
+            )
+        """)
+
+        # Strength/lifting sessions; append-only, multiple per day allowed.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS workouts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                workout_type TEXT DEFAULT 'strength',
+                muscle_groups TEXT DEFAULT '',
+                notes TEXT DEFAULT '',
+                duration_min REAL,
+                source TEXT DEFAULT 'manual',
+                details TEXT,
+                logged_at TEXT NOT NULL
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_workouts_chat_date ON workouts(chat_id, date)")
+
+        # Cardio/activity aggregate; upsert by (source, external_id) so a
+        # re-sync of the same Garmin activity updates rather than duplicates.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS activities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                activity_type TEXT DEFAULT '',
+                source TEXT DEFAULT 'manual',
+                active_calories REAL,
+                distance_km REAL,
+                duration_min REAL,
+                avg_hr_bpm INTEGER,
+                elevation_gain_m REAL,
+                start_time TEXT,
+                external_id TEXT,
+                notes TEXT DEFAULT '',
+                raw TEXT,
+                logged_at TEXT NOT NULL,
+                UNIQUE(chat_id, source, external_id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_activities_chat_date ON activities(chat_id, date)")
+
+        # Single config row per user: diet + macro targets + goals + running/VDOT.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS fitness_profile (
+                chat_id INTEGER PRIMARY KEY,
+                diet_mode TEXT,
+                target_calories INTEGER,
+                target_protein_g INTEGER,
+                target_carbs_g INTEGER,
+                target_fat_g INTEGER,
+                protein_g_per_kg REAL,
+                goal_weight_kg REAL,
+                height_cm REAL,
+                vdot REAL,
+                race_distance_km REAL,
+                race_time_seconds INTEGER,
+                race_label TEXT,
+                goal_race_date TEXT,
+                plan_start_date TEXT,
+                long_run_day INTEGER DEFAULT 6,
+                extra TEXT,
+                updated_at TEXT
+            )
+        """)
+
         # Migration: Add timezone column if it doesn't exist
         try:
             cursor.execute("ALTER TABLE heartbeats ADD COLUMN timezone TEXT DEFAULT '+0800'")
         except sqlite3.OperationalError:
             pass # Column already exists
-            
+
         conn.commit()
 
 def save_meal(chat_id: int, date_str: str, time_str: str, timestamp_str: str, 
@@ -324,7 +404,7 @@ def get_meals(chat_id: int, start_date: str, end_date: str) -> List[Dict]:
 
 def get_recent_meals(chat_id: int, days: int = 3) -> List[Dict]:
     """Helper to get meals from the last N calendar days, including today."""
-    today = user_local_now().date()
+    today = user_local_today()
     end_date = today.isoformat()
     start_date = (today - timedelta(days=max(days - 1, 0))).isoformat()
     return get_meals(chat_id, start_date, end_date)
@@ -429,9 +509,15 @@ def user_local_now(device_name: str = "android_watcher") -> datetime:
         return datetime.now()
     return datetime.now(timezone.utc).replace(tzinfo=None) + offset
 
+
+def user_local_today(device_name: str = "android_watcher") -> date:
+    """Today's date on the user's clock (see user_local_now)."""
+    return user_local_now(device_name).date()
+
+
 def get_today_hashes(chat_id: int) -> List[str]:
     """Return a list of image_hashes recorded today (user-local) for the user."""
-    today = user_local_now().date().isoformat()
+    today = user_local_today().isoformat()
     with _connect() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -439,3 +525,179 @@ def get_today_hashes(chat_id: int) -> List[str]:
             (chat_id, today)
         )
         return [row[0] for row in cursor.fetchall() if row[0]]
+
+
+# ─── Fitness expansion accessors ──────────────────────────────────
+_FITNESS_PROFILE_COLUMNS = (
+    "diet_mode", "target_calories", "target_protein_g", "target_carbs_g",
+    "target_fat_g", "protein_g_per_kg", "goal_weight_kg", "height_cm", "vdot",
+    "race_distance_km", "race_time_seconds", "race_label", "goal_race_date",
+    "plan_start_date", "long_run_day", "extra",
+)
+
+
+def _rows_to_dicts(cursor) -> List[Dict]:
+    cursor.row_factory = sqlite3.Row
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def save_body_weight(chat_id: int, date_str: str, weight_kg: float,
+                     source: str = "manual", note: str = "") -> int:
+    """Record one weigh-in for a user-local day; re-logging the day overwrites."""
+    now_iso = datetime.now().isoformat()
+    with _connect() as conn:
+        conn.execute("""
+            INSERT INTO body_weight (chat_id, date, weight_kg, source, note, logged_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, date) DO UPDATE SET
+                weight_kg = excluded.weight_kg,
+                source = excluded.source,
+                note = excluded.note,
+                logged_at = excluded.logged_at
+        """, (chat_id, date_str, float(weight_kg), source, note, now_iso))
+        conn.commit()
+        row = conn.execute(
+            "SELECT id FROM body_weight WHERE chat_id = ? AND date = ?",
+            (chat_id, date_str)).fetchone()
+        return row[0] if row else 0
+
+
+def get_body_weights(chat_id: int, start_date: str, end_date: str) -> List[Dict]:
+    with _connect() as conn:
+        cursor = conn.execute(
+            "SELECT * FROM body_weight WHERE chat_id = ? AND date >= ? AND date <= ? "
+            "ORDER BY date ASC", (chat_id, start_date, end_date))
+        return _rows_to_dicts(cursor)
+
+
+def get_latest_body_weight(chat_id: int) -> Optional[Dict]:
+    with _connect() as conn:
+        cursor = conn.execute(
+            "SELECT * FROM body_weight WHERE chat_id = ? ORDER BY date DESC LIMIT 1",
+            (chat_id,))
+        rows = _rows_to_dicts(cursor)
+        return rows[0] if rows else None
+
+
+def save_workout(chat_id: int, date_str: str, workout_type: str = "strength",
+                 muscle_groups: str = "", notes: str = "",
+                 duration_min: Optional[float] = None, source: str = "manual",
+                 details: Optional[Dict] = None) -> int:
+    now_iso = datetime.now().isoformat()
+    with _connect() as conn:
+        cursor = conn.execute("""
+            INSERT INTO workouts (chat_id, date, workout_type, muscle_groups, notes,
+                                  duration_min, source, details, logged_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (chat_id, date_str, workout_type, muscle_groups, notes, duration_min,
+              source, json.dumps(details) if details is not None else None, now_iso))
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_workouts(chat_id: int, start_date: str, end_date: str) -> List[Dict]:
+    with _connect() as conn:
+        cursor = conn.execute(
+            "SELECT * FROM workouts WHERE chat_id = ? AND date >= ? AND date <= ? "
+            "ORDER BY date ASC, logged_at ASC", (chat_id, start_date, end_date))
+        rows = _rows_to_dicts(cursor)
+    for row in rows:
+        if row.get("details"):
+            try:
+                row["details"] = json.loads(row["details"])
+            except (TypeError, ValueError):
+                pass
+    return rows
+
+
+def save_activity(chat_id: int, date_str: str, activity_type: str = "",
+                  source: str = "manual", active_calories: Optional[float] = None,
+                  distance_km: Optional[float] = None, duration_min: Optional[float] = None,
+                  avg_hr_bpm: Optional[int] = None, elevation_gain_m: Optional[float] = None,
+                  start_time: Optional[str] = None, external_id: Optional[str] = None,
+                  notes: str = "", raw: Optional[Dict] = None) -> int:
+    """Insert or update a cardio activity.
+
+    A re-synced source activity (same source + external_id) updates in place.
+    Manual rows (external_id NULL) always insert, since NULLs are distinct in a
+    SQLite UNIQUE index.
+    """
+    now_iso = datetime.now().isoformat()
+    raw_json = json.dumps(raw) if raw is not None else None
+    with _connect() as conn:
+        conn.execute("""
+            INSERT INTO activities (chat_id, date, activity_type, source, active_calories,
+                                    distance_km, duration_min, avg_hr_bpm, elevation_gain_m,
+                                    start_time, external_id, notes, raw, logged_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, source, external_id) DO UPDATE SET
+                date = excluded.date,
+                activity_type = excluded.activity_type,
+                active_calories = excluded.active_calories,
+                distance_km = excluded.distance_km,
+                duration_min = excluded.duration_min,
+                avg_hr_bpm = excluded.avg_hr_bpm,
+                elevation_gain_m = excluded.elevation_gain_m,
+                start_time = excluded.start_time,
+                notes = excluded.notes,
+                raw = excluded.raw,
+                logged_at = excluded.logged_at
+        """, (chat_id, date_str, activity_type, source, active_calories, distance_km,
+              duration_min, avg_hr_bpm, elevation_gain_m, start_time, external_id,
+              notes, raw_json, now_iso))
+        conn.commit()
+        cursor = conn.execute(
+            "SELECT id FROM activities WHERE chat_id = ? AND source = ? "
+            "AND (external_id IS ? OR external_id = ?) ORDER BY id DESC LIMIT 1",
+            (chat_id, source, external_id, external_id))
+        row = cursor.fetchone()
+        return row[0] if row else 0
+
+
+def get_activities(chat_id: int, start_date: str, end_date: str) -> List[Dict]:
+    with _connect() as conn:
+        cursor = conn.execute(
+            "SELECT * FROM activities WHERE chat_id = ? AND date >= ? AND date <= ? "
+            "ORDER BY date ASC, start_time ASC, logged_at ASC",
+            (chat_id, start_date, end_date))
+        rows = _rows_to_dicts(cursor)
+    for row in rows:
+        if row.get("raw"):
+            try:
+                row["raw"] = json.loads(row["raw"])
+            except (TypeError, ValueError):
+                pass
+    return rows
+
+
+def save_fitness_profile(chat_id: int, **fields) -> None:
+    """Partial upsert of the single fitness_profile row (only provided columns)."""
+    updates = {k: v for k, v in fields.items() if k in _FITNESS_PROFILE_COLUMNS}
+    if "extra" in updates and isinstance(updates["extra"], (dict, list)):
+        updates["extra"] = json.dumps(updates["extra"])
+    now_iso = datetime.now().isoformat()
+    with _connect() as conn:
+        conn.execute("INSERT OR IGNORE INTO fitness_profile (chat_id, updated_at) VALUES (?, ?)",
+                     (chat_id, now_iso))
+        if updates:
+            # Column names come only from the whitelist; values are bound params.
+            set_clause = ", ".join(f"{col} = ?" for col in updates)
+            conn.execute(
+                f"UPDATE fitness_profile SET {set_clause}, updated_at = ? WHERE chat_id = ?",
+                (*updates.values(), now_iso, chat_id))
+        conn.commit()
+
+
+def get_fitness_profile(chat_id: int) -> Optional[Dict]:
+    with _connect() as conn:
+        cursor = conn.execute("SELECT * FROM fitness_profile WHERE chat_id = ?", (chat_id,))
+        rows = _rows_to_dicts(cursor)
+    if not rows:
+        return None
+    profile = rows[0]
+    if profile.get("extra"):
+        try:
+            profile["extra"] = json.loads(profile["extra"])
+        except (TypeError, ValueError):
+            pass
+    return profile

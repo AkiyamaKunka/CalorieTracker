@@ -62,7 +62,7 @@ flowchart LR
 | Bot interface | Telegram Bot API, long polling | User commands, corrections, photo feedback, operational alerts |
 | Upload API | Flask | Authenticated phone uploads, heartbeat pings, Android reconciliation |
 | AI analysis | Google Gemini 2.5 Flash | Food detection, calorie and macro estimation, correction parsing |
-| Persistence | SQLite | Meals, hashes, correction state, Android heartbeat, photo ingestion guard |
+| Persistence | SQLite | Meals, hashes, correction state, Android heartbeat, photo ingestion guard, fitness data (weight, workouts, activities, profile) |
 | Mobile clients | Android Termux, iOS Shortcuts | Camera automation, VPN evidence headers, offline queueing |
 | Scheduling | systemd or launchd | Always-on bot service and local-time daily reports |
 | Reliability | Failed-upload store, quota circuit breaker, `/doctor` checks | Recovery from quota, network, duplicate, and report failures |
@@ -81,6 +81,7 @@ flowchart LR
 - Graceful shutdown, plus a startup sweep that recovers uploads stranded mid-analysis by a crash.
 - Runtime health written to `logs/service_health.json`.
 - Duplicate protection through a photo-hash reservation guard.
+- Fitness tracking: daily weigh-ins, diet modes with macro targets (keto / high-protein / balanced), Daniels-VDOT run planning, and manual or Garmin activity logging with a net-calorie line in daily reports.
 
 ## Repository Safety
 
@@ -253,7 +254,11 @@ bash install_and_start.sh
 
 It verifies the source files before stopping the running watcher, preserves the offline upload queue across reinstalls, and restarts everything under a wake lock.
 
-Watcher behavior worth knowing: new photos are marked as handled after a successful upload or safe offline queueing; a photo that fails three consecutive attempts is recorded anyway (with a loud log line) so it cannot wedge the loop, and photos already on the phone at watcher startup are skipped rather than uploaded as a backlog — the nightly sync covers both cases (photos newer than `SEED_FRESH_MINUTES`, default 15, upload immediately instead). Partially-written camera files are skipped until their size stabilizes, and photos the server permanently rejects are quarantined in `~/.offline_queue/rejected/`. The nightly `--sync` reconciles today's and yesterday's photos (including HEIC) against the server. Idle polling is mtime-gated (one `stat` per 5s tick when nothing changed), `watcher.log` rotates at 1MB, and daily housekeeping prunes history entries for deleted photos.
+One-tap control (optional, no typing in Termux): install the free [Termux:Widget](https://f-droid.org/packages/com.termux.widget/) add-on, copy the repo's `android/shortcuts/` folder to `/sdcard/Download/shortcuts` before running the installer (it places them in `~/.shortcuts`), then add the Termux widget to your home screen. You get ▶️ start, 🔴 stop, 📊 status (including offline-queue depth), 🔄 sync-now, and 🔁 update buttons. A double-tap on start is harmless — the watcher's lock makes it a no-op.
+
+With USB debugging enabled, updating the phone is two steps: `adb push android/upload_photo.py android/android_watcher.sh android/install_and_start.sh /sdcard/Download/ && adb push android/shortcuts /sdcard/Download/shortcuts` from the dev machine, then tap 🔁 update on the phone (it runs the installer, which pre-flights the payload before touching the running watcher).
+
+Watcher behavior worth knowing: new photos are marked as handled after a successful upload or safe offline queueing; a photo that fails three consecutive attempts is recorded anyway (with a loud log line) so it cannot wedge the loop, and photos already on the phone at watcher startup are skipped rather than uploaded as a backlog — the nightly sync covers both cases (photos newer than `SEED_FRESH_MINUTES`, default 15, upload immediately instead). Partially-written camera files are skipped until their size stabilizes (a file that never stabilizes — e.g. a permanently unreadable or 0-byte file — is recorded after a few attempts so it can't wedge the loop, with the nightly sync still able to recover it if it later becomes readable), and photos the server permanently rejects are quarantined in `~/.offline_queue/rejected/`. The nightly `--sync` reconciles today's and yesterday's photos (including HEIC) against the server. Idle polling is mtime-gated (one `stat` per 5s tick when nothing changed), `watcher.log` rotates at 1MB, and daily housekeeping prunes history entries for deleted photos.
 
 If Pillow is installed in Termux (`pip install pillow`, optional), photos are recompressed to ≤1600px JPEG before upload — a 10–25MB camera shot becomes a few hundred KB on cellular — while dedup still keys on the original file's hash. Without Pillow (or for undecodable HEIC), originals upload unchanged.
 
@@ -312,6 +317,7 @@ Run `/commands` for the full menu.
 | Area | Commands |
 | --- | --- |
 | Tracking | `/today`, `/meals`, `/recent`, `/history` |
+| Fitness | `/weight 72.5`, `/diet balanced`, `/macros today`, `/workout legs`, `/train`, `/activity 450 8000 5`, `/train_run 5k 19:57`, `/plan`, `/profile` |
 | Health | `/status`, `/doctor`, `/gemini`, `/android`, `/vpn` |
 | Uploads | `/queue`, `/failed`, `/retry_failed latest`, `/retry_all_failed 3`, `/clear_failed latest confirm` |
 | Reports | `/report today`, `/report_status`, `/reports` |

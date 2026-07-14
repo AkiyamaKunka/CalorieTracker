@@ -1733,6 +1733,42 @@ def test_sweep_keeps_processing_reservation_backed_by_failed_file(monkeypatch, t
     assert released == []
 
 
+def test_sweep_keeps_processing_reservation_backed_by_unreadable_pending_file(monkeypatch, tmp_path):
+    """A pending file whose bytes cannot be read still backs its reservation.
+    The sweep must NOT release the 'processing' row — releasing it while the
+    file stays in pending lets a later sweep's md5 fallback re-key the photo
+    under the recompressed bytes' hash and double-process it."""
+    kept_hash = "ef" * 16
+    released = []
+    marked = []
+    pending_dir = tmp_path / "pending"
+    failed_dir = tmp_path / "failed"
+    pending_dir.mkdir()
+    stuck = pending_dir / f"20260709T010101_{kept_hash[:12]}.jpg"
+    stuck.write_bytes(b"unreadable image")
+    stuck.chmod(0)
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", pending_dir)
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", failed_dir)
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot.database, "get_processing_photo_hashes",
+                        lambda chat_id: [kept_hash])
+    monkeypatch.setattr(telegram_bot.database, "release_photo_hash",
+                        lambda chat_id, image_hash: released.append(image_hash))
+    monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status",
+                        lambda *a, **k: marked.append((a, k)))
+    bot = _RecordingBot()
+
+    try:
+        telegram_bot._sweep_stranded_pending_uploads(bot)
+    finally:
+        stuck.chmod(0o644)
+
+    assert released == []  # row stays 'processing'
+    assert marked == []
+    assert stuck.exists()  # file still in pending
+    assert not failed_dir.exists() or list(failed_dir.iterdir()) == []
+
+
 def _stale_heartbeat_setup(monkeypatch, last_ping):
     monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
     monkeypatch.setattr(telegram_bot, "_last_stale_heartbeat_warning_at", None)
@@ -1749,6 +1785,67 @@ def test_stale_heartbeat_warns_once_with_cooldown(monkeypatch):
     assert len(bot.sent) == 1
     assert "hasn't reached the server" in bot.sent[0]["text"]
     assert "/android" in bot.sent[0]["text"]
+    # A DELIVERED warning keeps the full cooldown: the stamp is now, not
+    # rolled back into the retry window.
+    assert (datetime.now() - telegram_bot._last_stale_heartbeat_warning_at).total_seconds() < 60
+
+
+def test_stale_heartbeat_recovery_resets_cooldown(monkeypatch):
+    """A fresh heartbeat clears the cooldown so the NEXT outage warns
+    promptly instead of being silenced by the previous outage's warning."""
+    stale = (datetime.now() - timedelta(hours=3)).isoformat()
+    _stale_heartbeat_setup(monkeypatch, stale)
+    bot = _RecordingBot()
+
+    assert telegram_bot.maybe_warn_stale_android_heartbeat(bot) is True
+
+    # Phone recovers: fresh heartbeat resets the cooldown.
+    monkeypatch.setattr(telegram_bot.database, "get_last_android_heartbeat",
+                        lambda: datetime.now().isoformat())
+    assert telegram_bot.maybe_warn_stale_android_heartbeat(bot) is False
+    assert telegram_bot._last_stale_heartbeat_warning_at is None
+
+    # New outage right after recovery: warns again immediately.
+    monkeypatch.setattr(telegram_bot.database, "get_last_android_heartbeat",
+                        lambda: stale)
+    assert telegram_bot.maybe_warn_stale_android_heartbeat(bot) is True
+    assert len(bot.sent) == 2
+
+
+def test_stale_heartbeat_failed_send_retries_soon(monkeypatch):
+    """send_message swallows errors and returns None; a failed delivery must
+    not consume the 12h cooldown — the stamp rolls back to retry in ~15min."""
+
+    class _FailingBot(_RecordingBot):
+        def send_message(self, chat_id, text, parse_mode="HTML", reply_markup=None):
+            super().send_message(chat_id, text, parse_mode, reply_markup)
+            return None
+
+    stale = (datetime.now() - timedelta(hours=3)).isoformat()
+    _stale_heartbeat_setup(monkeypatch, stale)
+    failing = _FailingBot()
+
+    assert telegram_bot.maybe_warn_stale_android_heartbeat(failing) is False
+    assert len(failing.sent) == 1  # delivery was attempted
+
+    # The rolled-back stamp puts the next retry ~15 minutes out, not 12h.
+    stamp = telegram_bot._last_stale_heartbeat_warning_at
+    retry_at = stamp + timedelta(hours=telegram_bot.HEARTBEAT_STALE_WARNING_COOLDOWN_HOURS)
+    wait_seconds = (retry_at - datetime.now()).total_seconds()
+    assert 13 * 60 < wait_seconds <= 15 * 60
+
+    # Still inside the retry window: no duplicate attempt yet.
+    working = _RecordingBot()
+    assert telegram_bot.maybe_warn_stale_android_heartbeat(working) is False
+    assert working.sent == []
+
+    # ~16 minutes later the retry fires; success stamps the full cooldown.
+    telegram_bot._last_stale_heartbeat_warning_at = stamp - timedelta(minutes=16)
+    assert telegram_bot.maybe_warn_stale_android_heartbeat(working) is True
+    assert len(working.sent) == 1
+    assert (datetime.now() - telegram_bot._last_stale_heartbeat_warning_at).total_seconds() < 60
+    assert telegram_bot.maybe_warn_stale_android_heartbeat(working) is False
+    assert len(working.sent) == 1
 
 
 def test_fresh_heartbeat_does_not_warn(monkeypatch):
@@ -1912,3 +2009,20 @@ def test_format_operational_status_escapes_invalid_heartbeat(monkeypatch, tmp_pa
     assert "invalid heartbeat" in status
     assert "corrupt&lt;b&gt;value" in status
     assert "corrupt<b>value" not in status
+
+
+def test_format_food_result_survives_hostile_analysis_shapes():
+    """Distilled from the S3 fuzzer: non-dict food_items entries and scalar
+    food_items crashed the photo reply before safe_food_items."""
+    hostile = {
+        "is_food": True,
+        "meal_description": False,
+        "total_calories": [],
+        "food_items": ["rice", {"name": "ok", "estimated_calories": 200}, None],
+    }
+    result = telegram_bot.format_food_result(12345, hostile)
+    assert isinstance(result, str)
+    assert "ok" in result
+
+    scalar_items = {"is_food": True, "meal_description": "x", "food_items": -1}
+    assert isinstance(telegram_bot.format_food_result(12345, scalar_items), str)

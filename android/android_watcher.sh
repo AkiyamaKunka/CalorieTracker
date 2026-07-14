@@ -9,8 +9,13 @@ PROC_DIR="${CALORIE_PROC_DIR:-/proc}"
 HISTORY_FILE="$HOME/uploaded_files.log"
 FAIL_COUNT_DIR="$HOME/.calorie_upload_failures"
 MAX_UPLOAD_ATTEMPTS=3
+# A file that never stabilizes (e.g. permanently 0-byte) would otherwise force
+# a full rescan plus a ~30s stability stall on EVERY tick forever; give up on
+# it after this many stability failures (tracked in "$FAIL_KEY.unstable").
+MAX_STABILITY_ATTEMPTS=5
 SCAN_LIST="$HOME/.calorie_watcher_scan.$$"
 NEW_LIST="$HOME/.calorie_watcher_new.$$"
+EXPECTED_KEYS="$HOME/.calorie_watcher_keys.$$"
 # Heartbeat interval (seconds). 15 min instead of 5: fewer radio wakeups and
 # less log churn. Trade-off: after connectivity returns, the offline-queue
 # drain can start up to 15 min later — compensated by the uploader draining a
@@ -70,7 +75,7 @@ echo $$ > "$PID_FILE"
 cleanup() {
   [ -n "$PING_PID" ] && kill "$PING_PID" 2>/dev/null
   [ -n "$SYNC_PID" ] && kill "$SYNC_PID" 2>/dev/null
-  rm -f "$PID_FILE" "$SCAN_LIST" "$NEW_LIST" "$HOME/.history.tmp"
+  rm -f "$PID_FILE" "$SCAN_LIST" "$NEW_LIST" "$EXPECTED_KEYS" "$HOME/.history.tmp"
   rmdir "$LOCK_DIR" 2>/dev/null
   return 0
 }
@@ -111,11 +116,18 @@ PING_PID=$!
 SYNC_PID=$!
 
 # MediaStore writes in-progress captures as '.pending-*'; skip those.
+# The scan pipeline is line-based (sort/comm/history), so a filename
+# containing a newline would shatter into phantom entries; the awk guard
+# drops any line that isn't a full camera-dir path with a photo extension
+# (the nightly sync iterates in Python and still covers such files).
 list_photos() {
   find "$CAMERA_DIR" -maxdepth 1 -type f \
     ! -name '.pending-*' \
     \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.heic' -o -iname '*.heif' \) \
-    2>/dev/null | LC_ALL=C sort
+    2>/dev/null \
+    | LC_ALL=C awk -v dir="$CAMERA_DIR" \
+        'index($0, dir) == 1 && tolower($0) ~ /\.(jpg|jpeg|png|heic|heif)$/' \
+    | LC_ALL=C sort
 }
 
 # History stays sorted so each poll can diff it against the scan with comm.
@@ -140,6 +152,31 @@ fail_counters_pending() {
     [ -e "$entry" ] && return 0
   done
   return 1
+}
+
+# Any pending fail counter (plain or .unstable) forces a full scan every tick,
+# and daily housekeeping only expires counters after 7 days — so a counter
+# whose photo was deleted would disable mtime gating for up to a week. Each
+# scan, drop counters whose source photo is no longer in the scan. The key is
+# a one-way cksum of the path, so recompute the expected key set from the
+# scan itself (same derivation as FAIL_KEY below).
+prune_orphan_fail_counters() {
+  local entry base path
+  fail_counters_pending || return 0
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    printf '%s' "$path" | cksum | tr -s ' \t' '_'
+  done < "$SCAN_LIST" > "$EXPECTED_KEYS"
+  for entry in "$FAIL_COUNT_DIR"/*; do
+    [ -f "$entry" ] || continue
+    base="${entry##*/}"
+    base="${base%.unstable}"
+    if ! grep -qxF "$base" "$EXPECTED_KEYS" 2>/dev/null; then
+      rm -f "$entry"
+    fi
+  done
+  rm -f "$EXPECTED_KEYS"
+  return 0
 }
 
 # Daily housekeeping: prune history entries whose photos were deleted (keeps
@@ -228,6 +265,9 @@ while true; do
   RETRY_PENDING=0
 
   list_photos > "$SCAN_LIST"
+  if [ -s "$SCAN_LIST" ]; then
+    prune_orphan_fail_counters
+  fi
   if [ -s "$HISTORY_FILE" ]; then
     LC_ALL=C comm -23 "$SCAN_LIST" "$HISTORY_FILE" > "$NEW_LIST"
   else
@@ -246,22 +286,30 @@ while true; do
     FAIL_KEY="$FAIL_COUNT_DIR/$(printf '%s' "$FILE_PATH" | cksum | tr -s ' \t' '_')"
     # A pending retry means the file already passed the stability check once.
     if [ ! -f "$FAIL_KEY" ] && ! wait_for_stable_file "$FILE_PATH"; then
-      echo "[$(date)] Skipping $FILE_PATH (unreadable or never stabilized; will retry next poll)." | tee -a "$LOG_FILE"
-      RETRY_PENDING=1
+      UNSTABLE_FAILS=$(( $(cat "$FAIL_KEY.unstable" 2>/dev/null || echo 0) + 1 ))
+      if [ "$UNSTABLE_FAILS" -ge "$MAX_STABILITY_ATTEMPTS" ]; then
+        echo "[$(date)] GIVING UP on $FILE_PATH after $UNSTABLE_FAILS stability failures (still empty or unreadable); recording it so it stops forcing rescans. Nightly sync can still recover it if it ever becomes readable." | tee -a "$LOG_FILE"
+        remember_uploaded "$FILE_PATH"
+        rm -f "$FAIL_KEY.unstable"
+      else
+        echo "$UNSTABLE_FAILS" > "$FAIL_KEY.unstable"
+        echo "[$(date)] Skipping $FILE_PATH (unreadable or never stabilized; stability attempt $UNSTABLE_FAILS of $MAX_STABILITY_ATTEMPTS); will retry next poll." | tee -a "$LOG_FILE"
+        RETRY_PENDING=1
+      fi
       continue
     fi
     # Record to history only after the uploader handled the file (exit 0), so
     # a crash mid-upload gets retried on the next poll instead of stranding it.
     if python3 ~/upload_photo.py "$FILE_PATH" >> "$LOG_FILE" 2>&1; then
       remember_uploaded "$FILE_PATH"
-      rm -f "$FAIL_KEY"
+      rm -f "$FAIL_KEY" "$FAIL_KEY.unstable"
     else
       FAILS=$(( $(cat "$FAIL_KEY" 2>/dev/null || echo 0) + 1 ))
       echo "$FAILS" > "$FAIL_KEY"
       if [ "$FAILS" -ge "$MAX_UPLOAD_ATTEMPTS" ]; then
         echo "[$(date)] GIVING UP on $FILE_PATH after $FAILS failed attempts; recording it so it stops retrying. Daily sync may still catch it." | tee -a "$LOG_FILE"
         remember_uploaded "$FILE_PATH"
-        rm -f "$FAIL_KEY"
+        rm -f "$FAIL_KEY" "$FAIL_KEY.unstable"
       else
         echo "[$(date)] Upload attempt $FAILS failed for $FILE_PATH; will retry on the next poll." | tee -a "$LOG_FILE"
       fi

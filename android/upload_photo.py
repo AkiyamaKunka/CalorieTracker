@@ -317,6 +317,10 @@ def process_queue(max_items=QUEUE_BATCH_LIMIT):
 
 RECOMPRESS_MAX_EDGE = int(os.environ.get("CALORIE_RECOMPRESS_MAX_EDGE", "1600"))
 RECOMPRESS_JPEG_QUALITY = int(os.environ.get("CALORIE_RECOMPRESS_JPEG_QUALITY", "80"))
+# Decode budget: a W*H image inflates to roughly W*H*3 bytes of pixel data.
+# Past this many pixels (~600MB decoded) skip recompression and upload the
+# original bytes instead — the server-side downscale still protects Gemini.
+RECOMPRESS_MAX_PIXELS = 200_000_000
 
 
 def _recompress_for_upload(original_bytes):
@@ -326,6 +330,11 @@ def _recompress_for_upload(original_bytes):
     for every byte. Pillow may be missing in Termux and HEIC may not decode
     there — any failure, or a result that isn't actually smaller, falls back
     to the original bytes.
+
+    Decode memory stays bounded: the pixel budget is checked on the header
+    (before any pixel data is decoded), JPEGs are decoded at reduced scale
+    via draft(), and the EXIF orientation transpose runs on the already
+    shrunken image so no full-resolution copy is ever duplicated.
     """
     if RECOMPRESS_MAX_EDGE <= 0:
         return None
@@ -335,8 +344,17 @@ def _recompress_for_upload(original_bytes):
         from PIL import Image, ImageOps
 
         img = Image.open(_io.BytesIO(original_bytes))
-        img = ImageOps.exif_transpose(img)
+        # Header-only size check: no pixel data has been decoded yet.
+        if img.size[0] * img.size[1] > RECOMPRESS_MAX_PIXELS:
+            return None
+        # JPEG decodes straight from the codec at 1/2..1/8 scale; a harmless
+        # no-op for every other format.
+        img.draft("RGB", (RECOMPRESS_MAX_EDGE, RECOMPRESS_MAX_EDGE))
         img.thumbnail((RECOMPRESS_MAX_EDGE, RECOMPRESS_MAX_EDGE))
+        # Transpose AFTER shrinking: the EXIF orientation tag survives on the
+        # Image object, and transposing the small image avoids holding two
+        # full-resolution copies in memory at once.
+        img = ImageOps.exif_transpose(img)
         out = _io.BytesIO()
         img.convert("RGB").save(out, format="JPEG", quality=RECOMPRESS_JPEG_QUALITY)
         recompressed = out.getvalue()
