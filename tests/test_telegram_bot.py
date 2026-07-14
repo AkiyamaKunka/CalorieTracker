@@ -16,13 +16,12 @@ import database
 import config
 
 @pytest.fixture
-def mock_db(tmp_path):
-    # Use a real temp file for the sqlite DB to avoid Pathlib errors
-    old_db = database.DB_PATH
-    database.DB_PATH = tmp_path / "test_meals.db"
+def mock_db(tmp_path, monkeypatch):
+    # Use a real temp file for the sqlite DB to avoid Pathlib errors.
+    # monkeypatch guarantees restoration even if init_db raises mid-fixture.
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "test_meals.db")
     database.init_db()
     yield
-    database.DB_PATH = old_db
 
 
 class FakeBot:

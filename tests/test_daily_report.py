@@ -2,7 +2,21 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 import json
 
+import pytest
+
 import daily_report
+
+
+@pytest.fixture(autouse=True)
+def _isolated_db(monkeypatch, tmp_path):
+    """Point every test at a fresh temp DB.
+
+    Tests that stub only get_meals still reach the real fitness accessors via
+    _fitness_sections; without this, they silently read ~/CalorieTracker/meals.db
+    and pass only because that DB has no rows for the test chat id.
+    """
+    monkeypatch.setattr(daily_report.database, "DB_PATH", tmp_path / "isolated_report.db")
+    daily_report.database.init_db()
 
 
 def test_clean_env_strips_shell_quotes(monkeypatch):
@@ -963,8 +977,6 @@ def test_sync_garmin_resync_of_day_aggregate_does_not_duplicate(monkeypatch, tmp
 # ─── Weight slope arithmetic ───────────────────────────────────────
 import re as _re
 from html import unescape as _unescape
-
-import pytest
 
 
 def _seed_weights(monkeypatch, rows):
