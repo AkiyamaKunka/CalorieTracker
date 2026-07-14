@@ -163,6 +163,8 @@ Intent can be:
 2. "correction": The user is correcting an existing meal from the recent meals list (e.g., "change yesterday's lunch to 500 kcal").
 3. "delete": The user wants to completely delete one or more meals (e.g., "delete all food today", "remove meal 0").
 4. "chat": A general question, greeting, or unrelated message.
+5. "log_weight": The user is reporting their body weight (e.g., "I weigh 72.5 kg this morning", "weighed 159 lb today").
+6. "log_activity": The user is reporting exercise they did — calories burned, steps, and/or distance (e.g., "burned 450 calories on my 5 km run", "did 8000 steps today").
 
 Respond with JSON ONLY in this exact format:
 {{
@@ -182,6 +184,10 @@ Respond with JSON ONLY in this exact format:
     "meal_description": "...",
     "confidence_note": "..."
   }},
+  "weight_kg": 0,
+  "active_calories": 0,
+  "steps": 0,
+  "distance_km": 0,
   "reply": "Friendly response to the user"
 }}
 
@@ -191,5 +197,8 @@ Rules:
 - For "correction", accurately identify the "meal_index" (the exact 0-based index from the provided `meals_list` array), apply the correction, and return the FULL updated "analysis".
 - For "delete", accurately identify all targeted meals from `meals_list` and return their 0-based indices as a list in "meal_indices". Provide a brief "reason".
 - For "chat", just return a friendly "reply" string.
+- For "log_weight", set "weight_kg" to the body weight in kilograms (convert pounds to kg). Do NOT treat food as weight.
+- For "log_activity", set "active_calories" (calories burned), "steps", and "distance_km" from the message; use 0 for anything not stated.
+- A message describing FOOD the user ate is always "new_meal", never "log_weight" or "log_activity".
 - If the user describes food but meals_list is empty, it MUST be a "new_meal", not a "correction" or "delete".
 """

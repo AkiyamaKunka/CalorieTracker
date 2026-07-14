@@ -49,6 +49,8 @@ except ImportError:
     pass
 
 import database
+import fitness_plan
+import nutrition
 import service_health
 from config import (
     GEMINI_API_KEY,
@@ -183,6 +185,17 @@ You can also send food photos directly here (Android)!
 /commands — Show the full operations command menu
 /help — Show this help message
 
+<b>Fitness &amp; diet:</b>
+/weight — Log a weigh-in or see your trend
+/diet — Set/see your diet mode &amp; macro targets
+/macros — Macro check vs your targets
+/workout — Log a strength session
+/train — Which muscle group is due
+/activity — Log calories burned / steps / km
+/train_run — Today's run, or set VDOT from a race
+/plan — This week's run schedule
+/profile — Your merged fitness profile
+
 <b>Photo:</b>
 📸 Send a food photo for instant calorie analysis
 
@@ -200,6 +213,19 @@ COMMAND_MENU_TEXT = """🧰 <b>Operations Commands</b>
 /meals — Today's meals
 /recent — Recent meals from the last 3 days
 /history — 7-day calorie history
+
+<b>Fitness &amp; diet</b>
+/weight 72.5 — Log a weigh-in (no arg: trend)
+/diet balanced — Set diet mode (no arg: plan + targets)
+/diet target 2000 150 200 60 — Cal/P/C/F targets
+/diet protein 2.0 — Protein grams per kg
+/macros today — Macro check (today|week|N)
+/workout legs — Log a strength session
+/train — Muscle group due next
+/activity 450 8000 5 — kcal, steps, km (no arg: net)
+/train_run — Today's run (5k 19:57 sets VDOT)
+/plan — This week's run schedule
+/profile — Merged fitness profile
 
 <b>System health</b>
 /status — Overall health summary
@@ -1878,6 +1904,14 @@ def generate_report_for_command(selector: str = "today") -> str:
     try:
         import daily_report
 
+        # Best-effort same-day Garmin pull so a manual /report reflects the
+        # latest activity, mirroring the nightly cron. Self-guarded — a Garmin
+        # failure never blocks the report.
+        try:
+            daily_report._sync_garmin_activity(target_date)
+        except Exception:
+            log.warning("Garmin sync for /report failed; continuing.", exc_info=True)
+
         report = daily_report.generate_report(target_date)
         if not report:
             _record_report_health(False, target_date, error_summary="Report generation returned empty content.")
@@ -2201,6 +2235,776 @@ def _daily_calorie_totals(chat_id: int, start_date: str, end_date: str) -> Dict[
     return totals
 
 
+# ─── Fitness & diet command surface ────────────────────────────────
+# All handlers below are PURE DB reads/writes plus arithmetic from the
+# nutrition/fitness_plan pure modules — no Gemini — so they keep working
+# during a Gemini quota pause. Every number that reaches them from meals or
+# model output is coerced (safe_number / the parsers) so a hostile value can
+# never raise.
+
+# The strength groups /train tracks and /workout recognises as leading tokens.
+FITNESS_MUSCLE_GROUPS = ("legs", "chest", "shoulders", "back", "arms", "core")
+_WORKOUT_GROUP_WORDS = {
+    "legs", "leg", "chest", "shoulders", "shoulder", "back", "arms", "arm",
+    "core", "abs", "glutes", "biceps", "triceps", "cardio", "push", "pull",
+    "full", "fullbody", "upper", "lower", "quads", "hamstrings", "calves",
+}
+
+ACTIVITY_KCAL_MAX = 20000
+ACTIVITY_STEPS_MAX = 200000
+ACTIVITY_KM_MAX = 500
+
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# Deterministic read-only fitness questions answered with ZERO Gemini spend.
+_RUN_QUERY_RE = re.compile(
+    r"(what\s+(?:should|do)\s+i\s+run|today'?s\s+run|todays\s+run|"
+    r"what'?s\s+my\s+run|my\s+run\s+today)",
+    re.IGNORECASE,
+)
+_MACRO_QUERY_RE = re.compile(
+    r"(how'?s\s+my\s+(?:protein|macros?|carbs?|fat)|how\s+are\s+my\s+macros|"
+    r"macros?\s+(?:today|so\s+far)|my\s+macros)",
+    re.IGNORECASE,
+)
+_PLAN_QUERY_RE = re.compile(
+    r"(this\s+week'?s\s+(?:run\s+)?plan|week'?s\s+plan|"
+    r"my\s+(?:training\s+)?plan\s+this\s+week)",
+    re.IGNORECASE,
+)
+
+
+def _iso_date(value) -> Optional[date]:
+    """A ``date`` from a 'YYYY-MM-DD'-ish value, or None. Never raises."""
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (ValueError, TypeError):
+        return None
+
+
+def _arg_float(value, default: float = 0.0) -> float:
+    """Parse a command-line arg string to a finite float, else ``default``.
+
+    ``utils.safe_number`` only accepts real int/float, so string args from
+    ``text.split()`` need their own parse; NaN/inf/absurd magnitudes are
+    rejected the same way.
+    """
+    try:
+        num = float(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    if num != num or abs(num) > 1e12:  # NaN or absurd magnitude
+        return default
+    return num
+
+
+def _clamp(num: float, low: float, high: float) -> float:
+    return max(low, min(high, num))
+
+
+def _fmt_seconds(seconds) -> str:
+    """Format a duration in seconds as ``h:mm:ss`` / ``m:ss`` (— for junk)."""
+    total = int(round(safe_number(seconds)))
+    if total <= 0:
+        return "—"
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def _profile_or_empty(chat_id: int) -> Dict:
+    return database.get_fitness_profile(chat_id) or {}
+
+
+def _profile_for_plan(chat_id: int, today: date) -> Dict:
+    """Stored fitness profile, or the sensible default plan for a new user."""
+    return database.get_fitness_profile(chat_id) or fitness_plan.default_profile(
+        chat_id, today
+    )
+
+
+def _display_vdot(profile: Dict) -> float:
+    """The profile's VDOT if in range, else the default. Never raises."""
+    vdot = safe_number((profile or {}).get("vdot"), 0)
+    if fitness_plan.VDOT_MIN <= vdot <= fitness_plan.VDOT_MAX:
+        return vdot
+    return float(fitness_plan.DEFAULT_VDOT)
+
+
+def _weeks_to_race(profile: Dict, today: date) -> Optional[float]:
+    race = _iso_date((profile or {}).get("goal_race_date"))
+    if race is None:
+        return None
+    days = (race - today).days
+    if days < 0:
+        return None
+    return round(days / 7.0, 1)
+
+
+def _resolved_diet_targets(profile: Dict, latest_weight: Optional[Dict]):
+    """(mode, targets) resolving diet_mode + stored targets + latest weight."""
+    mode = (profile or {}).get("diet_mode") or "balanced"
+    weight = safe_number(latest_weight.get("weight_kg")) if latest_weight else None
+    targets = nutrition.diet_targets(
+        mode,
+        weight_kg=weight,
+        calorie_target=(profile or {}).get("target_calories"),
+        protein_g_per_kg=(profile or {}).get("protein_g_per_kg"),
+    )
+    return mode, targets
+
+
+def _today_activities(chat_id: int) -> List[Dict]:
+    today = database.user_local_now().date().isoformat()
+    return database.get_activities(chat_id, today, today)
+
+
+def _sum_active_calories(activities) -> float:
+    return sum(safe_number(a.get("active_calories")) for a in activities or [])
+
+
+def _today_consumed_calories(chat_id: int) -> float:
+    return sum(
+        safe_number(m["analysis"].get("total_calories"))
+        for m in get_todays_meals(chat_id)
+    )
+
+
+# ── /weight ────────────────────────────────────────────────────────
+def format_weight_status(chat_id: int) -> str:
+    """Latest weigh-in (with a staleness warning) plus the 7-day trend."""
+    latest = database.get_latest_body_weight(chat_id)
+    if not latest:
+        return (
+            "⚖️ <b>Weight</b>\n\nNo weigh-ins logged yet. "
+            "Send <code>/weight 72.5</code> to start."
+        )
+    kg = safe_number(latest.get("weight_kg"))
+    date_str = latest.get("date", "?")
+    lines = ["⚖️ <b>Weight</b>", "", f"Latest: <b>{kg:g} kg</b> ({_html(date_str)})"]
+
+    today = database.user_local_now().date()
+    logged = _iso_date(date_str)
+    if logged is not None:
+        age = (today - logged).days
+        if age > 14:
+            lines.append(f"⚠️ That's {age} days old — send a fresh <code>/weight</code>.")
+
+    weights = database.get_body_weights(
+        chat_id, (today - timedelta(days=7)).isoformat(), today.isoformat()
+    )
+    if len(weights) >= 2:
+        first = safe_number(weights[0].get("weight_kg"))
+        last = safe_number(weights[-1].get("weight_kg"))
+        delta = round(last - first, 1)
+        arrow = "▼" if delta < 0 else ("▲" if delta > 0 else "▬")
+        lines.append(f"7-day trend: {arrow} {delta:+g} kg ({len(weights)} weigh-ins)")
+    return "\n".join(lines)
+
+
+def _cmd_weight(bot: TelegramBot, chat_id: int, args: List[str]):
+    text_arg = " ".join(args).strip()
+    if not text_arg:
+        bot.send_message(chat_id, format_weight_status(chat_id))
+        return
+    kg = nutrition.parse_weight_kg(text_arg)
+    if kg is None:  # a bare number like "72.5" needs a unit hint to parse
+        kg = nutrition.parse_weight_kg(text_arg + " kg")
+    if kg is None:
+        bot.send_message(
+            chat_id,
+            "⚖️ I couldn't read a weight there. Try <code>/weight 72.5</code> "
+            "or <code>/weight 159 lb</code> (30–300 kg).",
+        )
+        return
+    today = database.user_local_now().date()
+    database.save_body_weight(chat_id, today.isoformat(), kg, source="telegram")
+    bot.send_message(chat_id, f"⚖️ Logged <b>{kg:g} kg</b> for {today.isoformat()}.")
+
+
+# ── /diet ──────────────────────────────────────────────────────────
+def format_diet_status(chat_id: int) -> str:
+    """Current diet mode + latest weight + resolved macro targets + disclaimer."""
+    profile = _profile_or_empty(chat_id)
+    latest = database.get_latest_body_weight(chat_id)
+    _mode, targets = _resolved_diet_targets(profile, latest)
+    label = nutrition.MODE_SPECS[targets["mode"]]["label"]
+
+    lines = ["🥗 <b>Diet plan</b>", "", f"Mode: <b>{_html(label)}</b>"]
+    if latest:
+        weight = safe_number(latest.get("weight_kg"))
+        lines.append(f"Weight: {weight:g} kg ({_html(latest.get('date', '?'))})")
+    else:
+        lines.append("Weight: <i>not logged — /weight to set</i>")
+    if not profile.get("diet_mode"):
+        lines.append(
+            "<i>(no mode set — showing balanced defaults; "
+            "/diet keto|high_protein|balanced)</i>"
+        )
+
+    calories = targets.get("calories")
+    if calories:
+        lines.append(f"Calories: <b>{int(calories):,}</b> kcal target")
+    macro_bits = []
+    for key, letter in (
+        ("target_protein_g", "P"),
+        ("target_carbs_g", "C"),
+        ("target_fat_g", "F"),
+    ):
+        val = targets.get(key)
+        if val is not None:
+            macro_bits.append(f"{letter} {int(round(val))}g")
+    if macro_bits:
+        lines.append("Targets: " + " · ".join(macro_bits))
+    split = targets.get("split") or {}
+    if split:
+        lines.append(
+            "Split: P {}% · C {}% · F {}%".format(
+                int(round(safe_number(split.get("protein")))),
+                int(round(safe_number(split.get("carbs")))),
+                int(round(safe_number(split.get("fat")))),
+            )
+        )
+    cap = targets.get("carb_cap_g")
+    if cap:
+        lines.append(f"Carb cap: {int(cap)}g")
+
+    lines.append("")
+    lines.append(f"<i>{_html(nutrition.DISCLAIMER)}</i>")
+    return "\n".join(lines)
+
+
+def _cmd_diet(bot: TelegramBot, chat_id: int, args: List[str]):
+    if not args:
+        bot.send_message(chat_id, format_diet_status(chat_id))
+        return
+    sub = args[0].lower()
+
+    if sub in nutrition.DIET_MODES:
+        database.save_fitness_profile(chat_id, diet_mode=sub)
+        label = nutrition.MODE_SPECS[sub]["label"]
+        bot.send_message(
+            chat_id,
+            f"🥗 Diet mode set to <b>{_html(label)}</b>.\n\n"
+            f"<i>{_html(nutrition.DISCLAIMER)}</i>",
+        )
+        return
+
+    if sub == "target":
+        nums = args[1:]
+        if len(nums) < 4:
+            bot.send_message(
+                chat_id,
+                "Usage: <code>/diet target &lt;cal&gt; &lt;protein_g&gt; "
+                "&lt;carbs_g&gt; &lt;fat_g&gt;</code>",
+            )
+            return
+        cal = int(round(_arg_float(nums[0])))
+        if cal <= 0:
+            bot.send_message(chat_id, "Calorie target must be a positive number.")
+            return
+        protein = int(round(_arg_float(nums[1])))
+        carbs = int(round(_arg_float(nums[2])))
+        fat = int(round(_arg_float(nums[3])))
+        database.save_fitness_profile(
+            chat_id,
+            target_calories=cal,
+            target_protein_g=protein,
+            target_carbs_g=carbs,
+            target_fat_g=fat,
+        )
+        bot.send_message(
+            chat_id,
+            f"🎯 Targets set: <b>{cal:,} kcal</b> · P {protein}g · C {carbs}g · F {fat}g.",
+        )
+        return
+
+    if sub == "protein":
+        if len(args) < 2:
+            bot.send_message(chat_id, "Usage: <code>/diet protein &lt;g_per_kg&gt;</code>")
+            return
+        ppk = round(_arg_float(args[1]), 2)
+        if ppk <= 0:
+            bot.send_message(chat_id, "Protein target must be a positive g/kg number.")
+            return
+        database.save_fitness_profile(chat_id, protein_g_per_kg=ppk)
+        bot.send_message(
+            chat_id, f"🥩 Protein target set to <b>{ppk:g} g/kg</b> of body weight."
+        )
+        return
+
+    bot.send_message(
+        chat_id,
+        "Options: <code>/diet keto|high_protein|balanced</code>, "
+        "<code>/diet target …</code>, <code>/diet protein …</code>, "
+        "or <code>/diet</code> for your current plan.",
+    )
+
+
+# ── /macros ────────────────────────────────────────────────────────
+def _macros_window(arg: str):
+    """(start_iso, end_iso, label) for a today|week|N-day selector."""
+    today = database.user_local_now().date()
+    end = today.isoformat()
+    key = (arg or "today").lower()
+    if key == "week":
+        return (today - timedelta(days=6)).isoformat(), end, "last 7 days"
+    if key != "today":
+        try:
+            days = int(key)
+        except ValueError:
+            days = 1
+        days = int(_clamp(days, 1, 31))
+        if days > 1:
+            return (today - timedelta(days=days - 1)).isoformat(), end, f"last {days} days"
+    return today.isoformat(), end, "today"
+
+
+def _cmd_macros(bot: TelegramBot, chat_id: int, args: List[str]):
+    start, end, label = _macros_window(args[0] if args else "today")
+    meals = database.get_meals(chat_id, start, end)
+    profile = _profile_or_empty(chat_id)
+    latest = database.get_latest_body_weight(chat_id)
+    mode, targets = _resolved_diet_targets(profile, latest)
+
+    nudges = []
+    if not profile.get("diet_mode"):
+        nudges.append("No diet mode set — <code>/diet balanced</code> to pick one.")
+    if not latest:
+        nudges.append("No weight logged — <code>/weight 72</code> sharpens protein targets.")
+
+    if not meals:
+        msg = (
+            f"🥗 No meals logged for {label}. Send a photo or describe a meal "
+            "to start tracking macros."
+        )
+        if nudges:
+            msg += "\n\n" + "\n".join("• " + n for n in nudges)
+        bot.send_message(chat_id, msg)
+        return
+
+    analysis = nutrition.analyze_macros(meals, targets)
+    report = nutrition.format_macro_report(analysis, targets, mode)
+    head = f"<i>Window: {label}</i>"
+    if nudges:
+        head += "\n" + "\n".join("• " + n for n in nudges)
+    bot.send_message(chat_id, head + "\n\n" + report)
+
+
+# ── /workout ───────────────────────────────────────────────────────
+def _split_workout_args(args: List[str]):
+    """Leading recognised muscle-group tokens -> groups; the rest -> notes."""
+    groups = []
+    idx = 0
+    while idx < len(args) and args[idx].strip(",").lower() in _WORKOUT_GROUP_WORDS:
+        groups.append(args[idx].strip(","))
+        idx += 1
+    if not groups:  # nothing recognised: treat the whole thing as the group name
+        return " ".join(args), ""
+    return " ".join(groups), " ".join(args[idx:])
+
+
+def _cmd_workout(bot: TelegramBot, chat_id: int, args: List[str]):
+    if not args:
+        bot.send_message(
+            chat_id,
+            "Usage: <code>/workout legs</code> or "
+            "<code>/workout chest shoulders felt strong</code>.",
+        )
+        return
+    groups, notes = _split_workout_args(args)
+    today = database.user_local_now().date().isoformat()
+    database.save_workout(
+        chat_id, today, muscle_groups=groups, notes=notes, source="telegram"
+    )
+    msg = f"💪 Logged workout: <b>{_html(groups)}</b> ({today})."
+    if notes:
+        msg += f"\n💬 {_html(notes)}"
+    bot.send_message(chat_id, msg)
+
+
+# ── /train (Feature 5) ─────────────────────────────────────────────
+def format_train_recommendation(chat_id: int) -> str:
+    """Days since each strength group was trained; recommend the most overdue."""
+    today = database.user_local_now().date()
+    workouts = database.get_workouts(
+        chat_id, (today - timedelta(days=14)).isoformat(), today.isoformat()
+    )
+    last_seen: Dict[str, date] = {}
+    for workout in workouts:
+        groups = str(workout.get("muscle_groups") or "").lower()
+        when = _iso_date(workout.get("date"))
+        if when is None:
+            continue
+        for group in FITNESS_MUSCLE_GROUPS:
+            if group in groups and (group not in last_seen or when > last_seen[group]):
+                last_seen[group] = when
+
+    lines = ["🏋️ <b>Training readiness</b>", ""]
+    scored = []  # (group, days_since_or_None)
+    for group in FITNESS_MUSCLE_GROUPS:
+        days = (today - last_seen[group]).days if group in last_seen else None
+        scored.append((group, days))
+        if days is None:
+            lines.append(f"• {group.capitalize()}: <b>not in last 14d</b>")
+        elif days == 0:
+            lines.append(f"• {group.capitalize()}: today")
+        else:
+            lines.append(f"• {group.capitalize()}: {days}d ago")
+
+    # Longest untrained: never-trained (staleness 999) outrank trained groups.
+    recommend = max(scored, key=lambda item: 999 if item[1] is None else item[1])
+    lines.append("")
+    lines.append(f"👉 Due next: <b>{recommend[0].capitalize()}</b>")
+    return "\n".join(lines)
+
+
+# ── /activity ──────────────────────────────────────────────────────
+def format_activity_status(chat_id: int) -> str:
+    """Today's activity totals plus the net (consumed − burned) line."""
+    activities = _today_activities(chat_id)
+    lines = ["🔥 <b>Today's activity</b>", ""]
+    if not activities:
+        lines.append("No activity logged yet today.")
+        lines.append(
+            "Log some with <code>/activity 450 8000 5</code> (kcal steps km)."
+        )
+        return "\n".join(lines)
+
+    burned = _sum_active_calories(activities)
+    steps_total = 0.0
+    km_total = 0.0
+    for activity in activities:
+        raw = activity.get("raw")
+        if isinstance(raw, dict):
+            steps_total += safe_number(raw.get("steps"))
+        km_total += safe_number(activity.get("distance_km"))
+
+    lines.append(f"Burned: <b>{int(round(burned)):,} kcal</b>")
+    if steps_total:
+        lines.append(f"Steps: {int(round(steps_total)):,}")
+    if km_total:
+        lines.append(f"Distance: {km_total:g} km")
+
+    consumed = _today_consumed_calories(chat_id)
+    net = consumed - burned
+    lines.append("")
+    lines.append(
+        f"⚖️ Net: <b>{int(round(net)):,} kcal</b> "
+        f"({int(round(consumed)):,} eaten − {int(round(burned)):,} burned)"
+    )
+    return "\n".join(lines)
+
+
+def _cmd_activity(bot: TelegramBot, chat_id: int, args: List[str]):
+    if not args:
+        bot.send_message(chat_id, format_activity_status(chat_id))
+        return
+
+    today = database.user_local_now().date().isoformat()
+
+    # Date form: /activity <YYYY-MM-DD> <kcal>
+    if _ISO_DATE_RE.match(args[0]):
+        when = _iso_date(args[0])
+        if when is None:
+            bot.send_message(
+                chat_id, "That date isn't valid. Use <code>/activity 2026-07-13 450</code>."
+            )
+            return
+        if len(args) < 2:
+            bot.send_message(
+                chat_id,
+                "Add the burned calories: <code>/activity 2026-07-13 450</code>.",
+            )
+            return
+        kcal = _clamp(_arg_float(args[1]), 0, ACTIVITY_KCAL_MAX)
+        database.save_activity(
+            chat_id, when.isoformat(), source="manual",
+            activity_type="manual", active_calories=kcal,
+        )
+        bot.send_message(
+            chat_id,
+            f"🔥 Logged <b>{int(round(kcal)):,} kcal</b> burned on {when.isoformat()}.",
+        )
+        return
+
+    # Positional: /activity [kcal] [steps] [km]
+    kcal = _clamp(_arg_float(args[0]), 0, ACTIVITY_KCAL_MAX) if len(args) >= 1 else 0
+    steps = int(round(_clamp(_arg_float(args[1]), 0, ACTIVITY_STEPS_MAX))) if len(args) >= 2 else None
+    km = _clamp(_arg_float(args[2]), 0, ACTIVITY_KM_MAX) if len(args) >= 3 else None
+    raw = {"steps": steps} if steps else None
+    database.save_activity(
+        chat_id, today, source="manual", activity_type="manual",
+        active_calories=kcal or None,
+        distance_km=km if km else None,
+        raw=raw,
+    )
+    bits = [f"{int(round(kcal)):,} kcal"]
+    if steps:
+        bits.append(f"{steps:,} steps")
+    if km:
+        bits.append(f"{km:g} km")
+    bot.send_message(chat_id, "🔥 Logged activity: " + " · ".join(bits) + f" ({today}).")
+
+
+# ── /train_run ─────────────────────────────────────────────────────
+def _parse_race_distance(token):
+    """(meters, label) for a race-distance token like '5k'/'marathon', or (None, None)."""
+    text = str(token or "").strip().lower()
+    named = {
+        "marathon": (42195.0, "Marathon"),
+        "full": (42195.0, "Marathon"),
+        "half": (21097.5, "Half marathon"),
+        "half-marathon": (21097.5, "Half marathon"),
+        "halfmarathon": (21097.5, "Half marathon"),
+        "mile": (1609.344, "Mile"),
+    }
+    if text in named:
+        return named[text]
+    match = re.match(r"^(\d+(?:\.\d+)?)\s*(k|km|m|mi|mile|miles)?$", text)
+    if not match:
+        return None, None
+    value = float(match.group(1))
+    unit = match.group(2) or "k"
+    if unit in ("k", "km"):
+        meters, label = value * 1000.0, f"{value:g}K"
+    elif unit == "m":
+        meters, label = value, f"{value:g}m"
+    else:  # mi / mile / miles
+        meters, label = value * fitness_plan.KM_PER_MILE * 1000.0, f"{value:g}mi"
+    if meters <= 0:
+        return None, None
+    return meters, label
+
+
+def _parse_race_time(token) -> Optional[float]:
+    """'mm:ss' / 'hh:mm:ss' / bare seconds -> total seconds, or None."""
+    text = str(token or "").strip()
+    if not text:
+        return None
+    if ":" in text:
+        parts = text.split(":")
+        if len(parts) > 3:
+            return None
+        try:
+            nums = [float(p) for p in parts]
+        except ValueError:
+            return None
+        seconds = 0.0
+        for num in nums:
+            seconds = seconds * 60 + num
+        return seconds if seconds > 0 else None
+    value = _arg_float(text, 0)
+    return value if value > 0 else None
+
+
+def format_todays_run(chat_id: int) -> str:
+    """Today's prescribed run for the user's plan (default plan if none set)."""
+    today = database.user_local_now().date()
+    profile = _profile_for_plan(chat_id, today)
+    workout = fitness_plan.todays_workout(profile, today)
+    phase = fitness_plan.phase_for_date(profile, today)
+    vdot = _display_vdot(profile)
+    lines = [
+        f"🏃 <b>Today's run — {today.strftime('%A')}</b>",
+        "",
+        _html(workout),
+        "",
+        f"Phase: {phase} · VDOT {vdot:g}",
+    ]
+    weeks = _weeks_to_race(profile, today)
+    if weeks is not None:
+        lines.append(f"Race in ~{weeks:g} weeks")
+    return "\n".join(lines)
+
+
+def _cmd_train_run(bot: TelegramBot, chat_id: int, args: List[str]):
+    if not args:
+        bot.send_message(chat_id, format_todays_run(chat_id))
+        return
+    sub = args[0].lower()
+
+    if sub == "vdot":
+        if len(args) < 2:
+            bot.send_message(chat_id, "Usage: <code>/train_run vdot 50</code>.")
+            return
+        vdot = _arg_float(args[1], 0)
+        if not (fitness_plan.VDOT_MIN <= vdot <= fitness_plan.VDOT_MAX):
+            bot.send_message(
+                chat_id,
+                f"VDOT must be between {int(fitness_plan.VDOT_MIN)} "
+                f"and {int(fitness_plan.VDOT_MAX)}.",
+            )
+            return
+        database.save_fitness_profile(chat_id, vdot=float(vdot))
+        bot.send_message(chat_id, f"🏃 VDOT set to <b>{vdot:g}</b>. Training paces updated.")
+        return
+
+    if sub == "race":
+        when = _iso_date(args[1]) if len(args) >= 2 and _ISO_DATE_RE.match(args[1]) else None
+        if when is None:
+            bot.send_message(chat_id, "Usage: <code>/train_run race 2026-10-01</code>.")
+            return
+        database.save_fitness_profile(chat_id, goal_race_date=when.isoformat())
+        bot.send_message(chat_id, f"📅 Goal race date set to <b>{when.isoformat()}</b>.")
+        return
+
+    # /train_run <distance> <time>  -> compute & store VDOT
+    if len(args) >= 2:
+        meters, label = _parse_race_distance(args[0])
+        seconds = _parse_race_time(args[1])
+        if meters is not None and seconds is not None:
+            vdot = fitness_plan.vdot_from_race(meters, seconds)
+            if vdot is None:
+                bot.send_message(
+                    chat_id,
+                    "Couldn't compute VDOT from that race. Check the distance and time.",
+                )
+                return
+            vdot = round(vdot, 1)
+            database.save_fitness_profile(
+                chat_id,
+                vdot=float(vdot),
+                race_distance_km=meters / 1000.0,
+                race_time_seconds=int(round(seconds)),
+                race_label=label,
+            )
+            bot.send_message(
+                chat_id,
+                f"🏃 Computed <b>VDOT {vdot:g}</b> from {_html(label)} "
+                f"in {_html(args[1])}.\nTraining paces updated.",
+            )
+            return
+
+    bot.send_message(
+        chat_id,
+        "Try <code>/train_run</code>, <code>/train_run 5k 19:57</code>, "
+        "<code>/train_run vdot 50</code>, or <code>/train_run race 2026-10-01</code>.",
+    )
+
+
+# ── /plan ──────────────────────────────────────────────────────────
+def format_week_plan(chat_id: int) -> str:
+    """This week's Mon–Sun schedule (today marked) + phase + paces + VDOT."""
+    today = database.user_local_now().date()
+    profile = _profile_for_plan(chat_id, today)
+    plan = fitness_plan.week_plan(profile, today)
+    phase = fitness_plan.phase_for_date(profile, today)
+    vdot = _display_vdot(profile)
+    paces = fitness_plan.paces_from_vdot(vdot)
+    today_name = today.strftime("%A")
+
+    lines = [f"📅 <b>This week — {phase} phase</b>", ""]
+    for day_name, workout in plan:
+        if day_name == today_name:
+            lines.append(f"👉 <b>{day_name[:3]}</b>: {_html(workout)}")
+        else:
+            lines.append(f"   {day_name[:3]}: {_html(workout)}")
+
+    lines.append("")
+    lines.append(f"VDOT {vdot:g}")
+    lines.append(
+        "Paces/km — E {} · M {} · T {} · I {} · R {}".format(
+            fitness_plan.format_pace(paces["E"]),
+            fitness_plan.format_pace(paces["M"]),
+            fitness_plan.format_pace(paces["T"]),
+            fitness_plan.format_pace(paces["I"]),
+            fitness_plan.format_pace(paces["R"]),
+        )
+    )
+    weeks = _weeks_to_race(profile, today)
+    if weeks is not None:
+        lines.append(f"Weeks to race: ~{weeks:g}")
+    return "\n".join(lines)
+
+
+# ── /profile ───────────────────────────────────────────────────────
+def format_fitness_profile(chat_id: int) -> str:
+    """Pretty-print the merged fitness profile: diet + targets + VDOT + race."""
+    profile = database.get_fitness_profile(chat_id)
+    lines = ["🧾 <b>Fitness profile</b>", ""]
+    if not profile:
+        lines.append("No profile yet. Set one with /diet, /weight, or /train_run.")
+        return "\n".join(lines)
+
+    mode = profile.get("diet_mode")
+    label = nutrition.MODE_SPECS.get(mode, {}).get("label") if mode else None
+    lines.append("<b>Diet</b>")
+    lines.append(f"• Mode: {_html(label) if label else '—'}")
+    tcals = profile.get("target_calories")
+    lines.append(f"• Calorie target: {int(tcals):,} kcal" if tcals else "• Calorie target: —")
+    macro_bits = []
+    for key, letter in (
+        ("target_protein_g", "P"),
+        ("target_carbs_g", "C"),
+        ("target_fat_g", "F"),
+    ):
+        val = profile.get(key)
+        if val:
+            macro_bits.append(f"{letter} {int(val)}g")
+    lines.append("• Macro targets: " + (" · ".join(macro_bits) if macro_bits else "—"))
+    ppk = profile.get("protein_g_per_kg")
+    if ppk:
+        lines.append(f"• Protein: {safe_number(ppk):g} g/kg")
+
+    latest = database.get_latest_body_weight(chat_id)
+    goal_weight = profile.get("goal_weight_kg")
+    if latest or goal_weight:
+        lines.append("")
+        lines.append("<b>Weight</b>")
+        if latest:
+            lines.append(
+                f"• Latest: {safe_number(latest.get('weight_kg')):g} kg "
+                f"({_html(latest.get('date', '?'))})"
+            )
+        if goal_weight:
+            lines.append(f"• Goal: {safe_number(goal_weight):g} kg")
+
+    lines.append("")
+    lines.append("<b>Running</b>")
+    vdot = profile.get("vdot")
+    lines.append(
+        f"• VDOT: {safe_number(vdot):g}" if vdot
+        else f"• VDOT: {fitness_plan.DEFAULT_VDOT} (default)"
+    )
+    race_label = profile.get("race_label")
+    race_time = profile.get("race_time_seconds")
+    if race_label and race_time:
+        lines.append(f"• Best: {_html(race_label)} in {_fmt_seconds(race_time)}")
+    race_date = profile.get("goal_race_date")
+    if race_date:
+        lines.append(f"• Goal race: {_html(race_date)}")
+
+    lines.append("")
+    lines.append(f"<i>{_html(nutrition.DISCLAIMER)}</i>")
+    return "\n".join(lines)
+
+
+def _maybe_answer_fitness_query(bot: TelegramBot, chat_id: int, text: str) -> bool:
+    """Answer read-only run/macro/plan questions with ZERO Gemini spend.
+
+    Returns True when it handled the message (so the caller returns before any
+    Gemini call), keeping these working during a quota pause too.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return False
+    if _RUN_QUERY_RE.search(text):
+        bot.send_message(chat_id, format_todays_run(chat_id))
+        log.info("  🏃 Deterministic run query answered (no Gemini spend)")
+        return True
+    if _MACRO_QUERY_RE.search(text):
+        _cmd_macros(bot, chat_id, ["today"])
+        log.info("  🥗 Deterministic macro query answered (no Gemini spend)")
+        return True
+    if _PLAN_QUERY_RE.search(text):
+        bot.send_message(chat_id, format_week_plan(chat_id))
+        log.info("  📅 Deterministic plan query answered (no Gemini spend)")
+        return True
+    return False
+
+
 def format_today_summary(chat_id: int) -> str:
     """Format today's calorie & macro summary."""
     meals = get_todays_meals(chat_id)
@@ -2221,6 +3025,12 @@ def format_today_summary(chat_id: int) -> str:
         f"🧈 Fat: {total_f}g",
         f"📸 Meals: {len(meals)}",
     ]
+
+    # Net line only when the user actually burned something today.
+    burned = _sum_active_calories(_today_activities(chat_id))
+    if burned > 0:
+        lines.append(f"🔥 Burned: {int(round(burned)):,} kcal")
+        lines.append(f"⚖️ Net: <b>{int(round(total_cal - burned)):,} kcal</b>")
 
     # Typical-day comparison over the prior 7 user-local days (today excluded).
     # Median rather than mean: under-logged days would bias a mean low.
@@ -2326,6 +3136,12 @@ def handle_text_message(
     text: str,
 ):
     """Process a text message as either a new meal, correction, or chat."""
+    # Deterministic fast-path: read-only run/macro/plan questions are answered
+    # from the pure planners with ZERO Gemini spend (before the pause check, so
+    # they still work during a quota pause).
+    if _maybe_answer_fitness_query(bot, chat_id, text):
+        return
+
     pause_summary = _gemini_quota_pause_summary()
     if pause_summary:
         bot.send_message(
@@ -2486,6 +3302,53 @@ def handle_text_message(
             bot.send_message(chat_id, "✅ Added new manual meal:\n\n" + result_text)
         else:
             bot.send_message(chat_id, "🚫 I couldn't detect food in that description.")
+
+    elif intent == "log_weight":
+        kg = nutrition.parse_weight_kg(text)
+        if kg is None:  # fall back to the model's structured field
+            field = safe_number(result.get("weight_kg"), 0)
+            if 30 <= field <= 300:
+                kg = round(field, 1)
+        if kg is None:
+            bot.send_message(
+                chat_id,
+                "⚖️ I couldn't read a valid body weight (30–300 kg). "
+                "Try “I weigh 72.5 kg”.",
+            )
+            return
+        today = database.user_local_now().date()
+        database.save_body_weight(chat_id, today.isoformat(), kg, source="telegram")
+        bot.send_message(chat_id, f"⚖️ Logged <b>{kg:g} kg</b> for {today.isoformat()}.")
+        log.info(f"  ⚖️ NL weight logged: {kg} kg")
+
+    elif intent == "log_activity":
+        kcal = _clamp(safe_number(result.get("active_calories")), 0, ACTIVITY_KCAL_MAX)
+        steps = int(round(_clamp(safe_number(result.get("steps")), 0, ACTIVITY_STEPS_MAX)))
+        km = _clamp(safe_number(result.get("distance_km")), 0, ACTIVITY_KM_MAX)
+        if kcal <= 0 and steps <= 0 and km <= 0:
+            bot.send_message(
+                chat_id,
+                "🏃 I couldn't find any activity numbers to log. "
+                "Try “burned 450 kcal running 5 km”.",
+            )
+            return
+        today = database.user_local_now().date()
+        raw = {"steps": steps} if steps else None
+        database.save_activity(
+            chat_id, today.isoformat(), source="manual", activity_type="manual",
+            active_calories=kcal or None, distance_km=km or None, raw=raw,
+        )
+        bits = []
+        if kcal > 0:
+            bits.append(f"{int(round(kcal)):,} kcal")
+        if steps > 0:
+            bits.append(f"{steps:,} steps")
+        if km > 0:
+            bits.append(f"{km:g} km")
+        bot.send_message(
+            chat_id, "🏃 Logged activity: " + " · ".join(bits) + f" ({today.isoformat()})."
+        )
+        log.info(f"  🏃 NL activity logged: {bits}")
 
     else:
         # chat
@@ -3063,6 +3926,52 @@ def main():
                 if command == "/stats":
                     log.info(f"[{user}] /stats")
                     bot.send_message(chat_id, format_database_stats(chat_id))
+                    continue
+
+                # ─── Fitness & diet (pure DB + arithmetic, no Gemini) ──
+                if command == "/weight":
+                    log.info(f"[{user}] /weight {' '.join(args)}".rstrip())
+                    _cmd_weight(bot, chat_id, args)
+                    continue
+
+                if command == "/diet":
+                    log.info(f"[{user}] /diet {' '.join(args)}".rstrip())
+                    _cmd_diet(bot, chat_id, args)
+                    continue
+
+                if command == "/macros":
+                    log.info(f"[{user}] /macros {' '.join(args)}".rstrip())
+                    _cmd_macros(bot, chat_id, args)
+                    continue
+
+                if command == "/workout":
+                    log.info(f"[{user}] /workout {' '.join(args)}".rstrip())
+                    _cmd_workout(bot, chat_id, args)
+                    continue
+
+                if command == "/train":
+                    log.info(f"[{user}] /train")
+                    bot.send_message(chat_id, format_train_recommendation(chat_id))
+                    continue
+
+                if command == "/activity":
+                    log.info(f"[{user}] /activity {' '.join(args)}".rstrip())
+                    _cmd_activity(bot, chat_id, args)
+                    continue
+
+                if command == "/train_run":
+                    log.info(f"[{user}] /train_run {' '.join(args)}".rstrip())
+                    _cmd_train_run(bot, chat_id, args)
+                    continue
+
+                if command == "/plan":
+                    log.info(f"[{user}] /plan")
+                    bot.send_message(chat_id, format_week_plan(chat_id))
+                    continue
+
+                if command == "/profile":
+                    log.info(f"[{user}] /profile")
+                    bot.send_message(chat_id, format_fitness_profile(chat_id))
                     continue
 
                 # ─── Handle photos ────────────────────────────────
