@@ -825,3 +825,269 @@ def test_record_activity_health_wrapper_writes_file(monkeypatch, tmp_path):
     data = json.loads(health_path.read_text())
     assert data["activity"]["last_ok"] is True
     assert data["activity"]["last_source"] == "garmin"
+
+
+# ─── Weight slope arithmetic ───────────────────────────────────────
+import re as _re
+from html import unescape as _unescape
+
+import pytest
+
+
+def _seed_weights(monkeypatch, rows):
+    """Point both weight accessors at a fixed weigh-in series."""
+    monkeypatch.setattr(
+        daily_report.database, "get_latest_body_weight",
+        lambda cid: rows[-1] if rows else None,
+    )
+    monkeypatch.setattr(daily_report.database, "get_body_weights", lambda *a, **k: list(rows))
+
+
+def test_weight_trend_matches_hand_computed_linear_series(monkeypatch):
+    # Robert drops exactly 0.1 kg/day for a week; the least-squares fit over
+    # all 7 points must print the hand-computed -0.70 kg/wk, not just the
+    # endpoint delta.
+    series = [
+        {"date": f"2026-06-{19 + i}", "weight_kg": round(72.0 - 0.1 * i, 1)}
+        for i in range(7)
+    ]
+    _patch_meals(monkeypatch, [_meal(calories=500)])
+    _no_fitness_data(monkeypatch)
+    _seed_weights(monkeypatch, series)
+
+    report = daily_report.generate_report("2026-06-25")
+
+    assert "Latest: <b>71.4 kg</b>" in report
+    assert "7-day trend: ⬇️ -0.70 kg/wk" in report
+
+
+def test_weight_section_single_weigh_in_shows_latest_without_trend(monkeypatch):
+    # One weigh-in cannot define a slope: the section renders the weight but
+    # must not fabricate a kg/wk line.
+    _patch_meals(monkeypatch, [_meal(calories=500)])
+    _no_fitness_data(monkeypatch)
+    _seed_weights(monkeypatch, [{"date": "2026-06-25", "weight_kg": 71.8}])
+
+    report = daily_report.generate_report("2026-06-25")
+
+    assert "⚖️ Weight" in report
+    assert "Latest: <b>71.8 kg</b>" in report
+    assert "kg/wk" not in report
+
+
+def test_weight_trend_pins_outlier_arithmetic_at_300kg_boundary(monkeypatch):
+    # PINS current behavior: one 300 kg entry (the exact upper bound the
+    # /weight parser accepts, i.e. a plausible fat-finger) swings the fitted
+    # trend to a physically impossible -57.75 kg/wk. Least squares:
+    # mean_y = 730.1/7, slope/day = -231.0/28 = -8.25 -> *7 = -57.75.
+    series = [
+        {"date": f"2026-06-{19 + i}", "weight_kg": round(72.0 - 0.1 * i, 1)}
+        for i in range(7)
+    ]
+    series[2] = {"date": "2026-06-21", "weight_kg": 300.0}
+    _patch_meals(monkeypatch, [_meal(calories=500)])
+    _no_fitness_data(monkeypatch)
+    _seed_weights(monkeypatch, series)
+
+    report = daily_report.generate_report("2026-06-25")
+
+    assert "7-day trend: ⬇️ -57.75 kg/wk" in report
+
+
+@pytest.mark.parametrize("rows,expected", [
+    ([], None),                                                    # nothing logged
+    ([{"date": "2026-06-25", "weight_kg": 71.8}], None),           # one point: no slope
+    ([{"date": "2026-06-25", "weight_kg": 72.0},                   # same-day pair:
+      {"date": "2026-06-25", "weight_kg": 71.0}], None),           # zero-denominator guard
+    ([{"date": "junk", "weight_kg": 72.0},                         # unusable rows leave
+      {"date": "2026-06-25", "weight_kg": None},                   # <2 points -> None
+      {"date": "2026-06-24", "weight_kg": 71.8}], None),
+    ([{"date": "2026-06-24", "weight_kg": -5},                     # non-positive kg skipped
+      {"date": "2026-06-25", "weight_kg": 71.8}], None),
+    ([{"date": "2026-06-18", "weight_kg": 72.0},                   # 0.7 kg over 7 days
+      {"date": "2026-06-25", "weight_kg": 71.3}], -0.7),
+])
+def test_weekly_weight_slope_contract(rows, expected):
+    # The slope helper must degrade to None (not crash, not divide by zero)
+    # on every sparse/junk series a real body_weight table can contain.
+    assert daily_report._weekly_weight_slope(rows) == expected
+
+
+# ─── Section combinatorics ─────────────────────────────────────────
+_SECTION_MARKERS = {
+    "diet": "🥗 Macro check",
+    "energy": "⚡ Energy Balance",
+    "weight": "⚖️ Weight",
+    "training": "🏃 Today's Training",
+}
+
+
+@pytest.mark.parametrize("seed_diet,seed_activity,seed_weight,expected", [
+    (False, False, "fresh", {"weight", "training"}),
+    (False, True,  None,    {"energy", "training"}),
+    (True,  False, None,    {"diet", "training"}),
+    # A weigh-in outside the trailing 7-day window still marks a fitness user
+    # (training renders) but must not produce an empty Weight section.
+    (False, False, "stale", {"training"}),
+    (True,  True,  "fresh", {"diet", "energy", "weight", "training"}),
+], ids=["weight-only", "activity-only", "diet-only", "stale-weight-only", "all-sections"])
+def test_fitness_section_combinatorics(monkeypatch, seed_diet, seed_activity, seed_weight, expected):
+    # Exactly the sections whose data exists may render; a partial fitness
+    # footprint must not drag in empty sibling sections.
+    monkeypatch.delenv("GARMIN_NET_USE_TOTAL", raising=False)
+    _patch_meals(monkeypatch, [_meal(calories=500)])
+    _no_fitness_data(monkeypatch)
+
+    if seed_diet:
+        monkeypatch.setattr(
+            daily_report.database, "get_fitness_profile", lambda cid: {"diet_mode": "keto"}
+        )
+    if seed_activity:
+        monkeypatch.setattr(
+            daily_report.database, "get_activities",
+            lambda *a, **k: [{"active_calories": 450, "distance_km": 8.0, "raw": {"steps": 9000}}],
+        )
+    if seed_weight == "fresh":
+        _seed_weights(monkeypatch, [{"date": "2026-06-25", "weight_kg": 79.3}])
+    elif seed_weight == "stale":
+        # Latest weigh-in exists but is outside the report's 7-day window.
+        monkeypatch.setattr(
+            daily_report.database, "get_latest_body_weight",
+            lambda cid: {"weight_kg": 79.3, "date": "2026-05-01"},
+        )
+        monkeypatch.setattr(daily_report.database, "get_body_weights", lambda *a, **k: [])
+
+    report = daily_report.generate_report("2026-06-25")
+
+    assert "Daily Summary" in report  # the core report always renders
+    for key, marker in _SECTION_MARKERS.items():
+        if key in expected:
+            assert marker in report, f"expected section {key} missing"
+        else:
+            assert marker not in report, f"unexpected section {key} rendered"
+
+
+# ─── Net arithmetic exactness ──────────────────────────────────────
+
+def test_energy_balance_net_thousands_separator_and_multi_row_sum(monkeypatch):
+    # Garmin sync + a manual entry on the same day must SUM (640 total burn),
+    # and consumed 1850 − active 640 = 1210 renders with a thousands separator.
+    monkeypatch.delenv("GARMIN_NET_USE_TOTAL", raising=False)
+    _patch_meals(monkeypatch, [
+        _meal(description="Breakfast", calories=620, time="08:30"),
+        _meal(description="Dinner", calories=1230, time="19:00"),
+    ])
+    _no_fitness_data(monkeypatch)
+    monkeypatch.setattr(
+        daily_report.database, "get_activities",
+        lambda *a, **k: [
+            {"active_calories": 400, "distance_km": 5.2, "raw": {"steps": 7500}},
+            {"active_calories": 240, "distance_km": 4.0, "raw": {"steps": 4500}},
+        ],
+    )
+
+    report = daily_report.generate_report("2026-06-25")
+
+    assert "🔥 Active burn: ~640 kcal" in report
+    assert "👟 Steps: 12,000" in report
+    assert "📏 Distance: 9.2 km" in report
+    assert "⚖️ Net: ~1,210 kcal (consumed − active burn)" in report
+
+
+@pytest.mark.parametrize("env_value,basis", [
+    ("true", "total"), ("YES", "total"), (" on ", "total"), ("y", "total"),
+    ("0", "active"), ("false", "active"), ("off", "active"), ("", "active"),
+    ("2", "active"),  # only the documented truthy spellings enable total basis
+])
+def test_net_basis_env_spellings(monkeypatch, env_value, basis):
+    # A half-set env var ("0", "false") must NOT silently flip the net basis:
+    # only documented truthy spellings switch to total burn.
+    monkeypatch.setenv("GARMIN_NET_USE_TOTAL", env_value)
+    _patch_meals(monkeypatch, [_meal(calories=2000)])
+    _no_fitness_data(monkeypatch)
+    monkeypatch.setattr(
+        daily_report.database, "get_activities",
+        lambda *a, **k: [{"active_calories": 450, "raw": {"total_calories": 2600}}],
+    )
+
+    report = daily_report.generate_report("2026-06-25")
+
+    if basis == "total":
+        assert "Net: ~-600 kcal (consumed − total burn)" in report
+    else:
+        assert "Net: ~1,550 kcal (consumed − active burn)" in report
+
+
+# ─── WeChat / plain-text mirror ────────────────────────────────────
+
+def test_html_to_plain_full_fitness_report_keeps_numbers_and_drops_tags(monkeypatch):
+    # The WeChat mirror must carry every figure of the full fitness report
+    # (calories, weight, burn, steps, distance, net, paces) and none of the
+    # Telegram HTML markup.
+    monkeypatch.delenv("GARMIN_NET_USE_TOTAL", raising=False)
+    items = [{"name": "Chicken & rice", "estimated_calories": 1850,
+              "protein_g": 125, "carbs_g": 140, "fat_g": 65}]
+    _patch_meals(monkeypatch, [_meal(description="Chicken & rice", calories=1850,
+                                     protein=125, carbs=140, fat=65, items=items)])
+    _no_fitness_data(monkeypatch)
+    monkeypatch.setattr(
+        daily_report.database, "get_fitness_profile",
+        lambda cid: {"diet_mode": "high_protein", "vdot": 50.0,
+                     "goal_race_date": "2026-07-28", "race_label": "Marathon",
+                     "long_run_day": 6},
+    )
+    _seed_weights(monkeypatch, [
+        {"date": "2026-07-08", "weight_kg": 72.5},
+        {"date": "2026-07-14", "weight_kg": 71.8},
+    ])
+    monkeypatch.setattr(
+        daily_report.database, "get_activities",
+        lambda *a, **k: [{"active_calories": 640, "distance_km": 9.2, "raw": {"steps": 12000}}],
+    )
+
+    report = daily_report.generate_report("2026-07-14")
+    for marker in _SECTION_MARKERS.values():
+        assert marker in report  # all four sections participate
+
+    plain = daily_report._html_to_plain(report)
+
+    # Independent oracle: strip tags generically and unescape; the number
+    # stream (order included) must be identical in the plain mirror.
+    num_re = _re.compile(r"\d[\d,.:]*")
+    expected_numbers = num_re.findall(_unescape(_re.sub(r"<[^>]+>", "", report)))
+    assert num_re.findall(plain) == expected_numbers
+
+    # Spot-check the load-bearing figures a WeChat reader acts on.
+    for figure in ("1,850", "71.8", "640", "12,000", "9.2", "1,210", "-0.82 kg/wk"):
+        assert figure in plain
+
+    # Every Telegram tag is gone and entities are back to literal text.
+    assert not _re.search(r"</?(?:b|i|u|s|code|pre|a)\b", plain)
+    assert "&amp;" not in plain and "&lt;" not in plain
+    assert "Chicken & rice" in plain
+
+
+# ─── Report vs /macros target consistency ──────────────────────────
+
+@pytest.mark.xfail(strict=False, reason="BUG: daily_report._fitness_sections ignores stored protein_g_per_kg/target_calories so the nightly report and /macros disagree on targets")
+def test_report_macro_targets_honor_stored_profile_overrides(monkeypatch):
+    # Robert runs /diet protein 2.2 and /diet target 2400 …; /macros then
+    # targets 158 g protein and 2,400 kcal, but the nightly report recomputes
+    # from the bare mode defaults (2.0 g/kg, no calorie target) — the two
+    # surfaces show different targets for the same day.
+    _patch_meals(monkeypatch, [_meal(calories=500, protein=30, carbs=40, fat=15)])
+    _no_fitness_data(monkeypatch)
+    monkeypatch.setattr(
+        daily_report.database, "get_fitness_profile",
+        lambda cid: {"diet_mode": "high_protein", "protein_g_per_kg": 2.2,
+                     "target_calories": 2400},
+    )
+    monkeypatch.setattr(
+        daily_report.database, "get_latest_body_weight",
+        lambda cid: {"weight_kg": 71.8, "date": "2026-06-25"},
+    )
+
+    report = daily_report.generate_report("2026-06-25")
+
+    assert "/ 158g" in report                          # round(2.2 * 71.8)
+    assert "Calories: <b>500</b> / 2,400 kcal" in report

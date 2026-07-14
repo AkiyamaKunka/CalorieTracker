@@ -1208,3 +1208,489 @@ def test_fitness_prefetch_does_not_hijack_activity_logs(mock_db, monkeypatch):
     # But the genuine read queries are still caught.
     assert telegram_bot._maybe_answer_fitness_query(bot, CHAT, "what should I run today?") is True
     assert telegram_bot._maybe_answer_fitness_query(bot, CHAT, "how's my protein?") is True
+
+
+# ═══ Deep-review additions (append-only) ═══════════════════════════
+# Command-arg fuzz, HTML injection, quota-pause resilience, hostile NL
+# payloads, intent interplay, edit-window boundaries and /today net math.
+
+def _no_pause(monkeypatch):
+    monkeypatch.setattr(telegram_bot, "_gemini_quota_pause_summary", lambda: None)
+
+
+def _counting_client(payload):
+    """A Gemini stub that records every generate_content call it receives."""
+    calls = []
+
+    class _Models:
+        def generate_content(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(text=json.dumps(payload))
+
+    return SimpleNamespace(models=_Models()), calls
+
+
+# ── /weight arg fuzz ────────────────────────────────────────────────
+@pytest.mark.parametrize("args", [["-5"], ["1e400"], ["NaN"], ["72,5"], ["abc", "kg"]])
+def test_weight_junk_args_rejected_and_db_untouched(mock_db, monkeypatch, args):
+    """Negative, overflow, NaN, and comma-decimal junk must all reply with the
+    usage hint and never write a body_weight row (a phantom weigh-in would
+    poison the 7-day trend Robert reads every morning)."""
+    _stable_tz(monkeypatch)
+    bot = FakeBot()
+    telegram_bot._cmd_weight(bot, CHAT, args)
+    assert database.get_latest_body_weight(CHAT) is None
+    assert any("couldn't read a weight" in m["text"] for m in bot.sent)
+
+
+def test_weight_fullwidth_unicode_digits_are_understood(mock_db, monkeypatch):
+    # A Chinese-locale keyboard emits fullwidth digits; they parse to the
+    # same number instead of bouncing with a confusing error.
+    _stable_tz(monkeypatch)
+    bot = FakeBot()
+    telegram_bot._cmd_weight(bot, CHAT, ["７２.５"])
+    latest = database.get_latest_body_weight(CHAT)
+    assert latest is not None
+    assert latest["weight_kg"] == 72.5
+
+
+@pytest.mark.xfail(strict=False, reason="BUG: _WEIGHT_UNIT_RE extracts the exponent digits of scientific notation, so '/weight 1e72' silently logs 72 kg")
+def test_weight_scientific_notation_junk_is_not_misread_as_weight(mock_db, monkeypatch):
+    # '1e400' is only rejected because 400 > 300; '1e72' lands in range and
+    # writes a bogus weigh-in the user never entered.
+    _stable_tz(monkeypatch)
+    bot = FakeBot()
+    telegram_bot._cmd_weight(bot, CHAT, ["1e72"])
+    assert database.get_latest_body_weight(CHAT) is None
+
+
+def test_weight_no_args_shows_status_without_writing(mock_db, monkeypatch):
+    _stable_tz(monkeypatch)
+    bot = FakeBot()
+    telegram_bot._cmd_weight(bot, CHAT, [])
+    assert "No weigh-ins logged yet" in bot.sent[-1]["text"]
+    assert database.get_latest_body_weight(CHAT) is None
+
+
+# ── /train_run arg fuzz ─────────────────────────────────────────────
+@pytest.mark.parametrize("args", [
+    ["19:99"],              # bare time with no distance
+    ["abc"],
+    ["5k"],                 # distance alone
+    ["5k", "0:00"],         # zero time would divide-by-zero in VDOT math
+    ["5k", "abc"],
+    ["5k", "-19:30"],       # negative total seconds
+    ["0k", "19:00"],        # zero distance
+    ["-5k", "19:00"],
+    ["vdot"],
+    ["vdot", "999"],        # far outside the 20..85 physical range
+    ["vdot", "abc"],
+    ["race", "not-a-date"],
+    ["race", "2026-13-45"], # ISO-shaped but impossible calendar date
+])
+def test_train_run_junk_args_reply_helpfully_and_write_nothing(mock_db, monkeypatch, args):
+    """Every malformed /train_run form must answer with usage help and leave
+    the fitness profile unwritten — a garbage VDOT or race would corrupt every
+    subsequent pace in /plan."""
+    _stable_tz(monkeypatch)
+    bot = FakeBot()
+    telegram_bot._cmd_train_run(bot, CHAT, args)
+    assert database.get_fitness_profile(CHAT) is None
+    assert bot.sent  # always answers, never goes silent
+
+
+def test_train_run_marathon_sub3_computes_daniels_vdot(mock_db, monkeypatch):
+    """Robert's actual use case: a 2:59:59 marathon stores the exact seconds,
+    the Marathon label, and a Daniels VDOT in the low-to-mid 50s."""
+    _stable_tz(monkeypatch)
+    bot = FakeBot()
+    telegram_bot._cmd_train_run(bot, CHAT, ["marathon", "2:59:59"])
+    profile = database.get_fitness_profile(CHAT)
+    assert profile["race_label"] == "Marathon"
+    assert profile["race_time_seconds"] == 10799
+    assert abs(profile["race_distance_km"] - 42.195) < 0.001
+    assert 52.0 <= profile["vdot"] <= 56.0
+    reply = bot.sent[-1]["text"]
+    assert "VDOT" in reply
+    assert "Marathon" in reply
+
+
+@pytest.mark.xfail(strict=False, reason="BUG: _parse_race_time accepts second fields >= 60, so '/train_run 5k 19:99' silently stores a 20:39 race and a wrong VDOT")
+def test_train_run_rejects_impossible_seconds_field(mock_db, monkeypatch):
+    # 19:99 is never a real race time; treating it as 1239 s trains the user
+    # at paces derived from a race they did not run.
+    _stable_tz(monkeypatch)
+    bot = FakeBot()
+    telegram_bot._cmd_train_run(bot, CHAT, ["5k", "19:99"])
+    assert database.get_fitness_profile(CHAT) is None
+
+
+# ── /activity arg fuzz ──────────────────────────────────────────────
+@pytest.mark.parametrize("args", [
+    ["-500"], ["1e400"], ["NaN"], ["-1", "-2", "-3"], ["99999999999999999999"],
+])
+def test_activity_junk_args_never_store_negative_or_infinite_values(mock_db, monkeypatch, args):
+    """Negative/overflow/NaN activity args must clamp to nothing: no negative
+    or infinite value may reach the DB, or the /today net line would inflate
+    the user's remaining calories."""
+    _stable_tz(monkeypatch)
+    bot = FakeBot()
+    telegram_bot._cmd_activity(bot, CHAT, args)
+    rows = database.get_activities(CHAT, "1970-01-01", "9999-12-31")
+    for row in rows:
+        assert row["active_calories"] in (None, 0, 0.0)
+        assert row["distance_km"] in (None, 0, 0.0)
+    assert telegram_bot._sum_active_calories(rows) == 0
+    assert bot.sent
+
+
+def test_activity_invalid_calendar_date_saves_nothing(mock_db, monkeypatch):
+    # '2026-13-45' passes the ISO shape regex but not the calendar; the row
+    # must be rejected, not saved under a nonsense date no query can reach.
+    _stable_tz(monkeypatch)
+    bot = FakeBot()
+    telegram_bot._cmd_activity(bot, CHAT, ["2026-13-45", "500"])
+    assert database.get_activities(CHAT, "1970-01-01", "9999-12-31") == []
+    assert any("isn't valid" in m["text"] for m in bot.sent)
+
+
+def test_activity_date_form_clamps_negative_kcal_to_zero(mock_db, monkeypatch):
+    _stable_tz(monkeypatch)
+    bot = FakeBot()
+    telegram_bot._cmd_activity(bot, CHAT, ["2026-07-09", "-300"])
+    rows = database.get_activities(CHAT, "2026-07-09", "2026-07-09")
+    assert len(rows) == 1
+    assert rows[0]["active_calories"] == 0  # clamped, never negative
+
+
+# ── /macros selector fuzz ───────────────────────────────────────────
+@pytest.mark.parametrize("selector,label", [
+    ("0", "today"),           # zero-day window clamps up to today
+    ("-3", "today"),          # negative clamps up to today
+    ("9999", "last 31 days"), # oversize clamps down to the 31-day cap
+    ("nan", "today"),         # unparsable falls back to today
+])
+def test_macros_selector_junk_clamps_to_sane_window(mock_db, monkeypatch, selector, label):
+    _stable_tz(monkeypatch)
+    today = database.user_local_now().date().isoformat()
+    database.save_meal(CHAT, today, "12:00", datetime.now().isoformat(), "t",
+                       f"mh-{selector}", "f",
+                       {"is_food": True, "meal_description": "Bowl", "total_calories": 500,
+                        "total_protein_g": 30, "total_carbs_g": 40, "total_fat_g": 20})
+    bot = FakeBot()
+    telegram_bot._cmd_macros(bot, CHAT, [selector])
+    text = bot.sent[-1]["text"]
+    assert f"Window: {label}" in text
+    assert "Macro check" in text
+
+
+# ── HTML injection end-to-end ───────────────────────────────────────
+def test_workout_reply_escapes_html_in_notes_and_groups(mock_db, monkeypatch):
+    """Workout notes and unrecognized group tokens are user-controlled text
+    rendered in an HTML parse_mode message — raw tags must never survive."""
+    _stable_tz(monkeypatch)
+    bot = FakeBot()
+    telegram_bot._cmd_workout(bot, CHAT, ["legs", "<b>onclick</b>"])
+    reply = bot.sent[-1]["text"]
+    assert "<b>onclick</b>" not in reply
+    assert "&lt;b&gt;onclick&lt;/b&gt;" in reply
+
+    # An unrecognized first token makes the WHOLE arg string the group name.
+    bot2 = FakeBot()
+    telegram_bot._cmd_workout(bot2, CHAT, ["<script>alert(1)</script>", "day"])
+    reply2 = bot2.sent[-1]["text"]
+    assert "<script>" not in reply2
+    assert "&lt;script&gt;" in reply2
+
+
+def test_profile_and_plan_escape_hostile_stored_race_fields(mock_db, monkeypatch):
+    """Stored-then-displayed: race_label/goal_race_date written by any future
+    path (Garmin sync, DB edit) must come back escaped from /profile, and a
+    junk race date must be dropped (not echoed) by /plan."""
+    _stable_tz(monkeypatch)
+    database.save_fitness_profile(
+        CHAT,
+        vdot=50.0,
+        race_label="<b onmouseover=steal()>5K</b>",
+        race_time_seconds=1197,
+        goal_race_date="<script>alert(1)</script>",
+    )
+    profile_text = telegram_bot.format_fitness_profile(CHAT)
+    assert "<b onmouseover" not in profile_text
+    assert "&lt;b onmouseover=steal()&gt;5K&lt;/b&gt;" in profile_text
+    assert "<script>" not in profile_text
+
+    plan_text = telegram_bot.format_week_plan(CHAT)
+    assert "<script>" not in plan_text
+    assert "This week" in plan_text  # plan still renders despite the junk date
+
+
+def test_correction_reply_escapes_hostile_meal_and_gemini_text(mock_db, monkeypatch):
+    """A hostile stored description AND hostile Gemini-authored fields
+    (new description, reason) all pass through the correction reply — every
+    one must be escaped."""
+    _stable_tz(monkeypatch)
+    _no_pause(monkeypatch)
+    monkeypatch.setattr(telegram_bot, "get_recent_meals", _wide_recent_meals)
+    today = database.user_local_now().date().isoformat()
+    database.save_meal(CHAT, today, "12:00", datetime.now().isoformat(), "t", "hx", "f",
+                       {"is_food": True, "meal_description": "<script>owned</script>",
+                        "total_calories": 500})
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client({
+        "intent": "correction", "meal_index": 0,
+        "analysis": {"is_food": True, "meal_description": "<b>Fixed</b>", "total_calories": 450},
+        "reason": "<img src=x onerror=alert(1)>",
+    }), bot, CHAT, "fix that meal")
+    reply = bot.sent[-1]["text"]
+    assert "<script>" not in reply
+    assert "<img" not in reply
+    assert "&lt;script&gt;owned&lt;/script&gt;" in reply
+    assert "&lt;b&gt;Fixed&lt;/b&gt;" in reply
+    assert "&lt;img src=x onerror=alert(1)&gt;" in reply
+
+
+# ── Quota-pause resilience: all nine fitness commands are pure DB ──
+_FITNESS_COMMAND_CALLS = [
+    ("/weight", lambda bot: telegram_bot._cmd_weight(bot, CHAT, [])),
+    ("/diet", lambda bot: telegram_bot._cmd_diet(bot, CHAT, [])),
+    ("/macros", lambda bot: telegram_bot._cmd_macros(bot, CHAT, ["today"])),
+    ("/workout", lambda bot: telegram_bot._cmd_workout(bot, CHAT, ["legs"])),
+    ("/train", lambda bot: bot.send_message(CHAT, telegram_bot.format_train_recommendation(CHAT))),
+    ("/activity", lambda bot: telegram_bot._cmd_activity(bot, CHAT, [])),
+    ("/train_run", lambda bot: telegram_bot._cmd_train_run(bot, CHAT, [])),
+    ("/plan", lambda bot: bot.send_message(CHAT, telegram_bot.format_week_plan(CHAT))),
+    ("/profile", lambda bot: bot.send_message(CHAT, telegram_bot.format_fitness_profile(CHAT))),
+]
+
+
+@pytest.mark.parametrize("name,invoke", _FITNESS_COMMAND_CALLS,
+                         ids=[name for name, _ in _FITNESS_COMMAND_CALLS])
+def test_fitness_commands_answer_during_gemini_quota_pause(mock_db, monkeypatch, name, invoke):
+    """During a Gemini quota pause the fitness/diet surface must stay fully
+    usable — these commands are pure DB + arithmetic and must never bounce
+    with the 'Gemini is paused' message."""
+    _stable_tz(monkeypatch)
+    monkeypatch.setattr(
+        telegram_bot, "_gemini_quota_pause",
+        lambda: {"until": datetime.now() + timedelta(hours=6),
+                 "reason": "daily quota", "set_at": ""},
+    )
+    monkeypatch.setattr(telegram_bot, "_gemini_quota_pause_summary",
+                        lambda: "Paused until tomorrow (daily quota).")
+    bot = FakeBot()
+    invoke(bot)
+    assert bot.sent, f"{name} sent no reply during a quota pause"
+    assert all("Gemini is paused" not in m["text"] for m in bot.sent)
+
+
+# ── NL hostile Gemini payloads for the two new write-intents ───────
+@pytest.mark.parametrize("bad_field", ["72.5", [72.5], -50, float("inf"), None])
+def test_nl_log_weight_hostile_field_saves_nothing(mock_db, monkeypatch, bad_field):
+    """A hallucinated weight_kg (string, list, negative, inf, null) must save
+    nothing and still answer — string numerics are deliberately NOT trusted."""
+    _stable_tz(monkeypatch)
+    _no_pause(monkeypatch)
+    bot = FakeBot()
+    client = _intent_client({"intent": "log_weight", "weight_kg": bad_field, "reply": "ok"})
+    telegram_bot.handle_text_message(client, bot, CHAT, "please log my weight")
+    assert database.get_latest_body_weight(CHAT) is None
+    assert any("couldn't read a valid body weight" in m["text"] for m in bot.sent)
+
+
+def test_nl_log_weight_numeric_field_fallback_saves(mock_db, monkeypatch):
+    # When the sentence has no parsable number, a bounded numeric weight_kg
+    # from the model is the fallback that actually saves.
+    _stable_tz(monkeypatch)
+    _no_pause(monkeypatch)
+    bot = FakeBot()
+    client = _intent_client({"intent": "log_weight", "weight_kg": 72.5, "reply": "ok"})
+    telegram_bot.handle_text_message(client, bot, CHAT, "log my usual morning weight")
+    latest = database.get_latest_body_weight(CHAT)
+    assert latest is not None
+    assert latest["weight_kg"] == 72.5
+
+
+@pytest.mark.parametrize("payload", [
+    {"active_calories": float("inf"), "steps": "many", "distance_km": -3},
+    {"active_calories": float("nan"), "steps": -5, "distance_km": "far"},
+    {"active_calories": None, "steps": None, "distance_km": None},
+    {"active_calories": [450], "steps": {"n": 1}, "distance_km": False},
+])
+def test_nl_log_activity_hostile_payload_saves_nothing(mock_db, monkeypatch, payload):
+    """inf/NaN/negative/typed-junk activity fields coerce to zero; with no
+    usable number the handler must refuse the save and say so."""
+    _stable_tz(monkeypatch)
+    _no_pause(monkeypatch)
+    bot = FakeBot()
+    client = _intent_client({"intent": "log_activity", "reply": "ok", **payload})
+    telegram_bot.handle_text_message(client, bot, CHAT, "log my workout from earlier")
+    assert database.get_activities(CHAT, "1970-01-01", "9999-12-31") == []
+    assert any("couldn't find any activity numbers" in m["text"] for m in bot.sent)
+
+
+def test_nl_log_activity_keeps_valid_fields_and_drops_junk(mock_db, monkeypatch):
+    # Partial junk must not poison the valid part: kcal saves, the negative
+    # distance and non-numeric steps are dropped rather than stored.
+    _stable_tz(monkeypatch)
+    _no_pause(monkeypatch)
+    bot = FakeBot()
+    client = _intent_client({"intent": "log_activity", "active_calories": 450,
+                             "steps": "many", "distance_km": -3, "reply": "ok"})
+    telegram_bot.handle_text_message(client, bot, CHAT, "gym session done")
+    today = database.user_local_now().date().isoformat()
+    rows = database.get_activities(CHAT, today, today)
+    assert len(rows) == 1
+    assert rows[0]["active_calories"] == 450
+    assert rows[0]["distance_km"] is None
+    assert rows[0]["raw"] is None
+    reply = bot.sent[-1]["text"]
+    assert "450 kcal" in reply
+    assert "km" not in reply
+
+
+# ── Intent interplay: fast-path vs Gemini routing ──────────────────
+def test_mixed_activity_and_meal_sentence_goes_to_gemini_once(mock_db, monkeypatch):
+    """'ran 10k ... and had a protein shake after' mentions running AND food:
+    the deterministic regex pre-check must NOT hijack it — exactly one Gemini
+    classification happens and its intent is executed."""
+    _stable_tz(monkeypatch)
+    _no_pause(monkeypatch)
+    client, calls = _counting_client({"intent": "log_activity", "active_calories": 400,
+                                      "steps": 0, "distance_km": 10, "reply": "ok"})
+    bot = FakeBot()
+    telegram_bot.handle_text_message(
+        client, bot, CHAT, "ran 10k this morning and had a protein shake after")
+    assert len(calls) == 1
+    today = database.user_local_now().date().isoformat()
+    rows = database.get_activities(CHAT, today, today)
+    assert len(rows) == 1
+    assert rows[0]["distance_km"] == 10
+
+
+@pytest.mark.xfail(strict=False, reason="BUG: _MACRO_QUERY_RE only matches \"how's/hows my protein\", so the plain phrasing 'how is my protein today' burns a Gemini call for a pure read query")
+def test_plain_macro_question_answers_without_gemini(mock_db, monkeypatch):
+    _stable_tz(monkeypatch)
+    _no_pause(monkeypatch)
+    client, calls = _counting_client({"intent": "chat", "reply": "ok"})
+    bot = FakeBot()
+    telegram_bot.handle_text_message(client, bot, CHAT, "how is my protein today")
+    assert calls == []  # deterministic path must answer with zero Gemini spend
+    assert any("No meals logged" in m["text"] or "Macro check" in m["text"]
+               for m in bot.sent)
+
+
+# ── Feature 1: TEXT_EDIT_WINDOW_DAYS boundary + old-meal correction ─
+def test_prompt_meal_window_includes_edge_day_and_excludes_beyond(mock_db, monkeypatch):
+    """A meal dated exactly WINDOW-1 days back is the last one Gemini may
+    edit; one dated WINDOW+1 days back must be invisible to the prompt so the
+    model can never 'correct' ancient history."""
+    _stable_tz(monkeypatch)
+    _no_pause(monkeypatch)
+    window = telegram_bot.TEXT_EDIT_WINDOW_DAYS
+    today = database.user_local_now().date()
+    now = datetime.now()
+    edge_date = (today - timedelta(days=window - 1)).isoformat()
+    beyond_date = (today - timedelta(days=window + 1)).isoformat()
+    database.save_meal(CHAT, edge_date, "08:00", (now - timedelta(days=window - 1)).isoformat(),
+                       "t", "edge-h", "f",
+                       {"is_food": True, "meal_description": "Edge oatmeal",
+                        "total_calories": 300, "food_items": []})
+    database.save_meal(CHAT, beyond_date, "08:00", (now - timedelta(days=window + 1)).isoformat(),
+                       "t", "beyond-h", "f",
+                       {"is_food": True, "meal_description": "Ancient burrito",
+                        "total_calories": 700, "food_items": []})
+
+    captured = {}
+
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            captured["prompt"] = kwargs["contents"][0]
+            return SimpleNamespace(text=json.dumps({"intent": "chat", "reply": "ok"}))
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(SimpleNamespace(models=FakeModels()), bot, CHAT,
+                                     "what did I eat last week?")
+    prompt = captured["prompt"]
+    assert "Edge oatmeal" in prompt
+    assert f"Date: {edge_date}" in prompt
+    assert "Ancient burrito" not in prompt
+
+
+def test_correction_by_index_updates_the_exact_five_day_old_row(mock_db, monkeypatch):
+    """A correction aimed at a 5-day-old meal must update THAT row (resolved
+    by DB id from the snapshot) and leave today's meal untouched."""
+    _stable_tz(monkeypatch)
+    _no_pause(monkeypatch)
+    today = database.user_local_now().date()
+    now = datetime.now()
+    old_date = (today - timedelta(days=5)).isoformat()
+    old_id = database.save_meal(CHAT, old_date, "12:00",
+                                (now - timedelta(days=5)).isoformat(), "t", "old-h", "f",
+                                {"is_food": True, "meal_description": "Monday ramen",
+                                 "total_calories": 400})
+    new_id = database.save_meal(CHAT, today.isoformat(), "12:00", now.isoformat(),
+                                "t", "new-h", "f",
+                                {"is_food": True, "meal_description": "Today salad",
+                                 "total_calories": 300})
+    bot = FakeBot()
+    # Oldest timestamp sorts first, so the 5-day-old meal is index 0.
+    telegram_bot.handle_text_message(_intent_client({
+        "intent": "correction", "meal_index": 0,
+        "analysis": {"is_food": True, "meal_description": "Monday ramen",
+                     "total_calories": 850},
+        "reason": "underestimated",
+    }), bot, CHAT, "monday's ramen was actually 850 kcal")
+
+    meals = {m["id"]: m for m in database.get_meals(CHAT, "1970-01-01", "9999-12-31")}
+    assert meals[old_id]["analysis"]["total_calories"] == 850
+    assert meals[old_id]["corrected"] is True
+    assert meals[new_id]["analysis"]["total_calories"] == 300
+    assert meals[new_id]["corrected"] is False
+
+
+# ── /today net line arithmetic ──────────────────────────────────────
+def test_today_summary_net_arithmetic_is_exact(mock_db, monkeypatch):
+    """Net = sum(meals) − sum(activities), to the kcal: 350+250 eaten, 450
+    burned → exactly 150."""
+    _stable_tz(monkeypatch)
+    today = database.user_local_now().date().isoformat()
+    now_iso = datetime.now().isoformat()
+    database.save_meal(CHAT, today, "08:00", now_iso, "t", "net-a", "f",
+                       {"is_food": True, "meal_description": "Eggs", "total_calories": 350})
+    database.save_meal(CHAT, today, "12:00", now_iso, "t", "net-b", "f",
+                       {"is_food": True, "meal_description": "Salad", "total_calories": 250})
+    database.save_activity(CHAT, today, source="manual", active_calories=450)
+
+    summary = telegram_bot.format_today_summary(CHAT)
+    assert "🔥 Burned: 450 kcal" in summary
+    assert "⚖️ Net: <b>150 kcal</b>" in summary
+
+
+def test_today_summary_negative_net_renders_signed(mock_db, monkeypatch):
+    # A long-run day can legitimately burn more than was eaten; the net must
+    # show a signed negative, not wrap or hide.
+    _stable_tz(monkeypatch)
+    today = database.user_local_now().date().isoformat()
+    database.save_meal(CHAT, today, "08:00", datetime.now().isoformat(), "t", "neg-a", "f",
+                       {"is_food": True, "meal_description": "Toast", "total_calories": 600})
+    database.save_activity(CHAT, today, source="manual", active_calories=1000)
+
+    summary = telegram_bot.format_today_summary(CHAT)
+    assert "⚖️ Net: <b>-400 kcal</b>" in summary
+
+
+def test_today_summary_ignores_activity_from_other_days(mock_db, monkeypatch):
+    """Yesterday's run must not leak into today's net — the burned window is
+    the user-local day, same as the meals window."""
+    _stable_tz(monkeypatch)
+    today = database.user_local_now().date()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    database.save_meal(CHAT, today.isoformat(), "08:00", datetime.now().isoformat(),
+                       "t", "oth-a", "f",
+                       {"is_food": True, "meal_description": "Toast", "total_calories": 600})
+    database.save_activity(CHAT, yesterday, source="manual", active_calories=450)
+
+    summary = telegram_bot.format_today_summary(CHAT)
+    assert "Burned:" not in summary
+    assert "Net:" not in summary

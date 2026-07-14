@@ -478,3 +478,181 @@ def test_fitness_profile_partial_upsert_preserves_unset_columns():
     # Non-whitelisted keys are ignored, not injected.
     database.save_fitness_profile(1, evil="DROP TABLE meals")
     assert "evil" not in database.get_fitness_profile(1)
+
+
+# ═══ Appended fitness-table coverage: isolation, boundaries, migration ═══
+import json
+
+
+def test_fitness_tables_cross_chat_isolation():
+    # Defense-in-depth: if a stranger ever messages the bot, no fitness getter
+    # may leak the owner's weight, workouts, activities or profile.
+    database.save_body_weight(1, "2026-07-10", 72.5)
+    database.save_workout(1, "2026-07-10", "strength", muscle_groups="legs")
+    database.save_activity(1, "2026-07-10", "run", source="garmin",
+                           distance_km=9.0, external_id="g1")
+    database.save_fitness_profile(1, diet_mode="keto", vdot=50.0)
+
+    assert database.get_body_weights(2, "2026-01-01", "2026-12-31") == []
+    assert database.get_latest_body_weight(2) is None
+    assert database.get_workouts(2, "2026-01-01", "2026-12-31") == []
+    assert database.get_activities(2, "2026-01-01", "2026-12-31") == []
+    assert database.get_fitness_profile(2) is None
+
+    # And the owner still sees every row they wrote.
+    assert len(database.get_body_weights(1, "2026-01-01", "2026-12-31")) == 1
+    assert len(database.get_workouts(1, "2026-01-01", "2026-12-31")) == 1
+    assert len(database.get_activities(1, "2026-01-01", "2026-12-31")) == 1
+    assert database.get_fitness_profile(1)["diet_mode"] == "keto"
+
+
+@pytest.mark.parametrize("save_row,get_rows", [
+    (lambda d: database.save_body_weight(1, d, 72.0),
+     lambda s, e: database.get_body_weights(1, s, e)),
+    (lambda d: database.save_workout(1, d, "strength"),
+     lambda s, e: database.get_workouts(1, s, e)),
+    (lambda d: database.save_activity(1, d, "run", source="manual"),
+     lambda s, e: database.get_activities(1, s, e)),
+], ids=["body_weight", "workouts", "activities"])
+def test_fitness_date_ranges_include_both_boundary_days(save_row, get_rows):
+    # An off-by-one here silently drops the first or last day of every weekly
+    # report window — assert both edges included, both neighbours excluded.
+    for day in ("2026-07-09", "2026-07-10", "2026-07-12", "2026-07-13"):
+        save_row(day)
+
+    rows = get_rows("2026-07-10", "2026-07-12")
+    assert [r["date"] for r in rows] == ["2026-07-10", "2026-07-12"]
+
+
+def test_init_db_upgrades_legacy_schema_without_losing_meals(monkeypatch, tmp_path):
+    # The real upgrade path on the VM: a pre-fitness meals.db must gain the
+    # four fitness tables in place, with existing meal history untouched.
+    legacy = tmp_path / "legacy_meals.db"
+    with sqlite3.connect(legacy) as conn:
+        conn.execute("""
+            CREATE TABLE meals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                time TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                source TEXT,
+                image_hash TEXT,
+                file_id TEXT,
+                analysis TEXT NOT NULL,
+                corrected BOOLEAN DEFAULT 0
+            )
+        """)
+        # Oldest deployed shape: heartbeats existed before the timezone column.
+        conn.execute("""
+            CREATE TABLE heartbeats (
+                device_name TEXT PRIMARY KEY,
+                last_ping_time TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE photo_ingestions (
+                chat_id INTEGER NOT NULL,
+                image_hash TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                source TEXT,
+                status TEXT NOT NULL DEFAULT 'processing',
+                meal_id INTEGER,
+                PRIMARY KEY (chat_id, image_hash)
+            )
+        """)
+        conn.execute(
+            "INSERT INTO meals (chat_id, date, time, timestamp, source, image_hash,"
+            " file_id, analysis, corrected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (777, "2026-07-01", "12:00", "2026-07-01T12:00:00", "telegram",
+             "legacyhash", "file1",
+             json.dumps({"is_food": True, "total_calories": 640}), 0),
+        )
+        conn.commit()
+
+    monkeypatch.setattr(database, "DB_PATH", legacy)
+    database.init_db()
+
+    with sqlite3.connect(legacy) as conn:
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        heartbeat_cols = {r[1] for r in conn.execute("PRAGMA table_info(heartbeats)")}
+    assert {"body_weight", "workouts", "activities", "fitness_profile"} <= tables
+    assert "timezone" in heartbeat_cols  # the old ALTER migration still runs too
+
+    meals = database.get_meals(777, "2026-07-01", "2026-07-01")
+    assert len(meals) == 1
+    assert meals[0]["analysis"]["total_calories"] == 640
+    # The new accessors work immediately on the upgraded file.
+    database.save_body_weight(777, "2026-07-14", 72.0)
+    assert database.get_latest_body_weight(777)["weight_kg"] == 72.0
+
+
+def test_save_activity_resync_updates_every_mutable_column_in_place():
+    # A Garmin re-sync (even one correcting the activity's date across
+    # midnight) must rewrite ALL mutable columns of the SAME row rather than
+    # duplicating the workout or leaving stale HR/elevation behind.
+    first_id = database.save_activity(
+        1, "2026-07-10", "running", source="garmin", active_calories=600,
+        distance_km=9.0, duration_min=48.0, avg_hr_bpm=150, elevation_gain_m=40.0,
+        start_time="2026-07-10 06:00:00", external_id="garmin-777",
+        notes="easy", raw={"rev": 1})
+    second_id = database.save_activity(
+        1, "2026-07-11", "trail_running", source="garmin", active_calories=712,
+        distance_km=11.3, duration_min=63.5, avg_hr_bpm=156, elevation_gain_m=210.0,
+        start_time="2026-07-11 06:30:00", external_id="garmin-777",
+        notes="hills", raw={"rev": 2})
+
+    rows = database.get_activities(1, "2026-07-01", "2026-07-31")
+    assert len(rows) == 1
+    assert second_id == first_id  # stable row id across re-syncs
+    row = rows[0]
+    assert row["date"] == "2026-07-11"
+    assert row["activity_type"] == "trail_running"
+    assert row["active_calories"] == 712
+    assert row["distance_km"] == 11.3
+    assert row["duration_min"] == 63.5
+    assert row["avg_hr_bpm"] == 156
+    assert row["elevation_gain_m"] == 210.0
+    assert row["start_time"] == "2026-07-11 06:30:00"
+    assert row["notes"] == "hills"
+    assert row["raw"] == {"rev": 2}
+
+    # A different external_id is a genuinely different workout: second row.
+    database.save_activity(1, "2026-07-11", "running", source="garmin",
+                           external_id="garmin-778")
+    assert len(database.get_activities(1, "2026-07-01", "2026-07-31")) == 2
+
+
+def test_fitness_profile_explicit_none_clears_column_and_row_shape_complete():
+    # Cancelling a goal race: an explicit goal_race_date=None must CLEAR the
+    # stored value (None is an update, not a skip), leaving siblings intact.
+    database.save_fitness_profile(1, goal_race_date="2026-11-01",
+                                  race_label="Shanghai Marathon", vdot=50.0)
+    database.save_fitness_profile(1, goal_race_date=None, race_label=None)
+
+    profile = database.get_fitness_profile(1)
+    assert profile["goal_race_date"] is None
+    assert profile["race_label"] is None
+    assert profile["vdot"] == 50.0
+
+    # extra accepts list payloads too (dict already covered) and round-trips.
+    database.save_fitness_profile(1, extra=["cutting", "carb cycling"])
+    profile = database.get_fitness_profile(1)
+    assert profile["extra"] == ["cutting", "carb cycling"]
+
+    # Repeated partial upserts never shrink the row: all 18 columns present.
+    assert set(profile) == {"chat_id", "updated_at", *database._FITNESS_PROFILE_COLUMNS}
+    assert len(profile) == 18
+
+
+def test_get_latest_body_weight_uses_max_date_not_insertion_order():
+    # Backfilling a missed weigh-in (older date, newer row id) must not
+    # masquerade as the "current" weight that reports and targets key off.
+    database.save_body_weight(1, "2026-07-12", 71.8)
+    database.save_body_weight(1, "2026-07-10", 72.6)  # backfill: higher id, earlier date
+
+    latest = database.get_latest_body_weight(1)
+    assert latest["date"] == "2026-07-12"
+    assert latest["weight_kg"] == 71.8

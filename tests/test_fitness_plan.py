@@ -191,3 +191,246 @@ def test_week_plan_never_raises_on_partial():
     for profile in (None, {}, {"vdot": "x"}, {"long_run_day": None}):
         plan = fp.week_plan(profile, date(2026, 7, 14))
         assert len(plan) == 7
+
+
+# ===========================================================================
+# Deep-dive additions (append-only): mathematical soundness sweeps, anchors
+# from Daniels' published tables, schedule integrity across every
+# configuration, and exact phase fence-posts. A marathoner trains off these
+# numbers, so the math must be monotone, ordered, and table-faithful.
+# ===========================================================================
+
+import pytest
+
+
+# --- monotonicity sweeps ----------------------------------------------------
+
+def test_vdot_strictly_increases_as_5k_time_drops():
+    # A faster 5k must NEVER map to an equal-or-lower fitness score, else the
+    # bot could tell Robert he got slower after a PR. Sweep 16:00..30:00.
+    times = list(range(16 * 60, 30 * 60 + 1, 15))
+    vdots = [fp.vdot_from_race(5000, t) for t in times]
+    assert all(v is not None for v in vdots)
+    # sweep stays inside the clamp band so monotonicity is genuinely strict
+    assert all(fp.VDOT_MIN < v < fp.VDOT_MAX for v in vdots)
+    for slower, faster in zip(vdots, vdots[1:]):
+        assert faster < slower  # more seconds -> strictly lower VDOT
+
+
+def test_every_pace_strictly_speeds_up_with_vdot():
+    # Each +1 VDOT must strictly speed up all five paces and both easy-band
+    # ends across the whole supported 20..85 band (incl. clamp endpoints).
+    prev = None
+    for vdot in range(int(fp.VDOT_MIN), int(fp.VDOT_MAX) + 1):
+        paces = fp.paces_from_vdot(vdot)
+        flat = [paces[k] for k in ("E", "M", "T", "I", "R")] + list(paces["E_range"])
+        assert all(isinstance(p, float) and p > 0 for p in flat)
+        if prev is not None:
+            for faster, slower in zip(flat, prev):
+                assert faster < slower
+        prev = flat
+
+
+def test_pace_order_holds_at_every_vdot():
+    # R < I < T < M < E (sec/km) and E_range brackets E at EVERY fitness
+    # level, not just the single VDOT-50 point already pinned above.
+    for vdot in range(int(fp.VDOT_MIN), int(fp.VDOT_MAX) + 1):
+        paces = fp.paces_from_vdot(vdot)
+        assert paces["R"] < paces["I"] < paces["T"] < paces["M"] < paces["E"]
+        fast, slow = paces["E_range"]
+        assert fast < paces["E"] < slow
+
+
+# --- anchors from Daniels' published tables ---------------------------------
+
+@pytest.mark.parametrize("label, distance_m, seconds, book_vdot", [
+    # Values from Jack Daniels' Running Formula VDOT tables (2% tolerance):
+    ("5k 25:00", 5000, 25 * 60, 38.3),
+    ("10k 41:21", 10000, 41 * 60 + 21, 50.0),
+    ("marathon 3:28:26", 42195, 3 * 3600 + 28 * 60 + 26, 45.0),
+    ("half 1:24:00", 21097.5, 1 * 3600 + 24 * 60, 55.0),
+])
+def test_vdot_anchors_from_daniels_tables(label, distance_m, seconds, book_vdot):
+    vdot = fp.vdot_from_race(distance_m, seconds)
+    assert vdot is not None
+    assert abs(vdot - book_vdot) / book_vdot <= 0.02, (
+        "{}: got VDOT {:.2f}, book says ~{}".format(label, vdot, book_vdot))
+
+
+@pytest.mark.parametrize("seconds", [16 * 60, 18 * 60, 20 * 60, 22 * 60,
+                                     25 * 60, 28 * 60, 30 * 60])
+def test_interval_pace_tracks_5k_race_pace(seconds):
+    # Daniels property: I pace ~= current 5k race pace. If the round-trip
+    # race -> VDOT -> I pace drifts, interval workouts are mis-prescribed.
+    vdot = fp.vdot_from_race(5000, seconds)
+    i_pace = fp.paces_from_vdot(vdot)["I"]
+    race_pace = seconds / 5.0
+    assert abs(i_pace - race_pace) / race_pace <= 0.05
+
+
+def test_numeric_strings_accepted_for_race_inputs():
+    # Race fields arrive from Telegram text / Gemini JSON as strings; a
+    # stringly-typed "5000"/"1197" must score the same as the numbers.
+    assert fp.vdot_from_race("5000", "1197") == fp.vdot_from_race(5000, 1197)
+
+
+# --- schedule integrity -----------------------------------------------------
+
+@pytest.mark.parametrize("days_out", [None, 84, 35, 14])  # base/quality/peak/taper
+@pytest.mark.parametrize("long_run_day", range(7))
+def test_week_plan_long_run_placement_every_config(long_run_day, days_out):
+    # For every phase x long-run-day combo: 7 Mon..Sun entries, exactly ONE
+    # long run and it lands on the configured day (quality never steals it),
+    # and the following day is always recovery.
+    day = date(2026, 7, 15)  # a Wednesday
+    profile = {"vdot": 50, "long_run_day": long_run_day}
+    if days_out is not None:
+        profile["goal_race_date"] = (day + timedelta(days=days_out)).isoformat()
+    plan = fp.week_plan(profile, day)
+    assert [name for name, _ in plan] == fp.DAY_NAMES
+    workouts = [w for _, w in plan]
+    long_idxs = [i for i, w in enumerate(workouts) if w.startswith("Long run")]
+    assert long_idxs == [long_run_day]
+    assert workouts[(long_run_day + 1) % 7].startswith("Rest")
+
+
+def test_rest_day_takes_precedence_over_quality():
+    # Monday long run makes Tuesday the recovery day; Robert must never be
+    # prescribed a threshold session the day after his long run.
+    profile = {"vdot": 50, "long_run_day": 0, "goal_race_date": "2026-10-11"}
+    plan = fp.week_plan(profile, date(2026, 7, 15))
+    assert plan[1][1].startswith("Rest")
+
+
+def test_todays_workout_agrees_with_week_plan_every_day():
+    # /today and /week must never disagree -- even across a phase boundary
+    # falling mid-week (race 2026-08-05: Mon 7/13 is 23 days out = peak,
+    # Wed 7/15 is 21 days out = taper).
+    profile = {"vdot": 52, "long_run_day": 6, "goal_race_date": "2026-08-05"}
+    monday = date(2026, 7, 13)
+    for offset in range(7):
+        d = monday + timedelta(days=offset)
+        assert fp.todays_workout(profile, d) == fp.week_plan(profile, d)[d.weekday()][1]
+
+
+def test_week_plan_uses_each_days_own_phase():
+    # Each day is planned with its OWN date's phase: in the 7/13 week above,
+    # Tuesday (22 days out) is still peak intervals while Thursday (20 days
+    # out) has already switched to the taper's race-pace sharpener.
+    profile = {"vdot": 52, "long_run_day": 6, "goal_race_date": "2026-08-05"}
+    plan = fp.week_plan(profile, date(2026, 7, 13))
+    assert plan[1][1].startswith("Intervals")   # Tue: peak primary quality
+    assert plan[3][1].startswith("Race pace")   # Thu: taper secondary quality
+
+
+def test_taper_long_run_is_shortened():
+    # In taper the long run must drop to 60-75min relaxed -- a 2h long run
+    # three weeks before the marathon would sabotage the race.
+    sunday = date(2026, 7, 19)
+    taper = {"vdot": 50, "long_run_day": 6,
+             "goal_race_date": (sunday + timedelta(days=14)).isoformat()}
+    peak = {"vdot": 50, "long_run_day": 6,
+            "goal_race_date": (sunday + timedelta(days=35)).isoformat()}
+    assert "60-75min" in fp.todays_workout(taper, sunday)
+    assert "M pace" in fp.todays_workout(peak, sunday)  # peak: finish @ M
+
+
+def test_week_plan_structure_survives_garbage_day():
+    # An unparseable "day" still yields a full, structurally valid week
+    # (content falls back to the current week, so only structure is pinned).
+    plan = fp.week_plan(None, "garbage")
+    assert [name for name, _ in plan] == fp.DAY_NAMES
+    assert all(isinstance(w, str) and w for _, w in plan)
+
+
+# --- hostile profile fields -------------------------------------------------
+
+@pytest.mark.parametrize("bad_vdot", [1e9, 5, -50, 0, True])
+def test_out_of_band_profile_vdot_falls_back_to_default_paces(bad_vdot):
+    # A corrupted or model-invented stored VDOT (1e9, negative, bool) must
+    # not leak absurd paces into workouts -- it falls back to the default.
+    day = date(2026, 7, 17)  # Friday: plain easy run, pace shown in text
+    assert (fp.todays_workout({"vdot": bad_vdot}, day)
+            == fp.todays_workout({"vdot": fp.DEFAULT_VDOT}, day))
+
+
+@pytest.mark.parametrize("raw, expected_idx", [
+    ("3", 3),     # numeric string from a text field is still honoured
+    (5.9, 5),     # floats truncate rather than rounding out of range
+    (-1, 6),      # out of range -> default Sunday
+    (7, 6),
+    (True, 6),    # bool is not a day index
+])
+def test_hostile_long_run_day_placement(raw, expected_idx):
+    plan = fp.week_plan({"vdot": 50, "long_run_day": raw}, date(2026, 7, 15))
+    long_idxs = [i for i, (_, w) in enumerate(plan) if w.startswith("Long run")]
+    assert long_idxs == [expected_idx]
+
+
+# --- phase fence-posts ------------------------------------------------------
+
+@pytest.mark.parametrize("days_out, expected", [
+    (0, "taper"),     # race day itself still reads as taper, not base
+    (1, "taper"),
+    (21, "taper"),    # exactly 3 weeks: fence-post belongs to taper
+    (22, "peak"),
+    (56, "peak"),     # exactly 8 weeks: still peak
+    (57, "quality"),
+    (112, "quality"),  # exactly 16 weeks: still quality
+    (113, "base"),
+    (-1, "base"),     # the day after the race the plan resets to base
+])
+def test_phase_exact_fence_posts(days_out, expected):
+    day = date(2026, 7, 14)
+    profile = {"vdot": 50,
+               "goal_race_date": (day + timedelta(days=days_out)).isoformat()}
+    assert fp.phase_for_date(profile, day) == expected
+
+
+def test_leap_day_race_date_is_valid_and_phased():
+    # 2028-02-29 is a real date; the parser must not junk it (and an ISO
+    # timestamp with a time part must parse via its date prefix too).
+    for stored in ("2028-02-29", "2028-02-29T08:00:00"):
+        profile = {"vdot": 50, "goal_race_date": stored}
+        assert fp.phase_for_date(profile, date(2028, 2, 8)) == "taper"  # 21 days
+        assert fp.phase_for_date(profile, date(2028, 2, 7)) == "peak"   # 22 days
+        race = date(2028, 2, 29)
+        assert fp.phase_for_date(profile, race - timedelta(days=100)) == "quality"
+
+
+@pytest.mark.parametrize("bad", ["2027-02-29",   # non-leap Feb 29
+                                 "2026-13-01",   # month 13
+                                 "2026-02-30",   # day 30 in Feb
+                                 "2026-06-31"])  # day 31 in June
+def test_invalid_calendar_dates_fall_back_to_base(bad):
+    # Plausible-looking but impossible dates (typos, hostile model output)
+    # must degrade to base phase, never crash the plan.
+    day = date(2026, 7, 14)
+    profile = {"vdot": 50, "goal_race_date": bad}
+    assert fp.phase_for_date(profile, day) == "base"
+    assert isinstance(fp.todays_workout(profile, day), str)
+    assert len(fp.week_plan(profile, day)) == 7
+
+
+# --- pace formatting --------------------------------------------------------
+
+@pytest.mark.parametrize("sec_per_km, expected", [
+    (240, "4:00/km"),      # exact round number
+    (245.4, "4:05/km"),    # fractional input rounds; single-digit secs padded
+    (299.6, "5:00/km"),    # rounds up cleanly across the minute boundary
+    (65, "1:05/km"),
+    (3661, "61:01/km"),    # no hours unit: minutes just keep counting
+])
+def test_format_pace_km_variants(sec_per_km, expected):
+    assert fp.format_pace(sec_per_km) == expected
+
+
+@pytest.mark.parametrize("sec_per_km, expected_mi", [
+    (240, "6:26/mi"),   # 240 * 1.609344 = 386.24 -> 6:26
+    (300, "8:03/mi"),   # 300 * 1.609344 = 482.80 -> 8:03
+])
+def test_format_pace_mi_consistent_with_km_factor(sec_per_km, expected_mi):
+    # The /mi display must be the exact same pace scaled by KM_PER_MILE,
+    # so km and mi readouts never describe two different efforts.
+    assert fp.format_pace_mi(sec_per_km) == expected_mi
+    assert fp.per_mile(sec_per_km) == pytest.approx(sec_per_km * fp.KM_PER_MILE)

@@ -186,3 +186,214 @@ def test_to_activity_kwargs_coerces_hostile_activity_fields():
     assert kwargs["distance_km"] is None
     assert kwargs["duration_min"] is None
     assert kwargs["avg_hr_bpm"] is None
+
+
+# ═══ Appended coverage: library drift, payload realism, env hygiene ═══
+import pytest
+
+import database
+
+
+class _SummaryOnlyGarmin:
+    """Client shaped like a newer garminconnect release: it exposes ONLY
+    get_user_summary (no get_stats) and has no login() at all — both drifts
+    must be tolerated by the name-probing resolver."""
+
+    def __init__(self, stats=None, activities=None):
+        self._stats = stats if stats is not None else {}
+        self._activities = activities if activities is not None else []
+
+    def get_user_summary(self, date_str):
+        return self._stats
+
+    def get_activities_by_date(self, start, end):
+        return self._activities
+
+
+def test_fetch_falls_back_to_get_user_summary_when_get_stats_absent(monkeypatch):
+    # garminconnect has renamed its summary method across releases; a pip
+    # upgrade on the VM must not silently zero out the day's burn.
+    fake = _SummaryOnlyGarmin(stats={"activeKilocalories": 480, "totalSteps": 7600})
+    monkeypatch.setattr(garmin, "Garmin", lambda: fake)
+    _enable(monkeypatch)
+
+    daily = garmin.fetch_daily_activity("2026-07-13")
+
+    assert isinstance(daily, garmin.DailyActivity)
+    assert daily.active_calories == 480
+    assert daily.steps == 7600
+
+
+def test_fetch_survives_client_with_no_summary_method(monkeypatch):
+    # Worst-case drift: NO summary method under either name. Must degrade to a
+    # zeroed day (never raise) while still returning the parsed workout list.
+    class _NoSummary:
+        def get_activities_by_date(self, start, end):
+            return [{"activityId": 5, "distance": 5000}]
+
+    monkeypatch.setattr(garmin, "Garmin", _NoSummary)
+    _enable(monkeypatch)
+
+    daily = garmin.fetch_daily_activity("2026-07-13")
+
+    assert isinstance(daily, garmin.DailyActivity)
+    assert daily.active_calories == 0
+    assert daily.total_calories == 0
+    assert daily.steps == 0
+    assert daily.activities == [{"activityId": 5, "distance": 5000}]
+
+
+def test_fetch_survives_client_without_activities_method(monkeypatch):
+    # Losing the per-activity endpoint must not take the day summary with it.
+    class _StatsOnly:
+        def login(self, token_dir=None):
+            return True
+
+        def get_stats(self, date_str):
+            return {"activeKilocalories": 512, "totalDistanceMeters": 8000}
+
+    monkeypatch.setattr(garmin, "Garmin", _StatsOnly)
+    _enable(monkeypatch)
+
+    daily = garmin.fetch_daily_activity("2026-07-13")
+
+    assert isinstance(daily, garmin.DailyActivity)
+    assert daily.active_calories == 512
+    assert daily.distance_m == 8000
+    assert daily.activities == []
+
+
+# A real-shaped Garmin Connect day (field names and value shapes as the live
+# API returns them) used by the realism + contract tests below.
+_REAL_STATS = {
+    "userProfileId": 88231144,
+    "calendarDate": "2026-07-13",
+    "activeKilocalories": 612,
+    "totalKilocalories": 2214,
+    "totalSteps": 12340,
+    "totalDistanceMeters": 9240,
+    "restingHeartRate": 46,
+}
+
+_REAL_RUN = {
+    "activityId": 19283746,
+    "activityName": "Shanghai Morning Run",
+    "activityType": {"typeId": 1, "typeKey": "running", "parentTypeId": 17},
+    "distance": 9240.0,
+    "duration": 2892.5,
+    "averageHR": 148.0,
+    "maxHR": 171.0,
+    "calories": 601.0,
+    "elevationGain": 57.0,
+    "startTimeLocal": "2026-07-13 06:12:04",
+}
+
+
+def test_realistic_garmin_day_parses_field_for_field(monkeypatch):
+    # Pin the exact wire-format -> DailyActivity -> save_activity-kwargs
+    # mapping for a genuine-looking morning run so any field rename shows up
+    # as a precise diff, not a silent zero in the energy-balance line.
+    fake = _FakeGarmin(stats=dict(_REAL_STATS), activities=[dict(_REAL_RUN)])
+    monkeypatch.setattr(garmin, "Garmin", lambda: fake)
+    _enable(monkeypatch)
+
+    daily = garmin.fetch_daily_activity("2026-07-13")
+
+    assert daily.active_calories == 612
+    assert daily.total_calories == 2214
+    assert daily.steps == 12340
+    assert daily.distance_m == 9240
+    assert daily.activities == [_REAL_RUN]
+
+    assert garmin.to_activity_kwargs(daily) == {
+        "source": "garmin",
+        "external_id": "garmin-19283746",
+        "activity_type": "running",
+        "active_calories": 612,
+        "distance_km": 9.24,
+        "duration_min": 2892.5 / 60,
+        "avg_hr_bpm": 148,
+        "elevation_gain_m": 57.0,
+        "start_time": "2026-07-13 06:12:04",
+        "raw": _REAL_RUN,
+    }
+
+
+def test_to_activity_kwargs_feeds_save_activity_end_to_end(monkeypatch, tmp_path):
+    # THE contract seam: fetch -> to_activity_kwargs -> database.save_activity
+    # must hold with zero adapter glue, and a same-day re-sync must upsert in
+    # place instead of double-counting the run.
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "contract.db")
+    database.init_db()
+    fake = _FakeGarmin(stats=dict(_REAL_STATS), activities=[dict(_REAL_RUN)])
+    monkeypatch.setattr(garmin, "Garmin", lambda: fake)
+    _enable(monkeypatch)
+
+    daily = garmin.fetch_daily_activity("2026-07-13")
+    database.save_activity(7, "2026-07-13", **garmin.to_activity_kwargs(daily))
+
+    rows = database.get_activities(7, "2026-07-13", "2026-07-13")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["source"] == "garmin"
+    assert row["external_id"] == "garmin-19283746"
+    assert row["activity_type"] == "running"
+    assert row["active_calories"] == 612
+    assert row["distance_km"] == 9.24
+    assert row["duration_min"] == pytest.approx(2892.5 / 60)
+    assert row["avg_hr_bpm"] == 148
+    assert row["elevation_gain_m"] == 57.0
+    assert row["start_time"] == "2026-07-13 06:12:04"
+    assert row["raw"] == _REAL_RUN  # raw payload survives the JSON round-trip
+
+    # Evening re-sync of the same day (calories grew): still exactly one row.
+    fake2 = _FakeGarmin(stats=dict(_REAL_STATS, activeKilocalories=655),
+                        activities=[dict(_REAL_RUN)])
+    monkeypatch.setattr(garmin, "Garmin", lambda: fake2)
+    daily2 = garmin.fetch_daily_activity("2026-07-13")
+    database.save_activity(7, "2026-07-13", **garmin.to_activity_kwargs(daily2))
+
+    rows = database.get_activities(7, "2026-07-13", "2026-07-13")
+    assert len(rows) == 1
+    assert rows[0]["active_calories"] == 655
+
+
+def test_token_dir_env_quotes_and_whitespace_are_stripped(monkeypatch):
+    # Ops reality: .env files often carry GARMIN_TOKEN_DIR="/path" with quotes
+    # and stray spaces — login() must receive the cleaned path, not the junk.
+    fake = _FakeGarmin(stats={"activeKilocalories": 100})
+    monkeypatch.setattr(garmin, "Garmin", lambda: fake)
+    monkeypatch.setenv(garmin.GARMIN_ENABLED_ENV, "1")
+    monkeypatch.setenv(garmin.GARMIN_TOKEN_DIR_ENV, '  "/srv/garmin/tokens"  ')
+
+    assert garmin.is_configured() is True
+    daily = garmin.fetch_daily_activity("2026-07-13")
+
+    assert daily is not None
+    assert fake.logged_in_with == "/srv/garmin/tokens"
+
+
+def test_token_dir_of_only_quotes_counts_as_unconfigured(monkeypatch):
+    # An empty-but-quoted value ('""') is a missing config, not a valid path —
+    # the feature must gate off rather than attempt a login with junk.
+    monkeypatch.setattr(garmin, "Garmin", _FakeGarmin)
+    monkeypatch.setenv(garmin.GARMIN_ENABLED_ENV, "1")
+    monkeypatch.setenv(garmin.GARMIN_TOKEN_DIR_ENV, '""')
+
+    assert garmin.is_configured() is False
+    assert garmin.fetch_daily_activity("2026-07-13") is None
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off"])
+def test_falsy_garmin_enabled_values_disable_the_pull(monkeypatch, value):
+    # Every conventional "off" spelling must fully gate the pull: the client
+    # is never even constructed, so no network attempt can happen.
+    def _must_not_construct():
+        raise AssertionError("Garmin client constructed while disabled")
+
+    monkeypatch.setattr(garmin, "Garmin", _must_not_construct)
+    monkeypatch.setenv(garmin.GARMIN_ENABLED_ENV, value)
+    monkeypatch.setenv(garmin.GARMIN_TOKEN_DIR_ENV, "/tmp/garmin-tokens")
+
+    assert garmin.is_configured() is False
+    assert garmin.fetch_daily_activity("2026-07-13") is None
