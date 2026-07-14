@@ -677,6 +677,72 @@ def test_energy_balance_falls_back_to_active_when_total_absent(monkeypatch):
     assert "Net: ~50 kcal (consumed − active burn)" in report
 
 
+def test_energy_balance_distance_only_day_renders_distance_without_net(monkeypatch):
+    # Critic #9 (report side): "ran 9.2 km" logged without a kcal figure
+    # persists active_calories=NULL (the exact shape /activity's distance-only
+    # form writes); the old active-burn-only gate dropped the whole section,
+    # so the run never appeared in the nightly report. New intended behavior:
+    # the section renders with the distance line, but the burn and Net lines
+    # still require a real active burn — no net math off a burn never logged.
+    monkeypatch.delenv("GARMIN_NET_USE_TOTAL", raising=False)
+    _patch_meals(monkeypatch, [_meal(calories=500)])
+    _no_fitness_data(monkeypatch)
+    monkeypatch.setattr(
+        daily_report.database, "get_activities",
+        lambda *a, **k: [{"active_calories": None, "distance_km": 9.2, "raw": None}],
+    )
+
+    report = daily_report.generate_report("2026-06-25")
+
+    assert "⚡ Energy Balance" in report
+    assert "📏 Distance: 9.2 km" in report
+    assert "🔥 Active burn" not in report
+    assert "⚖️ Net" not in report
+
+
+def test_energy_balance_steps_only_day_renders_steps_without_net(monkeypatch):
+    # Same gate, steps flavor: steps ride inside the raw blob (as /activity
+    # persists them) and must surface even when no kcal figure exists.
+    monkeypatch.delenv("GARMIN_NET_USE_TOTAL", raising=False)
+    _patch_meals(monkeypatch, [_meal(calories=500)])
+    _no_fitness_data(monkeypatch)
+    monkeypatch.setattr(
+        daily_report.database, "get_activities",
+        lambda *a, **k: [{"active_calories": None, "distance_km": None,
+                          "raw": {"steps": 12000}}],
+    )
+
+    report = daily_report.generate_report("2026-06-25")
+
+    assert "⚡ Energy Balance" in report
+    assert "👟 Steps: 12,000" in report
+    assert "🔥 Active burn" not in report
+    assert "⚖️ Net" not in report
+
+
+def test_energy_balance_full_day_block_pinned_exactly(monkeypatch):
+    # Pins the EXACT full-day block (burn + steps + distance + net, in that
+    # order) so the distance/steps-only gate change provably did not drift
+    # the common burn-present rendering by a single byte.
+    monkeypatch.delenv("GARMIN_NET_USE_TOTAL", raising=False)
+    _patch_meals(monkeypatch, [_meal(calories=1850)])
+    _no_fitness_data(monkeypatch)
+    monkeypatch.setattr(
+        daily_report.database, "get_activities",
+        lambda *a, **k: [{"active_calories": 640, "distance_km": 9.2, "raw": {"steps": 12000}}],
+    )
+
+    report = daily_report.generate_report("2026-07-14")
+
+    assert (
+        "<b>⚡ Energy Balance</b>\n"
+        "🔥 Active burn: ~640 kcal\n"
+        "👟 Steps: 12,000\n"
+        "📏 Distance: 9.2 km\n"
+        "⚖️ Net: ~1,210 kcal (consumed − active burn)"
+    ) in report
+
+
 def test_weight_section_appears_with_body_weight(monkeypatch):
     _patch_meals(monkeypatch, [_meal(calories=500)])
     _no_fitness_data(monkeypatch)

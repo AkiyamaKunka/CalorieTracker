@@ -2361,6 +2361,19 @@ def _sum_active_calories(activities) -> float:
     return sum(safe_number(a.get("active_calories")) for a in activities or [])
 
 
+def _activity_totals(activities):
+    """(burned_kcal, steps, km) summed over ``activities``; junk-tolerant."""
+    burned = _sum_active_calories(activities)
+    steps = 0.0
+    km = 0.0
+    for activity in activities or []:
+        raw = activity.get("raw")
+        if isinstance(raw, dict):
+            steps += safe_number(raw.get("steps"))
+        km += safe_number(activity.get("distance_km"))
+    return burned, steps, km
+
+
 def _today_consumed_calories(chat_id: int) -> float:
     return sum(
         safe_number(m["analysis"].get("total_calories"))
@@ -2563,6 +2576,38 @@ def _macros_window(arg: str):
     return today.isoformat(), end, "today"
 
 
+def _daily_average_meals(meals):
+    """(pseudo_meals, logged_days): per-day-average totals over ``meals``.
+
+    Multi-day /macros windows must judge the AVERAGE day against the daily
+    targets — summing a week and comparing to one day's numbers misreads a
+    perfectly adherent keto week as ~6x over the carb cap. Averaging happens
+    here (over the distinct days that actually have food logged, not the
+    window length) so nutrition.analyze_macros stays pure and its
+    suggestions remain daily-sized.
+    """
+    totals = {"total_protein_g": 0.0, "total_carbs_g": 0.0,
+              "total_fat_g": 0.0, "total_calories": 0.0}
+    days = set()
+    for meal in meals or []:
+        if not isinstance(meal, dict):
+            continue
+        analysis = meal.get("analysis")
+        if not isinstance(analysis, dict) or analysis.get("is_food") is False:
+            continue
+        if meal.get("date"):
+            days.add(str(meal["date"]))
+        for key in totals:
+            # Mirror analyze_macros: hostile stored shapes must not skew
+            # or crash the averaging.
+            totals[key] += max(0.0, safe_number(analysis.get(key)))
+    logged_days = len(days)
+    divisor = max(1, logged_days)
+    averaged = {key: value / divisor for key, value in totals.items()}
+    averaged["is_food"] = True
+    return [{"analysis": averaged}], logged_days
+
+
 def _cmd_macros(bot: TelegramBot, chat_id: int, args: List[str]):
     start, end, label = _macros_window(args[0] if args else "today")
     meals = database.get_meals(chat_id, start, end)
@@ -2584,9 +2629,14 @@ def _cmd_macros(bot: TelegramBot, chat_id: int, args: List[str]):
         bot.send_message(chat_id, msg)
         return
 
-    analysis = nutrition.analyze_macros(meals, targets)
+    if start == end:  # single day: judge the day's intake directly
+        analysis = nutrition.analyze_macros(meals, targets)
+        head = f"<i>Window: {label}</i>"
+    else:  # multi-day: judge the per-day average against the daily targets
+        averaged, logged_days = _daily_average_meals(meals)
+        analysis = nutrition.analyze_macros(averaged, targets)
+        head = f"<i>Daily average over {label} ({logged_days} logged)</i>"
     report = nutrition.format_macro_report(analysis, targets, mode)
-    head = f"<i>Window: {label}</i>"
     if nudges:
         head += "\n" + "\n".join("• " + n for n in nudges)
     bot.send_message(chat_id, head + "\n\n" + report)
@@ -2672,28 +2722,27 @@ def format_activity_status(chat_id: int) -> str:
         )
         return "\n".join(lines)
 
-    burned = _sum_active_calories(activities)
-    steps_total = 0.0
-    km_total = 0.0
-    for activity in activities:
-        raw = activity.get("raw")
-        if isinstance(raw, dict):
-            steps_total += safe_number(raw.get("steps"))
-        km_total += safe_number(activity.get("distance_km"))
+    burned, steps_total, km_total = _activity_totals(activities)
 
-    lines.append(f"Burned: <b>{int(round(burned)):,} kcal</b>")
+    # A distance-only session (e.g. 'ran 9.2 km' with no kcal) must still
+    # show — but the net line is only honest when something was burned.
+    if burned > 0:
+        lines.append(f"Burned: <b>{int(round(burned)):,} kcal</b>")
     if steps_total:
         lines.append(f"Steps: {int(round(steps_total)):,}")
     if km_total:
         lines.append(f"Distance: {km_total:g} km")
+    if len(lines) == 2:  # rows exist but carry no usable numbers
+        lines.append("No burn, steps, or distance recorded yet today.")
 
-    consumed = _today_consumed_calories(chat_id)
-    net = consumed - burned
-    lines.append("")
-    lines.append(
-        f"⚖️ Net: <b>{int(round(net)):,} kcal</b> "
-        f"({int(round(consumed)):,} eaten − {int(round(burned)):,} burned)"
-    )
+    if burned > 0:
+        consumed = _today_consumed_calories(chat_id)
+        net = consumed - burned
+        lines.append("")
+        lines.append(
+            f"⚖️ Net: <b>{int(round(net)):,} kcal</b> "
+            f"({int(round(consumed)):,} eaten − {int(round(burned)):,} burned)"
+        )
     return "\n".join(lines)
 
 
@@ -2801,6 +2850,21 @@ def _parse_race_time(token) -> Optional[float]:
     return value if value > 0 else None
 
 
+def _stale_race_notice(profile: Dict, today: date) -> Optional[str]:
+    """One-line notice when a stored goal race date has already passed.
+
+    Legacy rows (stored before past dates were rejected) silently pin the
+    plan to base phase — surface why instead of letting the plan look broken.
+    """
+    race = _iso_date((profile or {}).get("goal_race_date"))
+    if race is None or race >= today:
+        return None
+    return (
+        f"🎯 Race date {race.isoformat()} has passed — set a new goal with "
+        "<code>/train_run race &lt;date&gt;</code>"
+    )
+
+
 def format_todays_run(chat_id: int) -> str:
     """Today's prescribed run for the user's plan (default plan if none set)."""
     today = database.user_local_today()
@@ -2818,6 +2882,9 @@ def format_todays_run(chat_id: int) -> str:
     weeks = _weeks_to_race(profile, today)
     if weeks is not None:
         lines.append(f"Race in ~{weeks:g} weeks")
+    notice = _stale_race_notice(profile, today)
+    if notice:
+        lines.append(notice)
     return "\n".join(lines)
 
 
@@ -2841,6 +2908,15 @@ def _train_run_set_race_date(bot: TelegramBot, chat_id: int, args: List[str]):
     when = _iso_date(args[1]) if len(args) >= 2 and _ISO_DATE_RE.match(args[1]) else None
     if when is None:
         bot.send_message(chat_id, "Usage: <code>/train_run race 2026-10-01</code>.")
+        return
+    if when < database.user_local_today():
+        # A past goal silently degrades the plan to base forever — reject it
+        # with feedback instead of storing it.
+        bot.send_message(
+            chat_id,
+            f"Race date {when.isoformat()} is in the past — use a future date, "
+            "e.g. <code>/train_run race 2026-10-01</code>.",
+        )
         return
     database.save_fitness_profile(chat_id, goal_race_date=when.isoformat())
     bot.send_message(chat_id, f"📅 Goal race date set to <b>{when.isoformat()}</b>.")
@@ -2932,6 +3008,9 @@ def format_week_plan(chat_id: int) -> str:
     weeks = _weeks_to_race(profile, today)
     if weeks is not None:
         lines.append(f"Weeks to race: ~{weeks:g}")
+    notice = _stale_race_notice(profile, today)
+    if notice:
+        lines.append(notice)
     return "\n".join(lines)
 
 
@@ -3041,11 +3120,20 @@ def format_today_summary(chat_id: int) -> str:
         f"📸 Meals: {len(meals)}",
     ]
 
-    # Net line only when the user actually burned something today.
-    burned = _sum_active_calories(_today_activities(chat_id))
+    # Net line only when the user actually burned something today. A
+    # distance/steps-only session (e.g. 'ran 9.2 km' with no kcal) still
+    # gets an activity line instead of vanishing from the summary.
+    burned, steps_total, km_total = _activity_totals(_today_activities(chat_id))
     if burned > 0:
         lines.append(f"🔥 Burned: {int(round(burned)):,} kcal")
         lines.append(f"⚖️ Net: <b>{int(round(total_cal - burned)):,} kcal</b>")
+    elif steps_total or km_total:
+        bits = []
+        if km_total:
+            bits.append(f"{km_total:g} km")
+        if steps_total:
+            bits.append(f"{int(round(steps_total)):,} steps")
+        lines.append("🏃 Activity: " + " · ".join(bits))
 
     # Typical-day comparison over the prior 7 user-local days (today excluded).
     # Median rather than mean: under-logged days would bias a mean low.

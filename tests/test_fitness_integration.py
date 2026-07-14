@@ -212,3 +212,118 @@ def test_meals_only_day_is_byte_identical_to_pre_fitness_report(fitness_env, mon
     for marker in ("Macro check", "Energy Balance", "Today's Training", "⚖️ Weight", "kg/wk"):
         assert marker not in with_fitness_code
     assert "Total Calories: ~1,850 kcal" in with_fitness_code
+
+
+# ═══ Appended: mid-day device-offset change (write-time dating contract) ═══
+#
+# The frozen instant 2026-07-14 04:00 UTC is 12:00 on the 14th at '+0800'
+# but 21:00 on the 13th at '-0700'. CONTRACT: every fitness write is stamped
+# with the device-local date in effect AT THE MOMENT of that write, so a
+# heartbeat offset change between two writes legitimately lands them on two
+# different calendar days — that is correct behavior, not a duplicate bug.
+
+PREV_DAY = "2026-07-13"  # the same frozen UTC instant, seen from '-0700'
+
+
+@pytest.fixture
+def tz_shift_env(monkeypatch, tmp_path):
+    """Real temp DB + frozen UTC clock + the REAL heartbeat-driven offset.
+
+    Unlike fitness_env, get_android_timezone is NOT stubbed: these tests
+    exercise the actual heartbeats row so the device-reported offset can
+    change between writes, exactly like a phone crossing timezones mid-day.
+    """
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "tz_shift.db")
+    database.init_db()
+    monkeypatch.setattr(database, "datetime", _FrozenUTC)
+    monkeypatch.setattr(daily_report, "CHAT_ID", str(CHAT))
+    monkeypatch.delenv("GARMIN_NET_USE_TOTAL", raising=False)
+    yield
+
+
+def test_offset_change_mid_day_dates_each_weigh_in_at_write_time(tz_shift_env):
+    bot = FakeBot()
+
+    database.update_android_heartbeat("android_watcher", timezone="+0800")
+    assert database.user_local_today().isoformat() == TODAY
+    telegram_bot._cmd_weight(bot, CHAT, ["71.8"])
+
+    # Device flies east→west: SAME frozen UTC instant, new local date.
+    database.update_android_heartbeat("android_watcher", timezone="-0700")
+    assert database.user_local_today().isoformat() == PREV_DAY
+    telegram_bot._cmd_weight(bot, CHAT, ["72.4"])
+
+    # Two rows on two dates is CORRECT: the one-weigh-in-per-day upsert is
+    # keyed on the user-local calendar day in effect at each write, so the
+    # second write must not overwrite (or be swallowed by) the first.
+    weights = database.get_body_weights(CHAT, PREV_DAY, TODAY)
+    assert [(w["date"], w["weight_kg"]) for w in weights] == [
+        (PREV_DAY, 72.4),
+        (TODAY, 71.8),
+    ]
+    # "Latest" keys off the max calendar date: the chronologically later
+    # write (dated the 13th) does not displace the 14th's weigh-in.
+    assert database.get_latest_body_weight(CHAT)["date"] == TODAY
+    # Each confirmation echoes its own write-time date to the user.
+    assert TODAY in bot.sent[0]["text"] and "71.8" in bot.sent[0]["text"]
+    assert PREV_DAY in bot.sent[1]["text"] and "72.4" in bot.sent[1]["text"]
+
+
+def test_offset_change_mid_day_dates_each_workout_at_write_time(tz_shift_env):
+    bot = FakeBot()
+
+    database.update_android_heartbeat("android_watcher", timezone="+0800")
+    telegram_bot._cmd_workout(bot, CHAT, ["legs"])
+
+    database.update_android_heartbeat("android_watcher", timezone="-0700")
+    telegram_bot._cmd_workout(bot, CHAT, ["chest"])
+
+    # Same write-time contract as weigh-ins: one session lands on each
+    # local date, and neither day's query sees the other's session.
+    assert [w["muscle_groups"] for w in database.get_workouts(CHAT, TODAY, TODAY)] == ["legs"]
+    assert [w["muscle_groups"] for w in database.get_workouts(CHAT, PREV_DAY, PREV_DAY)] == ["chest"]
+    assert len(database.get_workouts(CHAT, PREV_DAY, TODAY)) == 2
+
+
+def test_activity_after_offset_change_feeds_new_local_dates_report(tz_shift_env):
+    bot = FakeBot()
+
+    database.update_android_heartbeat("android_watcher", timezone="+0800")
+    assert database.user_local_today().isoformat() == TODAY
+    database.update_android_heartbeat("android_watcher", timezone="-0700")
+
+    telegram_bot._cmd_activity(bot, CHAT, ["640", "12000", "9.2"])
+
+    rows = database.get_activities(CHAT, PREV_DAY, PREV_DAY)
+    assert len(rows) == 1 and rows[0]["active_calories"] == 640
+    assert database.get_activities(CHAT, TODAY, TODAY) == []
+
+    # A just-written activity is picked up immediately by the report for
+    # ITS OWN (new-offset) local date...
+    report_prev = daily_report.generate_report(PREV_DAY)
+    assert "⚡ Energy Balance" in report_prev
+    assert "🔥 Active burn: ~640 kcal" in report_prev
+    assert "👟 Steps: 12,000" in report_prev
+    assert "📏 Distance: 9.2 km" in report_prev
+    # ...netted against that same date's meals (none logged on the 13th).
+    assert "⚖️ Net: ~-640 kcal (consumed − active burn)" in report_prev
+
+    # ...and never leaks into the pre-shift date's report.
+    report_today = daily_report.generate_report(TODAY)
+    assert "Energy Balance" not in report_today
+    assert "640" not in report_today
+
+
+@pytest.mark.parametrize(
+    "junk_day",
+    ["not-a-date", "", None, 12345, "2026-99-99"],
+    ids=["text", "empty", "none", "int", "bad-month"],
+)
+def test_week_plan_junk_day_falls_back_to_server_clock(junk_day):
+    # week_plan's fallback for an unparseable day is the SERVER clock
+    # (date.today()), so only the shape is pinned here: WHICH week comes
+    # back is wall-clock-dependent by design and deliberately not asserted.
+    plan = fitness_plan.week_plan({"vdot": 50.0}, junk_day)  # must not raise
+    assert len(plan) == 7
+    assert [day for day, _ in plan] == fitness_plan.DAY_NAMES
+    assert all(isinstance(workout, str) and workout for _, workout in plan)

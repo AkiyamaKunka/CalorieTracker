@@ -931,6 +931,63 @@ def test_macros_no_meals_nudges(mock_db, monkeypatch):
     assert "No diet mode set" in text
 
 
+def _save_daily_meals(days_ago_to_analysis):
+    """One meal per (days-ago, analysis) pair, on the user-local calendar."""
+    today = database.user_local_now().date()
+    now_iso = datetime.now().isoformat()
+    for days_ago, analysis in days_ago_to_analysis:
+        day = (today - timedelta(days=days_ago)).isoformat()
+        database.save_meal(CHAT, day, "12:00", now_iso, "t",
+                           f"avg-{days_ago}-{analysis.get('total_carbs_g')}", "f",
+                           {"is_food": True, "meal_description": "Meal", **analysis})
+
+
+def test_macros_week_judges_daily_average_not_summed_week(mock_db, monkeypatch):
+    """A perfectly adherent keto week (7 days x 40g carbs) must read as ok —
+    summing the week against the single-day 50g cap misread it as ~280g over."""
+    _stable_tz(monkeypatch)
+    database.save_fitness_profile(CHAT, diet_mode="keto")
+    _save_daily_meals([(d, {"total_calories": 1800, "total_protein_g": 110,
+                            "total_carbs_g": 40, "total_fat_g": 140})
+                       for d in range(7)])
+
+    bot = FakeBot()
+    telegram_bot._cmd_macros(bot, CHAT, ["week"])
+    text = bot.sent[-1]["text"]
+    assert "Daily average over last 7 days (7 logged)" in text
+    assert "Carbs: 40g / 50g" in text     # the average day, not the 280g sum
+    assert "over the 50g cap" not in text
+
+
+def test_macros_week_still_flags_a_genuinely_over_week(mock_db, monkeypatch):
+    _stable_tz(monkeypatch)
+    database.save_fitness_profile(CHAT, diet_mode="keto")
+    _save_daily_meals([(d, {"total_calories": 2200, "total_protein_g": 100,
+                            "total_carbs_g": 120, "total_fat_g": 150})
+                       for d in range(7)])
+
+    bot = FakeBot()
+    telegram_bot._cmd_macros(bot, CHAT, ["week"])
+    text = bot.sent[-1]["text"]
+    assert "Daily average over last 7 days (7 logged)" in text
+    assert "over the 50g cap" in text     # 120g/day average is truly over
+
+
+def test_macros_partial_week_averages_over_logged_days_only(mock_db, monkeypatch):
+    """3 logged days in a 7-day window average over 3, not 7 — dividing by
+    the window length would understate every day the user actually logged."""
+    _stable_tz(monkeypatch)
+    _save_daily_meals([(d, {"total_calories": 600, "total_protein_g": 30,
+                            "total_carbs_g": 60, "total_fat_g": 20})
+                       for d in (0, 2, 4)])
+
+    bot = FakeBot()
+    telegram_bot._cmd_macros(bot, CHAT, ["7"])
+    text = bot.sent[-1]["text"]
+    assert "Daily average over last 7 days (3 logged)" in text
+    assert "Calories: <b>600</b>" in text  # 1800/3, not 1800/7 (~257) or 1800
+
+
 # ── /workout & /train ──
 def test_workout_splits_groups_from_notes(mock_db, monkeypatch):
     _stable_tz(monkeypatch)
@@ -1026,8 +1083,51 @@ def test_train_run_vdot_and_race_subcommands(mock_db, monkeypatch):
     telegram_bot._cmd_train_run(bot, CHAT, ["vdot", "50"])
     assert database.get_fitness_profile(CHAT)["vdot"] == 50.0
 
-    telegram_bot._cmd_train_run(bot, CHAT, ["race", "2026-10-01"])
-    assert database.get_fitness_profile(CHAT)["goal_race_date"] == "2026-10-01"
+    # Dynamic future date: hardcoding one would start getting rejected as
+    # "in the past" once the calendar passes it.
+    future = (database.user_local_today() + timedelta(days=60)).isoformat()
+    telegram_bot._cmd_train_run(bot, CHAT, ["race", future])
+    assert database.get_fitness_profile(CHAT)["goal_race_date"] == future
+
+
+def test_train_run_race_rejects_past_date_and_stores_nothing(mock_db, monkeypatch):
+    """A past goal race pins the plan to base phase forever with zero
+    feedback — it must bounce with a clear reply instead of storing."""
+    _stable_tz(monkeypatch)
+    bot = FakeBot()
+    past = (database.user_local_today() - timedelta(days=1)).isoformat()
+    telegram_bot._cmd_train_run(bot, CHAT, ["race", past])
+
+    reply = bot.sent[-1]["text"]
+    assert "in the past" in reply
+    profile = database.get_fitness_profile(CHAT)
+    assert not (profile or {}).get("goal_race_date")
+
+
+def test_train_run_race_accepts_today(mock_db, monkeypatch):
+    _stable_tz(monkeypatch)
+    bot = FakeBot()
+    today = database.user_local_today().isoformat()
+    telegram_bot._cmd_train_run(bot, CHAT, ["race", today])
+    assert database.get_fitness_profile(CHAT)["goal_race_date"] == today
+    # Race day itself is not "passed": no stale notice anywhere.
+    assert "has passed" not in telegram_bot.format_todays_run(CHAT)
+    assert "has passed" not in telegram_bot.format_week_plan(CHAT)
+
+
+def test_stale_stored_race_date_notice_in_run_and_plan(mock_db, monkeypatch):
+    """A goal_race_date stored before past dates were rejected must surface a
+    one-line notice instead of silently showing base phase forever."""
+    _stable_tz(monkeypatch)
+    past = (database.user_local_today() - timedelta(days=10)).isoformat()
+    database.save_fitness_profile(CHAT, vdot=50.0, goal_race_date=past)
+
+    run_text = telegram_bot.format_todays_run(CHAT)
+    assert f"Race date {past} has passed" in run_text
+    assert "/train_run race" in run_text
+
+    plan_text = telegram_bot.format_week_plan(CHAT)
+    assert f"Race date {past} has passed" in plan_text
 
 
 def test_train_run_no_arg_uses_default_plan(mock_db, monkeypatch):
@@ -1087,6 +1187,41 @@ def test_today_summary_omits_net_without_activity(mock_db, monkeypatch):
     summary = telegram_bot.format_today_summary(CHAT)
     assert "Net:" not in summary
     assert "Burned:" not in summary
+
+
+def test_today_summary_shows_distance_only_activity_without_net(mock_db, monkeypatch):
+    """'ran 9.2 km' with no kcal must not vanish from /today — it gets an
+    activity line, while the net line still requires an actual burn."""
+    _stable_tz(monkeypatch)
+    today = database.user_local_now().date().isoformat()
+    database.save_meal(CHAT, today, "12:00", datetime.now().isoformat(), "test", "th3", "f",
+                       {"is_food": True, "meal_description": "Lunch", "total_calories": 600})
+    database.save_activity(CHAT, today, source="manual", activity_type="run",
+                           distance_km=9.2, raw={"steps": 8000})
+
+    summary = telegram_bot.format_today_summary(CHAT)
+    assert "🏃 Activity: 9.2 km · 8,000 steps" in summary
+    assert "Net:" not in summary
+    assert "Burned:" not in summary
+
+
+def test_activity_status_distance_only_shows_without_net(mock_db, monkeypatch):
+    """/activity with a distance-only session: totals show, but no 'Burned:
+    0 kcal' and no net line implying the run burned nothing."""
+    _stable_tz(monkeypatch)
+    today = database.user_local_now().date().isoformat()
+    database.save_meal(CHAT, today, "12:00", datetime.now().isoformat(), "test", "th4", "f",
+                       {"is_food": True, "meal_description": "Lunch", "total_calories": 600})
+    database.save_activity(CHAT, today, source="manual", activity_type="run",
+                           distance_km=9.2, raw={"steps": 8000})
+
+    bot = FakeBot()
+    telegram_bot._cmd_activity(bot, CHAT, [])
+    text = bot.sent[-1]["text"]
+    assert "Distance: 9.2 km" in text
+    assert "Steps: 8,000" in text
+    assert "Net:" not in text
+    assert "Burned:" not in text
 
 
 # ── NL write-intents ──
@@ -1364,13 +1499,16 @@ def test_activity_date_form_clamps_negative_kcal_to_zero(mock_db, monkeypatch):
 
 
 # ── /macros selector fuzz ───────────────────────────────────────────
-@pytest.mark.parametrize("selector,label", [
-    ("0", "today"),           # zero-day window clamps up to today
-    ("-3", "today"),          # negative clamps up to today
-    ("9999", "last 31 days"), # oversize clamps down to the 31-day cap
-    ("nan", "today"),         # unparsable falls back to today
+# Multi-day windows now report the per-day average, so their header is the
+# "Daily average over …" form rather than "Window: …" (pin moved for the
+# multi-day averaging change).
+@pytest.mark.parametrize("selector,header", [
+    ("0", "Window: today"),      # zero-day window clamps up to today
+    ("-3", "Window: today"),     # negative clamps up to today
+    ("9999", "Daily average over last 31 days (1 logged)"),  # oversize clamps to the 31-day cap
+    ("nan", "Window: today"),    # unparsable falls back to today
 ])
-def test_macros_selector_junk_clamps_to_sane_window(mock_db, monkeypatch, selector, label):
+def test_macros_selector_junk_clamps_to_sane_window(mock_db, monkeypatch, selector, header):
     _stable_tz(monkeypatch)
     today = database.user_local_now().date().isoformat()
     database.save_meal(CHAT, today, "12:00", datetime.now().isoformat(), "t",
@@ -1380,7 +1518,7 @@ def test_macros_selector_junk_clamps_to_sane_window(mock_db, monkeypatch, select
     bot = FakeBot()
     telegram_bot._cmd_macros(bot, CHAT, [selector])
     text = bot.sent[-1]["text"]
-    assert f"Window: {label}" in text
+    assert header in text
     assert "Macro check" in text
 
 

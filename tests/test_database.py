@@ -656,3 +656,67 @@ def test_get_latest_body_weight_uses_max_date_not_insertion_order():
     latest = database.get_latest_body_weight(1)
     assert latest["date"] == "2026-07-12"
     assert latest["weight_kg"] == 71.8
+
+
+# ═══ Appended WAL concurrency hammer: parallel writers on one temp DB ═══
+# The bot process, the nightly report cron and a Garmin re-sync can all hit
+# the same meals.db at once; each accessor opens its own connection, so the
+# WAL journal plus the 30s busy timeout in _connect() are what keep racing
+# writers from raising or corrupting rows. These tests pin that contract.
+from concurrent.futures import ThreadPoolExecutor
+
+_HAMMER_WRITES = 60
+_HAMMER_THREADS = 8
+_HAMMER_TIMEOUT = 120  # generous: WAL writers serialize behind the 30s busy timeout
+
+
+def _hammer(fn, args_list):
+    """Run fn over args_list on 8 threads; joins all threads, re-raises the
+    first worker exception (the 'no exception under contention' assertion)."""
+    with ThreadPoolExecutor(max_workers=_HAMMER_THREADS) as pool:
+        futures = [pool.submit(fn, *args) for args in args_list]
+        return [f.result(timeout=_HAMMER_TIMEOUT) for f in futures]
+
+
+def test_wal_concurrent_same_day_weigh_ins_collapse_to_one_row(mock_db_path):
+    # The autouse fixture's init_db must have left the temp file in WAL
+    # mode — the journal mode this concurrency contract is pinned against.
+    with sqlite3.connect(mock_db_path) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+
+    weights = [60.0 + i for i in range(_HAMMER_WRITES)]
+    ids = _hammer(database.save_body_weight,
+                  [(1, "2026-07-14", w) for w in weights])
+
+    rows = database.get_body_weights(1, "2026-07-14", "2026-07-14")
+    assert len(rows) == 1                        # UNIQUE(chat_id, date) upsert held
+    assert rows[0]["weight_kg"] in weights       # some writer's value, uncorrupted
+    assert set(ids) == {rows[0]["id"]}           # every upsert reported the same row
+
+
+def test_wal_concurrent_resyncs_of_one_external_id_collapse_to_one_row(mock_db_path):
+    def resync(cal):
+        return database.save_activity(1, "2026-07-14", "run", source="garmin",
+                                      active_calories=cal, external_id="garmin-1")
+
+    calories = [float(100 + i) for i in range(_HAMMER_WRITES)]
+    ids = _hammer(resync, [(c,) for c in calories])
+
+    rows = database.get_activities(1, "2026-07-14", "2026-07-14")
+    assert len(rows) == 1                        # UNIQUE(chat, source, external_id) held
+    assert rows[0]["active_calories"] in calories
+    assert set(ids) == {rows[0]["id"]}           # stable row id across racing re-syncs
+
+
+def test_wal_concurrent_workout_appends_all_survive(mock_db_path):
+    def append(i):
+        return database.save_workout(1, "2026-07-14",
+                                     "strength" if i % 2 else "mobility",
+                                     muscle_groups="legs", notes=f"set-{i}")
+
+    ids = _hammer(append, [(i,) for i in range(_HAMMER_WRITES)])
+
+    rows = database.get_workouts(1, "2026-07-14", "2026-07-14")
+    assert len(rows) == _HAMMER_WRITES           # append-only: no lost inserts
+    assert len(set(ids)) == _HAMMER_WRITES       # each append got its own row id
+    assert {r["notes"] for r in rows} == {f"set-{i}" for i in range(_HAMMER_WRITES)}

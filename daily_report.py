@@ -194,7 +194,13 @@ def _section_diet_targets(lines, chat_id, target_date, profile, anchor_weight):
 
 
 def _section_energy_balance(lines, activities_today, grand_cal):
-    """Append Energy Balance — only when an activity with active burn exists."""
+    """Append Energy Balance — when any burn, steps or distance exists today.
+
+    A distance/steps-only day (e.g. "ran 9.2 km" logged without a kcal
+    figure) still renders its lines; the burn and Net lines stay gated on
+    active burn > 0 so the net math never runs off a burn that was never
+    logged.
+    """
     active = 0
     total = 0
     steps = 0
@@ -211,19 +217,22 @@ def _section_energy_balance(lines, activities_today, grand_cal):
         steps += _row_extra_number(row, "steps", "totalSteps")
         distance_km += safe_number(row.get("distance_km"))
 
+    if not (has_active or steps > 0 or distance_km > 0):
+        return
+
+    lines.append("")
+    lines.append("<b>⚡ Energy Balance</b>")
+    if has_active:
+        lines.append(f"🔥 Active burn: ~{int(round(active)):,} kcal")
+    if steps > 0:
+        lines.append(f"👟 Steps: {int(round(steps)):,}")
+    if distance_km > 0:
+        lines.append(f"📏 Distance: {distance_km:.1f} km")
     if has_active:
         use_total = _net_use_total() and total > 0
         burn = total if use_total else active
         net = safe_number(grand_cal) - burn
         basis = "total" if use_total else "active"
-
-        lines.append("")
-        lines.append("<b>⚡ Energy Balance</b>")
-        lines.append(f"🔥 Active burn: ~{int(round(active)):,} kcal")
-        if steps > 0:
-            lines.append(f"👟 Steps: {int(round(steps)):,}")
-        if distance_km > 0:
-            lines.append(f"📏 Distance: {distance_km:.1f} km")
         # Net defaults to consumed − ACTIVE burn (exercise-attributable);
         # GARMIN_NET_USE_TOTAL=1 nets against whole-day total when present.
         lines.append(f"⚖️ Net: ~{int(round(net)):,} kcal (consumed − {basis} burn)")
@@ -316,7 +325,7 @@ def _fitness_sections(chat_id, target_date, grand_cal):
     except Exception:
         pass
 
-    # 2. Energy Balance — only when an activity with active burn exists today.
+    # 2. Energy Balance — only when today has any burn, steps or distance.
     try:
         _section_energy_balance(lines, activities_today, grand_cal)
     except Exception:
