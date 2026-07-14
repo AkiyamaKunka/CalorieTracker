@@ -38,6 +38,13 @@ Trigger:
      - Type: File
      - Value: the photo from Step 1
 
+   - Form field (added 2026-07-14):
+     - Key: `captured_at`
+     - Type: Text
+     - Value: the photo's Creation Date formatted `yyyy-MM-dd HH:mm:ss`
+       (lets a delayed/backfilled upload land on the day the photo was TAKEN;
+       the server validates and falls back to upload-time dating)
+
 4. Optional: Get Dictionary from Contents of URL
    - If `status` is `processing_in_background`, do nothing.
    - If `status` is `duplicate`, `already_processing`, or `already_saved_for_retry`, do nothing.
