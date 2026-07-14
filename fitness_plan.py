@@ -269,6 +269,21 @@ def phase_for_date(profile, day):
     return "base"
 
 
+def weeks_to_race(profile, day):
+    """Weeks (1 d.p.) until the profile's goal race, or None if unset/past.
+
+    Never raises on a missing/partial profile or a junk ``day``.
+    """
+    today = _as_date(day)
+    race = _goal_race_date(profile)
+    if today is None or race is None:
+        return None
+    days = (race - today).days
+    if days < 0:
+        return None
+    return round(days / 7.0, 1)
+
+
 # --- workout text ---------------------------------------------------------
 
 def _easy_text(paces):

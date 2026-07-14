@@ -76,6 +76,16 @@ def _g(value) -> str:
     return "{}g".format(int(round(safe_number(value))))
 
 
+def format_split_line(split) -> str:
+    """Render a P/C/F percentage split dict as the shared ``Split:`` line."""
+    split = split if isinstance(split, dict) else {}
+    return "Split: P {}% · C {}% · F {}%".format(
+        int(round(safe_number(split.get("protein")))),
+        int(round(safe_number(split.get("carbs")))),
+        int(round(safe_number(split.get("fat")))),
+    )
+
+
 def diet_targets(mode, weight_kg=None, calorie_target=None, protein_g_per_kg=None) -> dict:
     """Compute macro targets for a diet mode.
 
@@ -128,6 +138,25 @@ def diet_targets(mode, weight_kg=None, calorie_target=None, protein_g_per_kg=Non
         result["target_fat_g"] = round(f_g)
 
     return result
+
+
+def profile_diet_targets(mode, weight_kg, profile) -> dict:
+    """Mode targets overlaid with the profile's explicit gram targets.
+
+    Explicit gram targets from '/diet target …' win over mode-derived ones,
+    so the daily report and /macros always agree.
+    """
+    targets = diet_targets(
+        mode,
+        weight_kg=weight_kg,
+        calorie_target=(profile or {}).get("target_calories"),
+        protein_g_per_kg=(profile or {}).get("protein_g_per_kg"),
+    )
+    for key in ("target_protein_g", "target_carbs_g", "target_fat_g"):
+        stored = safe_number((profile or {}).get(key), None)
+        if stored is not None:
+            targets[key] = stored
+    return targets
 
 
 def _iter_analyses(meals):
@@ -343,13 +372,7 @@ def format_macro_report(analysis_result, targets, mode) -> str:
         lines.append(line.rstrip())
 
     if actual_split:
-        lines.append(
-            "Split: P {}% · C {}% · F {}%".format(
-                int(round(safe_number(actual_split.get("protein")))),
-                int(round(safe_number(actual_split.get("carbs")))),
-                int(round(safe_number(actual_split.get("fat")))),
-            )
-        )
+        lines.append(format_split_line(actual_split))
 
     if suggestions:
         lines.append("")
@@ -400,8 +423,8 @@ _WEIGHT_KEYWORD_RE = re.compile(
     r"weigh(?:ed|s|t)?\D{0,12}?(?<![\w.])(\d+(?:\.\d+)?)", re.IGNORECASE
 )
 _LB_TO_KG = 0.45359237
-_MIN_KG = 30
-_MAX_KG = 300
+MIN_WEIGHT_KG = 30
+MAX_WEIGHT_KG = 300
 
 
 def parse_weight_kg(text) -> Optional[float]:
@@ -422,13 +445,13 @@ def parse_weight_kg(text) -> Optional[float]:
         unit = unit.lower()
         kg = value * _LB_TO_KG if unit.startswith(("lb", "pound")) else value
         kg = round(kg, 1)
-        if _MIN_KG <= kg <= _MAX_KG:
+        if MIN_WEIGHT_KG <= kg <= MAX_WEIGHT_KG:
             return kg
 
     match = _WEIGHT_KEYWORD_RE.search(text)
     if match:
         kg = round(float(match.group(1)), 1)
-        if _MIN_KG <= kg <= _MAX_KG:
+        if MIN_WEIGHT_KG <= kg <= MAX_WEIGHT_KG:
             return kg
 
     return None

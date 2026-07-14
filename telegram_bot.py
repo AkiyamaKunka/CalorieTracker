@@ -67,6 +67,7 @@ from config import (
 from utils import (
     meal_calorie_mismatch,
     parse_ai_json,
+    parse_boolish,
     safe_food_items,
     safe_number,
     telegram_message_chunks,
@@ -129,6 +130,7 @@ RETRY_ALL_FAILED_MAX = _env_int("RETRY_ALL_FAILED_MAX", 10, 1, 50)
 MAX_API_UPLOAD_BYTES = _env_int("MAX_API_UPLOAD_BYTES", 25 * 1024 * 1024, 1024, 100 * 1024 * 1024)
 # How many days of meals a natural-language correction/delete can reach back
 # over (widened from 3 so "earlier this week" resolves, not just "yesterday").
+# NOTE: HELP_TEXT's Corrections section states this number — keep them in sync.
 TEXT_EDIT_WINDOW_DAYS = _env_int("TEXT_EDIT_WINDOW_DAYS", 7, 1, 31)
 ANDROID_VPN_WARNING_COOLDOWN_MINUTES = _env_int("ANDROID_VPN_WARNING_COOLDOWN_MINUTES", 30, 0, 1440)
 IOS_VPN_WARNING_COOLDOWN_MINUTES = _env_int("IOS_VPN_WARNING_COOLDOWN_MINUTES", 30, 0, 1440)
@@ -200,7 +202,7 @@ You can also send food photos directly here (Android)!
 📸 Send a food photo for instant calorie analysis
 
 <b>Corrections:</b>
-Just type a correction in natural language! I remember your meals from the last 3 days.
+Just type a correction in natural language! I remember your meals from the last 7 days.
 • "change yesterday's lunch to 400 kcal"
 • "the lunch today was pad thai not fried rice"
 • "I didn't eat the rice on Tuesday"
@@ -367,7 +369,7 @@ class TelegramBot:
 # ─── Meals Data Access ─────────────────────────────────────────────
 def get_todays_meals(chat_id: int) -> List[Dict]:
     """Get all food meals logged today (user-local date)."""
-    today_str = database.user_local_now().date().isoformat()
+    today_str = database.user_local_today().isoformat()
     meals = database.get_meals(chat_id, today_str, today_str)
     return [m for m in meals if m.get("analysis", {}).get("is_food")]
 
@@ -843,16 +845,7 @@ def _finish_api_upload_processing(image_hash: str):
         _api_upload_processing_hashes.discard(image_hash)
 
 
-def _parse_boolish(value) -> Optional[bool]:
-    if value is None:
-        return None
-
-    normalized = str(value).strip().lower()
-    if normalized in {"1", "true", "yes", "y", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "n", "off"}:
-        return False
-    return None
+_parse_boolish = parse_boolish
 
 
 def _vpn_status_from_request() -> tuple[Optional[bool], str]:
@@ -1885,9 +1878,9 @@ def format_android_status() -> str:
 def _parse_report_date_selector(selector: str) -> str:
     normalized = (selector or "today").strip().lower()
     if normalized in {"", "today"}:
-        return database.user_local_now().date().isoformat()
+        return database.user_local_today().isoformat()
     if normalized in {"yesterday", "last"}:
-        return (database.user_local_now().date() - timedelta(days=1)).isoformat()
+        return (database.user_local_today() - timedelta(days=1)).isoformat()
     try:
         parsed = date.fromisoformat(normalized)
     except ValueError as e:
@@ -2040,7 +2033,7 @@ def format_safe_config() -> str:
 
 
 def format_database_stats(chat_id: int) -> str:
-    local_today = database.user_local_now().date()
+    local_today = database.user_local_today()
     today_str = local_today.isoformat()
     seven_days_ago = (local_today - timedelta(days=6)).isoformat()
     all_meals = database.get_meals(chat_id, "1970-01-01", today_str)
@@ -2102,7 +2095,7 @@ def run_doctor(gemini_client) -> str:
     lines = ["🩺 <b>CalorieTracker Doctor</b>"]
 
     try:
-        local_today_str = database.user_local_now().date().isoformat()
+        local_today_str = database.user_local_today().isoformat()
         database.get_meals(ALLOWED_CHAT_ID, local_today_str, local_today_str)
         lines.append("✅ Database readable")
     except Exception as e:
@@ -2254,6 +2247,13 @@ ACTIVITY_KCAL_MAX = 20000
 ACTIVITY_STEPS_MAX = 200000
 ACTIVITY_KM_MAX = 500
 
+# Weigh-in staleness warning threshold (unrelated to TRAIN_LOOKBACK_DAYS's 14).
+WEIGHT_STALE_AFTER_DAYS = 14
+# /train recommendation lookback (unrelated to WEIGHT_STALE_AFTER_DAYS's 14).
+TRAIN_LOOKBACK_DAYS = 14
+# Body-weight trend window for /weight (mirrored in daily_report — no import).
+WEIGHT_TREND_WINDOW_DAYS = 7
+
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Deterministic read-only fitness questions answered with ZERO Gemini spend.
@@ -2334,35 +2334,26 @@ def _display_vdot(profile: Dict) -> float:
 
 
 def _weeks_to_race(profile: Dict, today: date) -> Optional[float]:
-    race = _iso_date((profile or {}).get("goal_race_date"))
-    if race is None:
-        return None
-    days = (race - today).days
-    if days < 0:
-        return None
-    return round(days / 7.0, 1)
+    return fitness_plan.weeks_to_race(profile, today)
 
 
 def _resolved_diet_targets(profile: Dict, latest_weight: Optional[Dict]):
     """(mode, targets) resolving diet_mode + stored targets + latest weight."""
     mode = (profile or {}).get("diet_mode") or "balanced"
     weight = safe_number(latest_weight.get("weight_kg")) if latest_weight else None
-    targets = nutrition.diet_targets(
-        mode,
-        weight_kg=weight,
-        calorie_target=(profile or {}).get("target_calories"),
-        protein_g_per_kg=(profile or {}).get("protein_g_per_kg"),
-    )
-    # Explicit gram targets from '/diet target …' win over mode-derived ones.
-    for key in ("target_protein_g", "target_carbs_g", "target_fat_g"):
-        stored = safe_number((profile or {}).get(key), None)
-        if stored is not None:
-            targets[key] = stored
-    return mode, targets
+    return mode, nutrition.profile_diet_targets(mode, weight, profile)
+
+
+def _diet_context(chat_id: int):
+    """(profile, latest, mode, targets) shared by the diet-facing commands."""
+    profile = _profile_or_empty(chat_id)
+    latest = database.get_latest_body_weight(chat_id)
+    mode, targets = _resolved_diet_targets(profile, latest)
+    return profile, latest, mode, targets
 
 
 def _today_activities(chat_id: int) -> List[Dict]:
-    today = database.user_local_now().date().isoformat()
+    today = database.user_local_today().isoformat()
     return database.get_activities(chat_id, today, today)
 
 
@@ -2390,22 +2381,22 @@ def format_weight_status(chat_id: int) -> str:
     date_str = latest.get("date", "?")
     lines = ["⚖️ <b>Weight</b>", "", f"Latest: <b>{kg:g} kg</b> ({_html(date_str)})"]
 
-    today = database.user_local_now().date()
+    today = database.user_local_today()
     logged = _iso_date(date_str)
     if logged is not None:
         age = (today - logged).days
-        if age > 14:
+        if age > WEIGHT_STALE_AFTER_DAYS:
             lines.append(f"⚠️ That's {age} days old — send a fresh <code>/weight</code>.")
 
     weights = database.get_body_weights(
-        chat_id, (today - timedelta(days=7)).isoformat(), today.isoformat()
+        chat_id, (today - timedelta(days=WEIGHT_TREND_WINDOW_DAYS)).isoformat(), today.isoformat()
     )
     if len(weights) >= 2:
         first = safe_number(weights[0].get("weight_kg"))
         last = safe_number(weights[-1].get("weight_kg"))
         delta = round(last - first, 1)
         arrow = "▼" if delta < 0 else ("▲" if delta > 0 else "▬")
-        lines.append(f"7-day trend: {arrow} {delta:+g} kg ({len(weights)} weigh-ins)")
+        lines.append(f"{WEIGHT_TREND_WINDOW_DAYS}-day trend: {arrow} {delta:+g} kg ({len(weights)} weigh-ins)")
     return "\n".join(lines)
 
 
@@ -2424,7 +2415,7 @@ def _cmd_weight(bot: TelegramBot, chat_id: int, args: List[str]):
             "or <code>/weight 159 lb</code> (30–300 kg).",
         )
         return
-    today = database.user_local_now().date()
+    today = database.user_local_today()
     database.save_body_weight(chat_id, today.isoformat(), kg, source="telegram")
     bot.send_message(chat_id, f"⚖️ Logged <b>{kg:g} kg</b> for {today.isoformat()}.")
 
@@ -2432,9 +2423,7 @@ def _cmd_weight(bot: TelegramBot, chat_id: int, args: List[str]):
 # ── /diet ──────────────────────────────────────────────────────────
 def format_diet_status(chat_id: int) -> str:
     """Current diet mode + latest weight + resolved macro targets + disclaimer."""
-    profile = _profile_or_empty(chat_id)
-    latest = database.get_latest_body_weight(chat_id)
-    _mode, targets = _resolved_diet_targets(profile, latest)
+    profile, latest, _mode, targets = _diet_context(chat_id)
     label = nutrition.MODE_SPECS[targets["mode"]]["label"]
 
     lines = ["🥗 <b>Diet plan</b>", "", f"Mode: <b>{_html(label)}</b>"]
@@ -2465,13 +2454,7 @@ def format_diet_status(chat_id: int) -> str:
         lines.append("Targets: " + " · ".join(macro_bits))
     split = targets.get("split") or {}
     if split:
-        lines.append(
-            "Split: P {}% · C {}% · F {}%".format(
-                int(round(safe_number(split.get("protein")))),
-                int(round(safe_number(split.get("carbs")))),
-                int(round(safe_number(split.get("fat")))),
-            )
-        )
+        lines.append(nutrition.format_split_line(split))
     cap = targets.get("carb_cap_g")
     if cap:
         lines.append(f"Carb cap: {int(cap)}g")
@@ -2481,6 +2464,63 @@ def format_diet_status(chat_id: int) -> str:
     return "\n".join(lines)
 
 
+def _diet_set_mode(bot: TelegramBot, chat_id: int, args: List[str]):
+    sub = args[0].lower()
+    database.save_fitness_profile(chat_id, diet_mode=sub)
+    label = nutrition.MODE_SPECS[sub]["label"]
+    bot.send_message(
+        chat_id,
+        f"🥗 Diet mode set to <b>{_html(label)}</b>.\n\n"
+        f"<i>{_html(nutrition.DISCLAIMER)}</i>",
+    )
+
+
+def _diet_set_target(bot: TelegramBot, chat_id: int, args: List[str]):
+    nums = args[1:]
+    if len(nums) < 4:
+        bot.send_message(
+            chat_id,
+            "Usage: <code>/diet target &lt;cal&gt; &lt;protein_g&gt; "
+            "&lt;carbs_g&gt; &lt;fat_g&gt;</code>",
+        )
+        return
+    cal = int(round(_arg_float(nums[0])))
+    if cal <= 0:
+        bot.send_message(chat_id, "Calorie target must be a positive number.")
+        return
+    protein = int(round(_arg_float(nums[1])))
+    carbs = int(round(_arg_float(nums[2])))
+    fat = int(round(_arg_float(nums[3])))
+    database.save_fitness_profile(
+        chat_id,
+        target_calories=cal,
+        target_protein_g=protein,
+        target_carbs_g=carbs,
+        target_fat_g=fat,
+    )
+    bot.send_message(
+        chat_id,
+        f"🎯 Targets set: <b>{cal:,} kcal</b> · P {protein}g · C {carbs}g · F {fat}g.",
+    )
+
+
+def _diet_set_protein(bot: TelegramBot, chat_id: int, args: List[str]):
+    if len(args) < 2:
+        bot.send_message(chat_id, "Usage: <code>/diet protein &lt;g_per_kg&gt;</code>")
+        return
+    ppk = round(_arg_float(args[1]), 2)
+    if ppk <= 0:
+        bot.send_message(chat_id, "Protein target must be a positive g/kg number.")
+        return
+    database.save_fitness_profile(chat_id, protein_g_per_kg=ppk)
+    bot.send_message(
+        chat_id, f"🥩 Protein target set to <b>{ppk:g} g/kg</b> of body weight."
+    )
+
+
+_DIET_SUBCOMMANDS = {"target": _diet_set_target, "protein": _diet_set_protein}
+
+
 def _cmd_diet(bot: TelegramBot, chat_id: int, args: List[str]):
     if not args:
         bot.send_message(chat_id, format_diet_status(chat_id))
@@ -2488,56 +2528,12 @@ def _cmd_diet(bot: TelegramBot, chat_id: int, args: List[str]):
     sub = args[0].lower()
 
     if sub in nutrition.DIET_MODES:
-        database.save_fitness_profile(chat_id, diet_mode=sub)
-        label = nutrition.MODE_SPECS[sub]["label"]
-        bot.send_message(
-            chat_id,
-            f"🥗 Diet mode set to <b>{_html(label)}</b>.\n\n"
-            f"<i>{_html(nutrition.DISCLAIMER)}</i>",
-        )
+        _diet_set_mode(bot, chat_id, args)
         return
 
-    if sub == "target":
-        nums = args[1:]
-        if len(nums) < 4:
-            bot.send_message(
-                chat_id,
-                "Usage: <code>/diet target &lt;cal&gt; &lt;protein_g&gt; "
-                "&lt;carbs_g&gt; &lt;fat_g&gt;</code>",
-            )
-            return
-        cal = int(round(_arg_float(nums[0])))
-        if cal <= 0:
-            bot.send_message(chat_id, "Calorie target must be a positive number.")
-            return
-        protein = int(round(_arg_float(nums[1])))
-        carbs = int(round(_arg_float(nums[2])))
-        fat = int(round(_arg_float(nums[3])))
-        database.save_fitness_profile(
-            chat_id,
-            target_calories=cal,
-            target_protein_g=protein,
-            target_carbs_g=carbs,
-            target_fat_g=fat,
-        )
-        bot.send_message(
-            chat_id,
-            f"🎯 Targets set: <b>{cal:,} kcal</b> · P {protein}g · C {carbs}g · F {fat}g.",
-        )
-        return
-
-    if sub == "protein":
-        if len(args) < 2:
-            bot.send_message(chat_id, "Usage: <code>/diet protein &lt;g_per_kg&gt;</code>")
-            return
-        ppk = round(_arg_float(args[1]), 2)
-        if ppk <= 0:
-            bot.send_message(chat_id, "Protein target must be a positive g/kg number.")
-            return
-        database.save_fitness_profile(chat_id, protein_g_per_kg=ppk)
-        bot.send_message(
-            chat_id, f"🥩 Protein target set to <b>{ppk:g} g/kg</b> of body weight."
-        )
+    handler = _DIET_SUBCOMMANDS.get(sub)
+    if handler:
+        handler(bot, chat_id, args)
         return
 
     bot.send_message(
@@ -2551,7 +2547,7 @@ def _cmd_diet(bot: TelegramBot, chat_id: int, args: List[str]):
 # ── /macros ────────────────────────────────────────────────────────
 def _macros_window(arg: str):
     """(start_iso, end_iso, label) for a today|week|N-day selector."""
-    today = database.user_local_now().date()
+    today = database.user_local_today()
     end = today.isoformat()
     key = (arg or "today").lower()
     if key == "week":
@@ -2570,9 +2566,7 @@ def _macros_window(arg: str):
 def _cmd_macros(bot: TelegramBot, chat_id: int, args: List[str]):
     start, end, label = _macros_window(args[0] if args else "today")
     meals = database.get_meals(chat_id, start, end)
-    profile = _profile_or_empty(chat_id)
-    latest = database.get_latest_body_weight(chat_id)
-    mode, targets = _resolved_diet_targets(profile, latest)
+    profile, latest, mode, targets = _diet_context(chat_id)
 
     nudges = []
     if not profile.get("diet_mode"):
@@ -2620,7 +2614,7 @@ def _cmd_workout(bot: TelegramBot, chat_id: int, args: List[str]):
         )
         return
     groups, notes = _split_workout_args(args)
-    today = database.user_local_now().date().isoformat()
+    today = database.user_local_today().isoformat()
     database.save_workout(
         chat_id, today, muscle_groups=groups, notes=notes, source="telegram"
     )
@@ -2633,9 +2627,9 @@ def _cmd_workout(bot: TelegramBot, chat_id: int, args: List[str]):
 # ── /train (Feature 5) ─────────────────────────────────────────────
 def format_train_recommendation(chat_id: int) -> str:
     """Days since each strength group was trained; recommend the most overdue."""
-    today = database.user_local_now().date()
+    today = database.user_local_today()
     workouts = database.get_workouts(
-        chat_id, (today - timedelta(days=14)).isoformat(), today.isoformat()
+        chat_id, (today - timedelta(days=TRAIN_LOOKBACK_DAYS)).isoformat(), today.isoformat()
     )
     last_seen: Dict[str, date] = {}
     for workout in workouts:
@@ -2653,7 +2647,7 @@ def format_train_recommendation(chat_id: int) -> str:
         days = (today - last_seen[group]).days if group in last_seen else None
         scored.append((group, days))
         if days is None:
-            lines.append(f"• {group.capitalize()}: <b>not in last 14d</b>")
+            lines.append(f"• {group.capitalize()}: <b>not in last {TRAIN_LOOKBACK_DAYS}d</b>")
         elif days == 0:
             lines.append(f"• {group.capitalize()}: today")
         else:
@@ -2708,7 +2702,7 @@ def _cmd_activity(bot: TelegramBot, chat_id: int, args: List[str]):
         bot.send_message(chat_id, format_activity_status(chat_id))
         return
 
-    today = database.user_local_now().date().isoformat()
+    today = database.user_local_today().isoformat()
 
     # Date form: /activity <YYYY-MM-DD> <kcal>
     if _ISO_DATE_RE.match(args[0]):
@@ -2809,7 +2803,7 @@ def _parse_race_time(token) -> Optional[float]:
 
 def format_todays_run(chat_id: int) -> str:
     """Today's prescribed run for the user's plan (default plan if none set)."""
-    today = database.user_local_now().date()
+    today = database.user_local_today()
     profile = _profile_for_plan(chat_id, today)
     workout = fitness_plan.todays_workout(profile, today)
     phase = fitness_plan.phase_for_date(profile, today)
@@ -2827,63 +2821,77 @@ def format_todays_run(chat_id: int) -> str:
     return "\n".join(lines)
 
 
+def _train_run_set_vdot(bot: TelegramBot, chat_id: int, args: List[str]):
+    if len(args) < 2:
+        bot.send_message(chat_id, "Usage: <code>/train_run vdot 50</code>.")
+        return
+    vdot = _arg_float(args[1], 0)
+    if not (fitness_plan.VDOT_MIN <= vdot <= fitness_plan.VDOT_MAX):
+        bot.send_message(
+            chat_id,
+            f"VDOT must be between {int(fitness_plan.VDOT_MIN)} "
+            f"and {int(fitness_plan.VDOT_MAX)}.",
+        )
+        return
+    database.save_fitness_profile(chat_id, vdot=float(vdot))
+    bot.send_message(chat_id, f"🏃 VDOT set to <b>{vdot:g}</b>. Training paces updated.")
+
+
+def _train_run_set_race_date(bot: TelegramBot, chat_id: int, args: List[str]):
+    when = _iso_date(args[1]) if len(args) >= 2 and _ISO_DATE_RE.match(args[1]) else None
+    if when is None:
+        bot.send_message(chat_id, "Usage: <code>/train_run race 2026-10-01</code>.")
+        return
+    database.save_fitness_profile(chat_id, goal_race_date=when.isoformat())
+    bot.send_message(chat_id, f"📅 Goal race date set to <b>{when.isoformat()}</b>.")
+
+
+def _train_run_log_race_result(bot: TelegramBot, chat_id: int, args: List[str]) -> bool:
+    """True = replied and handled; False = fall through to usage."""
+    meters, label = _parse_race_distance(args[0])
+    seconds = _parse_race_time(args[1])
+    if meters is not None and seconds is not None:
+        vdot = fitness_plan.vdot_from_race(meters, seconds)
+        if vdot is None:
+            bot.send_message(
+                chat_id,
+                "Couldn't compute VDOT from that race. Check the distance and time.",
+            )
+            return True
+        vdot = round(vdot, 1)
+        database.save_fitness_profile(
+            chat_id,
+            vdot=float(vdot),
+            race_distance_km=meters / 1000.0,
+            race_time_seconds=int(round(seconds)),
+            race_label=label,
+        )
+        bot.send_message(
+            chat_id,
+            f"🏃 Computed <b>VDOT {vdot:g}</b> from {_html(label)} "
+            f"in {_html(args[1])}.\nTraining paces updated.",
+        )
+        return True
+    return False
+
+
+_TRAIN_RUN_SUBCOMMANDS = {"vdot": _train_run_set_vdot, "race": _train_run_set_race_date}
+
+
 def _cmd_train_run(bot: TelegramBot, chat_id: int, args: List[str]):
     if not args:
         bot.send_message(chat_id, format_todays_run(chat_id))
         return
     sub = args[0].lower()
 
-    if sub == "vdot":
-        if len(args) < 2:
-            bot.send_message(chat_id, "Usage: <code>/train_run vdot 50</code>.")
-            return
-        vdot = _arg_float(args[1], 0)
-        if not (fitness_plan.VDOT_MIN <= vdot <= fitness_plan.VDOT_MAX):
-            bot.send_message(
-                chat_id,
-                f"VDOT must be between {int(fitness_plan.VDOT_MIN)} "
-                f"and {int(fitness_plan.VDOT_MAX)}.",
-            )
-            return
-        database.save_fitness_profile(chat_id, vdot=float(vdot))
-        bot.send_message(chat_id, f"🏃 VDOT set to <b>{vdot:g}</b>. Training paces updated.")
-        return
-
-    if sub == "race":
-        when = _iso_date(args[1]) if len(args) >= 2 and _ISO_DATE_RE.match(args[1]) else None
-        if when is None:
-            bot.send_message(chat_id, "Usage: <code>/train_run race 2026-10-01</code>.")
-            return
-        database.save_fitness_profile(chat_id, goal_race_date=when.isoformat())
-        bot.send_message(chat_id, f"📅 Goal race date set to <b>{when.isoformat()}</b>.")
+    handler = _TRAIN_RUN_SUBCOMMANDS.get(sub)
+    if handler:
+        handler(bot, chat_id, args)
         return
 
     # /train_run <distance> <time>  -> compute & store VDOT
-    if len(args) >= 2:
-        meters, label = _parse_race_distance(args[0])
-        seconds = _parse_race_time(args[1])
-        if meters is not None and seconds is not None:
-            vdot = fitness_plan.vdot_from_race(meters, seconds)
-            if vdot is None:
-                bot.send_message(
-                    chat_id,
-                    "Couldn't compute VDOT from that race. Check the distance and time.",
-                )
-                return
-            vdot = round(vdot, 1)
-            database.save_fitness_profile(
-                chat_id,
-                vdot=float(vdot),
-                race_distance_km=meters / 1000.0,
-                race_time_seconds=int(round(seconds)),
-                race_label=label,
-            )
-            bot.send_message(
-                chat_id,
-                f"🏃 Computed <b>VDOT {vdot:g}</b> from {_html(label)} "
-                f"in {_html(args[1])}.\nTraining paces updated.",
-            )
-            return
+    if len(args) >= 2 and _train_run_log_race_result(bot, chat_id, args):
+        return
 
     bot.send_message(
         chat_id,
@@ -2895,7 +2903,7 @@ def _cmd_train_run(bot: TelegramBot, chat_id: int, args: List[str]):
 # ── /plan ──────────────────────────────────────────────────────────
 def format_week_plan(chat_id: int) -> str:
     """This week's Mon–Sun schedule (today marked) + phase + paces + VDOT."""
-    today = database.user_local_now().date()
+    today = database.user_local_today()
     profile = _profile_for_plan(chat_id, today)
     plan = fitness_plan.week_plan(profile, today)
     phase = fitness_plan.phase_for_date(profile, today)
@@ -3041,7 +3049,7 @@ def format_today_summary(chat_id: int) -> str:
 
     # Typical-day comparison over the prior 7 user-local days (today excluded).
     # Median rather than mean: under-logged days would bias a mean low.
-    local_today = database.user_local_now().date()
+    local_today = database.user_local_today()
     prior_totals = _daily_calorie_totals(
         chat_id,
         (local_today - timedelta(days=7)).isoformat(),
@@ -3090,7 +3098,7 @@ def format_meals_list(chat_id: int) -> str:
 
 def format_history(chat_id: int, days: int = 7) -> str:
     """Format a summary of daily calorie totals over the past week."""
-    local_today = database.user_local_now().date()
+    local_today = database.user_local_today()
     # days - 1 back plus today = an inclusive N-day window
     cutoff_date = (local_today - timedelta(days=days - 1)).isoformat()
     today_str = local_today.isoformat()
@@ -3134,6 +3142,177 @@ def _coerce_meal_index(value) -> Optional[int]:
         except (ValueError, AttributeError):
             return None
     return None
+
+
+def _nl_correction(bot: TelegramBot, chat_id: int, text: str, meals: List[Dict], result: Dict):
+    meal_index = _coerce_meal_index(result.get("meal_index", 0))
+    new_analysis = result.get("analysis", {})
+    reason = result.get("reason", "")
+
+    if not meals:
+        bot.send_message(chat_id, "❌ Cannot correct because no meals are logged recently.")
+        return
+
+    if meal_index is None or meal_index < 0 or meal_index >= len(meals):
+        bot.send_message(chat_id, f"❌ Invalid meal index ({result.get('meal_index')}). You have {len(meals)} recent meals.")
+        return
+
+    # Get old values for the diff
+    old_analysis = meals[meal_index]["analysis"]
+    old_cal = old_analysis.get("total_calories") or 0
+    new_cal = new_analysis.get("total_calories") or 0
+    old_desc = old_analysis.get("meal_description", "Unknown")
+    new_desc = new_analysis.get("meal_description", old_desc)
+
+    # Update by the DB id from the snapshot Gemini indexed, so a meal
+    # logged mid-conversation cannot shift the target.
+    meal_id = meals[meal_index]["id"]
+    database.update_meal_analysis(meal_id, chat_id, new_analysis)
+
+    # Format reply with diff
+    diff = new_cal - old_cal
+    diff_str = f"+{diff}" if diff > 0 else str(diff)
+    reply_lines = [
+        f"✏️ <b>Corrected meal {meal_index + 1}!</b>",
+        "",
+        f"<b>{_html(old_desc)}</b> → <b>{_html(new_desc)}</b>",
+        f"🔥 {_html(old_cal)} kcal → {_html(new_cal)} kcal ({_html(diff_str)})",
+    ]
+    if reason:
+        reply_lines.append(f"\n💬 {_html(reason)}")
+
+    bot.send_message(chat_id, "\n".join(reply_lines))
+    log.info(f"  ✏️ Corrected meal {meal_index + 1} (DB ID {meal_id}): {old_cal} → {new_cal} kcal")
+
+
+def _nl_delete(bot: TelegramBot, chat_id: int, text: str, meals: List[Dict], result: Dict):
+    meal_indices = result.get("meal_indices", [])
+    reason = result.get("reason", "")
+
+    if not meals:
+        bot.send_message(chat_id, "❌ Cannot delete because no meals are logged recently.")
+        return
+
+    if not meal_indices:
+        bot.send_message(chat_id, "❌ Didn't catch which meals to delete. Try being more specific.")
+        return
+
+    # Resolve DB ids from the snapshot Gemini indexed, then ask for
+    # confirmation before destroying any rows.
+    ids = []
+    labels = []
+    valid_indices = {i for i in (_coerce_meal_index(x) for x in meal_indices) if i is not None}
+    for index in sorted(valid_indices):
+        if 0 <= index < len(meals):
+            meal = meals[index]
+            analysis = meal.get("analysis", {})
+            ids.append(meal["id"])
+            labels.append(
+                f"{analysis.get('meal_description', 'Unknown meal')} "
+                f"({meal.get('date', '?')} {meal.get('time', '?')}, "
+                f"~{analysis.get('total_calories') or 0} kcal)"
+            )
+
+    if not ids:
+        bot.send_message(chat_id, "❌ Couldn't match those meals to the recent list.")
+        return
+
+    # Nonce binds the confirmation buttons to THIS message, so a stale
+    # Delete button from an older confirmation cannot fire the newest
+    # pending set (e.g. "delete the toast" deleting all of today's meals).
+    token = uuid.uuid4().hex[:8]
+    _pending_nl_deletes[chat_id] = {"ids": ids, "labels": labels, "at": datetime.now(), "token": token}
+    msg_lines = [f"🗑️ <b>Delete {len(ids)} meal(s)?</b>", ""]
+    for label in labels:
+        msg_lines.append(f"• {_html(label)}")
+    if reason:
+        msg_lines.append(f"\n💬 {_html(reason)}")
+    msg_lines.append("\nThis cannot be undone.")
+    bot.send_message(
+        chat_id,
+        "\n".join(msg_lines),
+        reply_markup={
+            "inline_keyboard": [[
+                {"text": "✅ Delete", "callback_data": f"nl_delete_confirm:{token}"},
+                {"text": "❌ Cancel", "callback_data": f"nl_delete_cancel:{token}"},
+            ]]
+        },
+    )
+
+
+def _nl_new_meal(bot: TelegramBot, chat_id: int, text: str, meals: List[Dict], result: Dict):
+    analysis = result.get("analysis", {})
+    if analysis.get("is_food"):
+        save_meal(chat_id, analysis, "manual_text", "text", "")
+        log.info(f"  ✅ Manual Food: {analysis.get('meal_description')} (~{analysis.get('total_calories')} kcal)")
+        result_text = format_food_result(chat_id, analysis)
+        bot.send_message(chat_id, "✅ Added new manual meal:\n\n" + result_text)
+    else:
+        bot.send_message(chat_id, "🚫 I couldn't detect food in that description.")
+
+
+def _nl_log_weight(bot: TelegramBot, chat_id: int, text: str, meals: List[Dict], result: Dict):
+    kg = nutrition.parse_weight_kg(text)
+    if kg is None:  # fall back to the model's structured field
+        field = safe_number(result.get("weight_kg"), 0)
+        if nutrition.MIN_WEIGHT_KG <= field <= nutrition.MAX_WEIGHT_KG:
+            kg = round(field, 1)
+    if kg is None:
+        bot.send_message(
+            chat_id,
+            "⚖️ I couldn't read a valid body weight (30–300 kg). "
+            "Try “I weigh 72.5 kg”.",
+        )
+        return
+    today = database.user_local_today()
+    database.save_body_weight(chat_id, today.isoformat(), kg, source="telegram")
+    bot.send_message(chat_id, f"⚖️ Logged <b>{kg:g} kg</b> for {today.isoformat()}.")
+    log.info(f"  ⚖️ NL weight logged: {kg} kg")
+
+
+def _nl_log_activity(bot: TelegramBot, chat_id: int, text: str, meals: List[Dict], result: Dict):
+    kcal = _clamp(safe_number(result.get("active_calories")), 0, ACTIVITY_KCAL_MAX)
+    steps = int(round(_clamp(safe_number(result.get("steps")), 0, ACTIVITY_STEPS_MAX)))
+    km = _clamp(safe_number(result.get("distance_km")), 0, ACTIVITY_KM_MAX)
+    if kcal <= 0 and steps <= 0 and km <= 0:
+        bot.send_message(
+            chat_id,
+            "🏃 I couldn't find any activity numbers to log. "
+            "Try “burned 450 kcal running 5 km”.",
+        )
+        return
+    today = database.user_local_today()
+    raw = {"steps": steps} if steps else None
+    database.save_activity(
+        chat_id, today.isoformat(), source="manual", activity_type="manual",
+        active_calories=kcal or None, distance_km=km or None, raw=raw,
+    )
+    bits = []
+    if kcal > 0:
+        bits.append(f"{int(round(kcal)):,} kcal")
+    if steps > 0:
+        bits.append(f"{steps:,} steps")
+    if km > 0:
+        bits.append(f"{km:g} km")
+    bot.send_message(
+        chat_id, "🏃 Logged activity: " + " · ".join(bits) + f" ({today.isoformat()})."
+    )
+    log.info(f"  🏃 NL activity logged: {bits}")
+
+
+def _nl_chat(bot: TelegramBot, chat_id: int, text: str, meals: List[Dict], result: Dict):
+    reply = result.get("reply", "I'm not sure what you mean. Try describing a meal or correction!")
+    bot.send_message(chat_id, _html(reply))
+    log.info("  💬 Chat response sent")
+
+
+_NL_INTENT_HANDLERS = {
+    "correction": _nl_correction,
+    "delete": _nl_delete,
+    "new_meal": _nl_new_meal,
+    "log_weight": _nl_log_weight,
+    "log_activity": _nl_log_activity,
+}
 
 
 def handle_text_message(
@@ -3204,164 +3383,8 @@ def handle_text_message(
         bot.send_message(chat_id, "❌ Error contacting AI. Please try again.")
         return
 
-    intent = result.get("intent")
-
-    if intent == "correction":
-        meal_index = _coerce_meal_index(result.get("meal_index", 0))
-        new_analysis = result.get("analysis", {})
-        reason = result.get("reason", "")
-
-        if not meals:
-            bot.send_message(chat_id, "❌ Cannot correct because no meals are logged recently.")
-            return
-
-        if meal_index is None or meal_index < 0 or meal_index >= len(meals):
-            bot.send_message(chat_id, f"❌ Invalid meal index ({result.get('meal_index')}). You have {len(meals)} recent meals.")
-            return
-
-        # Get old values for the diff
-        old_analysis = meals[meal_index]["analysis"]
-        old_cal = old_analysis.get("total_calories") or 0
-        new_cal = new_analysis.get("total_calories") or 0
-        old_desc = old_analysis.get("meal_description", "Unknown")
-        new_desc = new_analysis.get("meal_description", old_desc)
-
-        # Update by the DB id from the snapshot Gemini indexed, so a meal
-        # logged mid-conversation cannot shift the target.
-        meal_id = meals[meal_index]["id"]
-        database.update_meal_analysis(meal_id, chat_id, new_analysis)
-
-        # Format reply with diff
-        diff = new_cal - old_cal
-        diff_str = f"+{diff}" if diff > 0 else str(diff)
-        reply_lines = [
-            f"✏️ <b>Corrected meal {meal_index + 1}!</b>",
-            "",
-            f"<b>{_html(old_desc)}</b> → <b>{_html(new_desc)}</b>",
-            f"🔥 {_html(old_cal)} kcal → {_html(new_cal)} kcal ({_html(diff_str)})",
-        ]
-        if reason:
-            reply_lines.append(f"\n💬 {_html(reason)}")
-
-        bot.send_message(chat_id, "\n".join(reply_lines))
-        log.info(f"  ✏️ Corrected meal {meal_index + 1} (DB ID {meal_id}): {old_cal} → {new_cal} kcal")
-
-    elif intent == "delete":
-        meal_indices = result.get("meal_indices", [])
-        reason = result.get("reason", "")
-
-        if not meals:
-            bot.send_message(chat_id, "❌ Cannot delete because no meals are logged recently.")
-            return
-
-        if not meal_indices:
-            bot.send_message(chat_id, "❌ Didn't catch which meals to delete. Try being more specific.")
-            return
-
-        # Resolve DB ids from the snapshot Gemini indexed, then ask for
-        # confirmation before destroying any rows.
-        ids = []
-        labels = []
-        valid_indices = {i for i in (_coerce_meal_index(x) for x in meal_indices) if i is not None}
-        for index in sorted(valid_indices):
-            if 0 <= index < len(meals):
-                meal = meals[index]
-                analysis = meal.get("analysis", {})
-                ids.append(meal["id"])
-                labels.append(
-                    f"{analysis.get('meal_description', 'Unknown meal')} "
-                    f"({meal.get('date', '?')} {meal.get('time', '?')}, "
-                    f"~{analysis.get('total_calories') or 0} kcal)"
-                )
-
-        if not ids:
-            bot.send_message(chat_id, "❌ Couldn't match those meals to the recent list.")
-            return
-
-        # Nonce binds the confirmation buttons to THIS message, so a stale
-        # Delete button from an older confirmation cannot fire the newest
-        # pending set (e.g. "delete the toast" deleting all of today's meals).
-        token = uuid.uuid4().hex[:8]
-        _pending_nl_deletes[chat_id] = {"ids": ids, "labels": labels, "at": datetime.now(), "token": token}
-        msg_lines = [f"🗑️ <b>Delete {len(ids)} meal(s)?</b>", ""]
-        for label in labels:
-            msg_lines.append(f"• {_html(label)}")
-        if reason:
-            msg_lines.append(f"\n💬 {_html(reason)}")
-        msg_lines.append("\nThis cannot be undone.")
-        bot.send_message(
-            chat_id,
-            "\n".join(msg_lines),
-            reply_markup={
-                "inline_keyboard": [[
-                    {"text": "✅ Delete", "callback_data": f"nl_delete_confirm:{token}"},
-                    {"text": "❌ Cancel", "callback_data": f"nl_delete_cancel:{token}"},
-                ]]
-            },
-        )
-
-    elif intent == "new_meal":
-        analysis = result.get("analysis", {})
-        if analysis.get("is_food"):
-            save_meal(chat_id, analysis, "manual_text", "text", "")
-            log.info(f"  ✅ Manual Food: {analysis.get('meal_description')} (~{analysis.get('total_calories')} kcal)")
-            result_text = format_food_result(chat_id, analysis)
-            bot.send_message(chat_id, "✅ Added new manual meal:\n\n" + result_text)
-        else:
-            bot.send_message(chat_id, "🚫 I couldn't detect food in that description.")
-
-    elif intent == "log_weight":
-        kg = nutrition.parse_weight_kg(text)
-        if kg is None:  # fall back to the model's structured field
-            field = safe_number(result.get("weight_kg"), 0)
-            if 30 <= field <= 300:
-                kg = round(field, 1)
-        if kg is None:
-            bot.send_message(
-                chat_id,
-                "⚖️ I couldn't read a valid body weight (30–300 kg). "
-                "Try “I weigh 72.5 kg”.",
-            )
-            return
-        today = database.user_local_now().date()
-        database.save_body_weight(chat_id, today.isoformat(), kg, source="telegram")
-        bot.send_message(chat_id, f"⚖️ Logged <b>{kg:g} kg</b> for {today.isoformat()}.")
-        log.info(f"  ⚖️ NL weight logged: {kg} kg")
-
-    elif intent == "log_activity":
-        kcal = _clamp(safe_number(result.get("active_calories")), 0, ACTIVITY_KCAL_MAX)
-        steps = int(round(_clamp(safe_number(result.get("steps")), 0, ACTIVITY_STEPS_MAX)))
-        km = _clamp(safe_number(result.get("distance_km")), 0, ACTIVITY_KM_MAX)
-        if kcal <= 0 and steps <= 0 and km <= 0:
-            bot.send_message(
-                chat_id,
-                "🏃 I couldn't find any activity numbers to log. "
-                "Try “burned 450 kcal running 5 km”.",
-            )
-            return
-        today = database.user_local_now().date()
-        raw = {"steps": steps} if steps else None
-        database.save_activity(
-            chat_id, today.isoformat(), source="manual", activity_type="manual",
-            active_calories=kcal or None, distance_km=km or None, raw=raw,
-        )
-        bits = []
-        if kcal > 0:
-            bits.append(f"{int(round(kcal)):,} kcal")
-        if steps > 0:
-            bits.append(f"{steps:,} steps")
-        if km > 0:
-            bits.append(f"{km:g} km")
-        bot.send_message(
-            chat_id, "🏃 Logged activity: " + " · ".join(bits) + f" ({today.isoformat()})."
-        )
-        log.info(f"  🏃 NL activity logged: {bits}")
-
-    else:
-        # chat
-        reply = result.get("reply", "I'm not sure what you mean. Try describing a meal or correction!")
-        bot.send_message(chat_id, _html(reply))
-        log.info("  💬 Chat response sent")
+    handler = _NL_INTENT_HANDLERS.get(result.get("intent"), _nl_chat)
+    handler(bot, chat_id, text, meals, result)
 
 
 def handle_callback_query(gemini_client, bot: TelegramBot, callback_query: Dict) -> bool:

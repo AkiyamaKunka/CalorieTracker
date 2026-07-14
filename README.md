@@ -62,7 +62,7 @@ flowchart LR
 | Bot interface | Telegram Bot API, long polling | User commands, corrections, photo feedback, operational alerts |
 | Upload API | Flask | Authenticated phone uploads, heartbeat pings, Android reconciliation |
 | AI analysis | Google Gemini 2.5 Flash | Food detection, calorie and macro estimation, correction parsing |
-| Persistence | SQLite | Meals, hashes, correction state, Android heartbeat, photo ingestion guard |
+| Persistence | SQLite | Meals, hashes, correction state, Android heartbeat, photo ingestion guard, fitness data (weight, workouts, activities, profile) |
 | Mobile clients | Android Termux, iOS Shortcuts | Camera automation, VPN evidence headers, offline queueing |
 | Scheduling | systemd or launchd | Always-on bot service and local-time daily reports |
 | Reliability | Failed-upload store, quota circuit breaker, `/doctor` checks | Recovery from quota, network, duplicate, and report failures |
@@ -81,6 +81,7 @@ flowchart LR
 - Graceful shutdown, plus a startup sweep that recovers uploads stranded mid-analysis by a crash.
 - Runtime health written to `logs/service_health.json`.
 - Duplicate protection through a photo-hash reservation guard.
+- Fitness tracking: daily weigh-ins, diet modes with macro targets (keto / high-protein / balanced), Daniels-VDOT run planning, and manual or Garmin activity logging with a net-calorie line in daily reports.
 
 ## Repository Safety
 
@@ -316,6 +317,7 @@ Run `/commands` for the full menu.
 | Area | Commands |
 | --- | --- |
 | Tracking | `/today`, `/meals`, `/recent`, `/history` |
+| Fitness | `/weight 72.5`, `/diet balanced`, `/macros today`, `/workout legs`, `/train`, `/activity 450 8000 5`, `/train_run 5k 19:57`, `/plan`, `/profile` |
 | Health | `/status`, `/doctor`, `/gemini`, `/android`, `/vpn` |
 | Uploads | `/queue`, `/failed`, `/retry_failed latest`, `/retry_all_failed 3`, `/clear_failed latest confirm` |
 | Reports | `/report today`, `/report_status`, `/reports` |

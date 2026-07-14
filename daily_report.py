@@ -34,6 +34,7 @@ from config import (
 )
 from utils import (
     meal_calorie_mismatch,
+    parse_boolish,
     safe_food_items,
     safe_number,
     telegram_message_chunks as _telegram_chunks,
@@ -43,6 +44,10 @@ from utils import (
 BOT_TOKEN = TELEGRAM_BOT_TOKEN or ""
 CHAT_ID = TELEGRAM_CHAT_ID or ""
 SERVICE_HEALTH_PATH = service_health.DEFAULT_PATH
+# Body-weight trend window for the report's Weight section.
+WEIGHT_TREND_WINDOW_DAYS = 7
+# How far back the report may reach for a weight anchor at/before its date.
+WEIGHT_ANCHOR_LOOKBACK_DAYS = 366
 
 
 def _warn(message):
@@ -117,16 +122,13 @@ def send_wechat(text, target_date):
         print(f"[ERROR] Failed to send WeChat message: {e}")
 
 
-_NET_TOTAL_TRUTHY = {"1", "true", "yes", "y", "on"}
-
-
 def _net_use_total() -> bool:
     """Whether the energy-balance Net line should subtract TOTAL (not active) burn.
 
     Defaults to active-calorie basis (the exercise-attributable burn). Set
     GARMIN_NET_USE_TOTAL=1 to net against Garmin's whole-day total instead.
     """
-    return str(os.environ.get("GARMIN_NET_USE_TOTAL", "")).strip().lower() in _NET_TOTAL_TRUTHY
+    return parse_boolish(os.environ.get("GARMIN_NET_USE_TOTAL")) is True
 
 
 def _row_extra_number(row, *keys):
@@ -176,6 +178,92 @@ def _weekly_weight_slope(weights):
     return round((numerator / denominator) * 7, 2)
 
 
+def _section_diet_targets(lines, chat_id, target_date, profile, anchor_weight):
+    """Append the Diet Targets block — only when a diet_mode is configured."""
+    diet_mode = (profile or {}).get("diet_mode")
+    if diet_mode:
+        import nutrition
+        weight_kg = safe_number((anchor_weight or {}).get("weight_kg")) or None
+        targets = nutrition.profile_diet_targets(diet_mode, weight_kg, profile)
+        meals_today = database.get_meals(chat_id, target_date, target_date)
+        analysis_result = nutrition.analyze_macros(meals_today, targets)
+        block = nutrition.format_macro_report(analysis_result, targets, diet_mode)
+        if block:
+            lines.append("")
+            lines.append(block)
+
+
+def _section_energy_balance(lines, activities_today, grand_cal):
+    """Append Energy Balance — only when an activity with active burn exists."""
+    active = 0
+    total = 0
+    steps = 0
+    distance_km = 0
+    has_active = False
+    for row in activities_today or []:
+        if not isinstance(row, dict):
+            continue
+        row_active = safe_number(row.get("active_calories"))
+        if row_active > 0:
+            has_active = True
+            active += row_active
+        total += _row_extra_number(row, "total_calories", "totalKilocalories", "totalCalories")
+        steps += _row_extra_number(row, "steps", "totalSteps")
+        distance_km += safe_number(row.get("distance_km"))
+
+    if has_active:
+        use_total = _net_use_total() and total > 0
+        burn = total if use_total else active
+        net = safe_number(grand_cal) - burn
+        basis = "total" if use_total else "active"
+
+        lines.append("")
+        lines.append("<b>⚡ Energy Balance</b>")
+        lines.append(f"🔥 Active burn: ~{int(round(active)):,} kcal")
+        if steps > 0:
+            lines.append(f"👟 Steps: {int(round(steps)):,}")
+        if distance_km > 0:
+            lines.append(f"📏 Distance: {distance_km:.1f} km")
+        # Net defaults to consumed − ACTIVE burn (exercise-attributable);
+        # GARMIN_NET_USE_TOTAL=1 nets against whole-day total when present.
+        lines.append(f"⚖️ Net: ~{int(round(net)):,} kcal (consumed − {basis} burn)")
+
+
+def _section_weight(lines, chat_id, target_date, anchor_weight):
+    """Append Weight — only when weigh-ins exist in the trailing window."""
+    dt = datetime.strptime(target_date, "%Y-%m-%d")
+    window_start = (dt - timedelta(days=WEIGHT_TREND_WINDOW_DAYS)).date().isoformat()
+    weights = database.get_body_weights(chat_id, window_start, target_date)
+    if weights:
+        lines.append("")
+        lines.append("<b>⚖️ Weight</b>")
+        latest_kg = safe_number((anchor_weight or {}).get("weight_kg"))
+        if latest_kg > 0:
+            lines.append(f"Latest: <b>{latest_kg:.1f} kg</b>")
+        slope = _weekly_weight_slope(weights)
+        if slope is not None:
+            arrow = "⬆️" if slope > 0 else ("⬇️" if slope < 0 else "➡️")
+            lines.append(f"{WEIGHT_TREND_WINDOW_DAYS}-day trend: {arrow} {slope:+.2f} kg/wk")
+
+
+def _section_training(lines, chat_id, profile, target_date):
+    """Append Today's Training — always renders (default_profile fallback)."""
+    import fitness_plan
+    plan_profile = profile or fitness_plan.default_profile(chat_id, target_date)
+    workout = fitness_plan.todays_workout(plan_profile, target_date)
+    lines.append("")
+    lines.append("<b>🏃 Today's Training</b>")
+    lines.append(f"• {escape(str(workout))}")
+
+    goal_race_date = (profile or {}).get("goal_race_date")
+    if goal_race_date:
+        today_day = datetime.strptime(target_date, "%Y-%m-%d").date()
+        weeks = fitness_plan.weeks_to_race(profile, today_day)
+        if weeks is not None:
+            label = escape(str((profile or {}).get("race_label") or "race"))
+            lines.append(f"🎯 {weeks:.1f} weeks to {label}")
+
+
 def _fitness_sections(chat_id, target_date, grand_cal):
     """Optional fitness blocks appended to the daily report.
 
@@ -200,7 +288,8 @@ def _fitness_sections(chat_id, target_date, grand_cal):
     # morning's weigh-in. Identical to latest_weight when nothing newer exists.
     try:
         anchor_floor = (
-            datetime.strptime(target_date, "%Y-%m-%d") - timedelta(days=366)
+            datetime.strptime(target_date, "%Y-%m-%d")
+            - timedelta(days=WEIGHT_ANCHOR_LOOKBACK_DAYS)
         ).date().isoformat()
         past_weights = database.get_body_weights(chat_id, anchor_floor, target_date)
         anchor_weight = past_weights[-1] if past_weights else None
@@ -223,109 +312,26 @@ def _fitness_sections(chat_id, target_date, grand_cal):
 
     # 1. Diet Targets — only when a diet_mode is configured.
     try:
-        diet_mode = (profile or {}).get("diet_mode")
-        if diet_mode:
-            import nutrition
-            weight_kg = safe_number((anchor_weight or {}).get("weight_kg")) or None
-            targets = nutrition.diet_targets(
-                diet_mode,
-                weight_kg,
-                calorie_target=(profile or {}).get("target_calories"),
-                protein_g_per_kg=(profile or {}).get("protein_g_per_kg"),
-            )
-            # Explicit gram targets from '/diet target …' win over mode-derived
-            # ones, mirroring telegram_bot._resolved_diet_targets so the report
-            # and /macros always agree.
-            for key in ("target_protein_g", "target_carbs_g", "target_fat_g"):
-                stored = safe_number((profile or {}).get(key), None)
-                if stored is not None:
-                    targets[key] = stored
-            meals_today = database.get_meals(chat_id, target_date, target_date)
-            analysis_result = nutrition.analyze_macros(meals_today, targets)
-            block = nutrition.format_macro_report(analysis_result, targets, diet_mode)
-            if block:
-                lines.append("")
-                lines.append(block)
+        _section_diet_targets(lines, chat_id, target_date, profile, anchor_weight)
     except Exception:
         pass
 
     # 2. Energy Balance — only when an activity with active burn exists today.
     try:
-        active = 0
-        total = 0
-        steps = 0
-        distance_km = 0
-        has_active = False
-        for row in activities_today or []:
-            if not isinstance(row, dict):
-                continue
-            row_active = safe_number(row.get("active_calories"))
-            if row_active > 0:
-                has_active = True
-                active += row_active
-            total += _row_extra_number(row, "total_calories", "totalKilocalories", "totalCalories")
-            steps += _row_extra_number(row, "steps", "totalSteps")
-            distance_km += safe_number(row.get("distance_km"))
-
-        if has_active:
-            use_total = _net_use_total() and total > 0
-            burn = total if use_total else active
-            net = safe_number(grand_cal) - burn
-            basis = "total" if use_total else "active"
-
-            lines.append("")
-            lines.append("<b>⚡ Energy Balance</b>")
-            lines.append(f"🔥 Active burn: ~{int(round(active)):,} kcal")
-            if steps > 0:
-                lines.append(f"👟 Steps: {int(round(steps)):,}")
-            if distance_km > 0:
-                lines.append(f"📏 Distance: {distance_km:.1f} km")
-            # Net defaults to consumed − ACTIVE burn (exercise-attributable);
-            # GARMIN_NET_USE_TOTAL=1 nets against whole-day total when present.
-            lines.append(f"⚖️ Net: ~{int(round(net)):,} kcal (consumed − {basis} burn)")
+        _section_energy_balance(lines, activities_today, grand_cal)
     except Exception:
         pass
 
     # 3. Weight — only when weigh-ins exist in the trailing 7-day window.
     try:
-        dt = datetime.strptime(target_date, "%Y-%m-%d")
-        window_start = (dt - timedelta(days=7)).date().isoformat()
-        weights = database.get_body_weights(chat_id, window_start, target_date)
-        if weights:
-            lines.append("")
-            lines.append("<b>⚖️ Weight</b>")
-            latest_kg = safe_number((anchor_weight or {}).get("weight_kg"))
-            if latest_kg > 0:
-                lines.append(f"Latest: <b>{latest_kg:.1f} kg</b>")
-            slope = _weekly_weight_slope(weights)
-            if slope is not None:
-                arrow = "⬆️" if slope > 0 else ("⬇️" if slope < 0 else "➡️")
-                lines.append(f"7-day trend: {arrow} {slope:+.2f} kg/wk")
+        _section_weight(lines, chat_id, target_date, anchor_weight)
     except Exception:
         pass
 
     # 4. Today's Training — always renders (default_profile fallback); only a
     #    failed fitness_plan import degrades it to nothing.
     try:
-        import fitness_plan
-        plan_profile = profile or fitness_plan.default_profile(chat_id, target_date)
-        workout = fitness_plan.todays_workout(plan_profile, target_date)
-        lines.append("")
-        lines.append("<b>🏃 Today's Training</b>")
-        lines.append(f"• {escape(str(workout))}")
-
-        goal_race_date = (profile or {}).get("goal_race_date")
-        if goal_race_date:
-            try:
-                race_day = datetime.strptime(str(goal_race_date)[:10], "%Y-%m-%d").date()
-                today_day = datetime.strptime(target_date, "%Y-%m-%d").date()
-                days_to_race = (race_day - today_day).days
-                if days_to_race >= 0:
-                    weeks = days_to_race / 7.0
-                    label = escape(str((profile or {}).get("race_label") or "race"))
-                    lines.append(f"🎯 {weeks:.1f} weeks to {label}")
-            except (TypeError, ValueError):
-                pass
+        _section_training(lines, chat_id, profile, target_date)
     except Exception:
         pass
 

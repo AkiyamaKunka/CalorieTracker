@@ -1,7 +1,7 @@
 import sqlite3
 import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -404,7 +404,7 @@ def get_meals(chat_id: int, start_date: str, end_date: str) -> List[Dict]:
 
 def get_recent_meals(chat_id: int, days: int = 3) -> List[Dict]:
     """Helper to get meals from the last N calendar days, including today."""
-    today = user_local_now().date()
+    today = user_local_today()
     end_date = today.isoformat()
     start_date = (today - timedelta(days=max(days - 1, 0))).isoformat()
     return get_meals(chat_id, start_date, end_date)
@@ -509,9 +509,15 @@ def user_local_now(device_name: str = "android_watcher") -> datetime:
         return datetime.now()
     return datetime.now(timezone.utc).replace(tzinfo=None) + offset
 
+
+def user_local_today(device_name: str = "android_watcher") -> date:
+    """Today's date on the user's clock (see user_local_now)."""
+    return user_local_now(device_name).date()
+
+
 def get_today_hashes(chat_id: int) -> List[str]:
     """Return a list of image_hashes recorded today (user-local) for the user."""
-    today = user_local_now().date().isoformat()
+    today = user_local_today().isoformat()
     with _connect() as conn:
         cursor = conn.cursor()
         cursor.execute(

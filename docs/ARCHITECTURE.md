@@ -33,10 +33,16 @@ core.
   `0.0.0.0:5000` (daemon thread) and the main-thread Telegram long-poll.
 - **Analysis:** Google Gemini (`GEMINI_MODEL`, default `gemini-2.5-flash`),
   requested in native-JSON mode; images are downscaled before the call.
-- **Storage:** one SQLite file, `~/CalorieTracker/meals.db` (WAL). Three
-  tables: `meals`, `heartbeats`, `photo_ingestions`.
+- **Storage:** one SQLite file, `~/CalorieTracker/meals.db` (WAL). Seven
+  tables: `meals`, `heartbeats`, `photo_ingestions`, `body_weight`,
+  `workouts`, `activities`, `fitness_profile`.
 - **Reporting:** `daily_report.py` is a pure formatter (no LLM) fired by
-  launchd/cron at ~23:30 local.
+  launchd/cron at ~23:30 local. Before formatting it performs an optional,
+  self-guarded Garmin pull (`_sync_garmin_activity`, backed by `garmin.py`);
+  `generate_report` itself stays offline.
+- **Fitness:** `nutrition.py` (diet-mode/macro math), `fitness_plan.py`
+  (Daniels VDOT run planning), and `garmin.py` (config-gated activity pull)
+  feed the report's `_fitness_sections`.
 
 ## 2. The ledger / dedup model
 
@@ -121,6 +127,9 @@ the full list and defaults). The most operationally relevant:
 | `HEARTBEAT_STALE_WARNING_HOURS` | Phone-offline warning threshold (2h; 0 off) |
 | `TRUSTED_PROXY_ENABLED` | Honor `X-Forwarded-For` (default off) |
 | `MAX_API_UPLOAD_BYTES` | Upload size cap (25 MB) |
+| `GARMIN_ENABLED` | Turn on the daily Garmin activity pull (default off) |
+| `GARMIN_TOKEN_DIR` | Pre-minted token directory — token-only auth, minted off-server |
+| `GARMIN_NET_USE_TOTAL` | Net calories against Garmin's whole-day total instead of active-only |
 
 Phone-side knobs (`PING_INTERVAL_SECONDS`, `SEED_FRESH_MINUTES`,
 `CALORIE_RECOMPRESS_MAX_EDGE`, `CAMERA_DIR`, …) are documented in the README's

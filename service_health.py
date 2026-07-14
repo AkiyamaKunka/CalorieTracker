@@ -1,8 +1,8 @@
 """Shared service-health ledger stored in logs/service_health.json.
 
 telegram_bot.py and daily_report.py both record into this file; the load/save
-mechanics and the daily_report record schema live here so the two writers
-cannot drift.
+mechanics and the daily_report + activity-sync record schemas live here so the
+two writers cannot drift.
 """
 
 import fcntl

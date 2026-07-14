@@ -25,7 +25,7 @@ import os
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from utils import safe_number
+from utils import parse_boolish, safe_number
 
 try:  # optional dependency — must stay import-safe when absent
     from garminconnect import Garmin
@@ -38,11 +38,9 @@ log = logging.getLogger("garmin")
 GARMIN_ENABLED_ENV = "GARMIN_ENABLED"
 GARMIN_TOKEN_DIR_ENV = "GARMIN_TOKEN_DIR"
 
-_TRUTHY = {"1", "true", "yes", "y", "on"}
-
 
 def _truthy(value) -> bool:
-    return str(value or "").strip().lower() in _TRUTHY
+    return parse_boolish(value) is True
 
 
 def _clean(value) -> Optional[str]:

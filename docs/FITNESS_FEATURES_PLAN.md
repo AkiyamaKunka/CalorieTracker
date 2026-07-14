@@ -22,7 +22,7 @@ Dates are user-local `YYYY-MM-DD` (`database.user_local_now().date()`); `logged_
 
 ## Telegram surface (additive)
 
-Commands: `/weight`, `/diet`, `/macros`, `/workout`, `/activity`, `/train_run`, `/plan`, `/profile`. New NL write-intents kept conservative — only `log_weight` and `log_activity` added to the Gemini prompt (macros/today's-run stay deterministic regex, zero Gemini spend, zero meal-classifier regression risk). New `POST /activity` Flask route (X-API-Key) for an iOS Health-export Shortcut.
+Commands: `/weight`, `/diet`, `/macros`, `/workout`, `/activity`, `/train_run`, `/plan`, `/profile`. New NL write-intents kept conservative — only `log_weight` and `log_activity` added to the Gemini prompt (macros/today's-run stay deterministic regex, zero Gemini spend, zero meal-classifier regression risk). A `POST /activity` Flask route (X-API-Key) for an iOS Health-export Shortcut is planned but not yet built (the API still exposes only `/ping`, `/reconcile`, `/upload`).
 
 ## Report additions (guarded, omitted when data absent → byte-identical when empty)
 
@@ -39,7 +39,7 @@ Diet Targets · Energy Balance (net = consumed − active burn) · Weight trend 
 | 4 | Diet/weight commands + `log_weight` intent | ✅ `99615d2` |
 | 5 | Running commands (`/plan`, `/train_run`, `/workout`, `/train`) | ✅ `99615d2` |
 | 6 | Report integration (`_fitness_sections`) | ✅ `41edb5b` |
-| 7 | Manual + HealthKit activity (`/activity`, POST route, net line) | ✅ `99615d2`/`41edb5b` |
+| 7 | Manual + HealthKit activity (`/activity`, POST route, net line) | ✅ /activity command + net line; POST route not built |
 | 8 | `garmin.py` module built (`37d9c74`); **live pull needs VM deploy** | ⏳ needs your Garmin token |
 
 ## Garmin activation (Step 8, when ready)

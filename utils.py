@@ -4,7 +4,7 @@ Shared utilities for CalorieTracker.
 
 import json
 import re
-from typing import List
+from typing import List, Optional
 
 
 def parse_ai_json(text: str) -> dict:
@@ -89,6 +89,19 @@ def meal_calorie_mismatch(analysis: dict):
         return None
     if abs(total - item_sum) > max(100, 0.2 * max(total, item_sum)):
         return int(item_sum)
+    return None
+
+
+def parse_boolish(value) -> Optional[bool]:
+    """Tri-state boolean parse: True/False for documented spellings, else None."""
+    if value is None:
+        return None
+
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
     return None
 
 
