@@ -10,6 +10,7 @@ Usage:
     python3 daily_report.py 2026-03-28   # Report for a specific date
 """
 
+import os
 import re
 import sys
 import traceback
@@ -67,6 +68,16 @@ def _record_daily_report_health(ok: bool, target_date: str, source: str = "cron"
     )
 
 
+def _record_activity_health(ok: bool, target_date: str, source: str = "garmin", error_summary: str = ""):
+    service_health.update(
+        lambda data: service_health.apply_activity_health(
+            data, ok, target_date, source=source, error_summary=error_summary,
+        ),
+        SERVICE_HEALTH_PATH,
+        warn=_warn,
+    )
+
+
 _TELEGRAM_HTML_TAG_RE = re.compile(
     r"</?(?:b|i|u|s|code|pre|a)(?:\s[^>]*)?>", re.IGNORECASE
 )
@@ -106,6 +117,198 @@ def send_wechat(text, target_date):
         print(f"[ERROR] Failed to send WeChat message: {e}")
 
 
+_NET_TOTAL_TRUTHY = {"1", "true", "yes", "y", "on"}
+
+
+def _net_use_total() -> bool:
+    """Whether the energy-balance Net line should subtract TOTAL (not active) burn.
+
+    Defaults to active-calorie basis (the exercise-attributable burn). Set
+    GARMIN_NET_USE_TOTAL=1 to net against Garmin's whole-day total instead.
+    """
+    return str(os.environ.get("GARMIN_NET_USE_TOTAL", "")).strip().lower() in _NET_TOTAL_TRUTHY
+
+
+def _row_extra_number(row, *keys):
+    """First positive numeric among ``keys`` in the row's JSON ``raw`` blob.
+
+    Steps and whole-day total calories are not first-class activity columns;
+    when Garmin persists them they ride along inside ``raw``.
+    """
+    raw = row.get("raw") if isinstance(row, dict) else None
+    if isinstance(raw, dict):
+        for key in keys:
+            value = safe_number(raw.get(key))
+            if value > 0:
+                return value
+    return 0
+
+
+def _weekly_weight_slope(weights):
+    """Least-squares kg/week body-weight slope, or None if <2 usable weigh-ins.
+
+    Fits weight against the weigh-in's ordinal day and scales the per-day slope
+    to a weekly rate. Junk weights/dates are coerced/skipped via safe_number so
+    a hostile row can never raise.
+    """
+    points = []
+    for row in weights or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            day = datetime.strptime(str(row.get("date"))[:10], "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            continue
+        kg = safe_number(row.get("weight_kg"))
+        if kg > 0:
+            points.append((day.toordinal(), kg))
+
+    if len(points) < 2:
+        return None
+
+    n = len(points)
+    mean_x = sum(x for x, _ in points) / n
+    mean_y = sum(y for _, y in points) / n
+    numerator = sum((x - mean_x) * (y - mean_y) for x, y in points)
+    denominator = sum((x - mean_x) ** 2 for x, _ in points)
+    if denominator == 0:
+        return None
+    return round((numerator / denominator) * 7, 2)
+
+
+def _fitness_sections(chat_id, target_date, grand_cal):
+    """Optional fitness blocks appended to the daily report.
+
+    Returns a list of Telegram-HTML lines (possibly empty). The report is
+    byte-identical to the pre-fitness output when the user has NO fitness data
+    at all (no profile, weigh-in, activity or workout): the whole block is
+    skipped. When any fitness data exists, each subsection is individually
+    guarded and omitted when its own inputs are absent. Every number flows
+    through utils.safe_number and every user/model string is html-escaped so a
+    hostile value can never raise here nor break _html_to_plain downstream.
+    """
+    try:
+        profile = database.get_fitness_profile(chat_id)
+    except Exception:
+        profile = None
+    try:
+        latest_weight = database.get_latest_body_weight(chat_id)
+    except Exception:
+        latest_weight = None
+    try:
+        activities_today = database.get_activities(chat_id, target_date, target_date)
+    except Exception:
+        activities_today = []
+    try:
+        workouts_today = database.get_workouts(chat_id, target_date, target_date)
+    except Exception:
+        workouts_today = []
+
+    # Byte-identical guard: a user with no fitness footprint gets nothing.
+    if not (profile or latest_weight or activities_today or workouts_today):
+        return []
+
+    lines = []
+
+    # 1. Diet Targets — only when a diet_mode is configured.
+    try:
+        diet_mode = (profile or {}).get("diet_mode")
+        if diet_mode:
+            import nutrition
+            weight_kg = safe_number((latest_weight or {}).get("weight_kg")) or None
+            targets = nutrition.diet_targets(diet_mode, weight_kg)
+            meals_today = database.get_meals(chat_id, target_date, target_date)
+            analysis_result = nutrition.analyze_macros(meals_today, targets)
+            block = nutrition.format_macro_report(analysis_result, targets, diet_mode)
+            if block:
+                lines.append("")
+                lines.append(block)
+    except Exception:
+        pass
+
+    # 2. Energy Balance — only when an activity with active burn exists today.
+    try:
+        active = 0
+        total = 0
+        steps = 0
+        distance_km = 0
+        has_active = False
+        for row in activities_today or []:
+            if not isinstance(row, dict):
+                continue
+            row_active = safe_number(row.get("active_calories"))
+            if row_active > 0:
+                has_active = True
+                active += row_active
+            total += _row_extra_number(row, "total_calories", "totalKilocalories", "totalCalories")
+            steps += _row_extra_number(row, "steps", "totalSteps")
+            distance_km += safe_number(row.get("distance_km"))
+
+        if has_active:
+            use_total = _net_use_total() and total > 0
+            burn = total if use_total else active
+            net = safe_number(grand_cal) - burn
+            basis = "total" if use_total else "active"
+
+            lines.append("")
+            lines.append("<b>⚡ Energy Balance</b>")
+            lines.append(f"🔥 Active burn: ~{int(round(active)):,} kcal")
+            if steps > 0:
+                lines.append(f"👟 Steps: {int(round(steps)):,}")
+            if distance_km > 0:
+                lines.append(f"📏 Distance: {distance_km:.1f} km")
+            # Net defaults to consumed − ACTIVE burn (exercise-attributable);
+            # GARMIN_NET_USE_TOTAL=1 nets against whole-day total when present.
+            lines.append(f"⚖️ Net: ~{int(round(net)):,} kcal (consumed − {basis} burn)")
+    except Exception:
+        pass
+
+    # 3. Weight — only when weigh-ins exist in the trailing 7-day window.
+    try:
+        dt = datetime.strptime(target_date, "%Y-%m-%d")
+        window_start = (dt - timedelta(days=7)).date().isoformat()
+        weights = database.get_body_weights(chat_id, window_start, target_date)
+        if weights:
+            lines.append("")
+            lines.append("<b>⚖️ Weight</b>")
+            latest_kg = safe_number((latest_weight or {}).get("weight_kg"))
+            if latest_kg > 0:
+                lines.append(f"Latest: <b>{latest_kg:.1f} kg</b>")
+            slope = _weekly_weight_slope(weights)
+            if slope is not None:
+                arrow = "⬆️" if slope > 0 else ("⬇️" if slope < 0 else "➡️")
+                lines.append(f"7-day trend: {arrow} {slope:+.2f} kg/wk")
+    except Exception:
+        pass
+
+    # 4. Today's Training — always renders (default_profile fallback); only a
+    #    failed fitness_plan import degrades it to nothing.
+    try:
+        import fitness_plan
+        plan_profile = profile or fitness_plan.default_profile(chat_id, target_date)
+        workout = fitness_plan.todays_workout(plan_profile, target_date)
+        lines.append("")
+        lines.append("<b>🏃 Today's Training</b>")
+        lines.append(f"• {escape(str(workout))}")
+
+        goal_race_date = (profile or {}).get("goal_race_date")
+        if goal_race_date:
+            try:
+                race_day = datetime.strptime(str(goal_race_date)[:10], "%Y-%m-%d").date()
+                today_day = datetime.strptime(target_date, "%Y-%m-%d").date()
+                days_to_race = (race_day - today_day).days
+                if days_to_race >= 0:
+                    weeks = days_to_race / 7.0
+                    label = escape(str((profile or {}).get("race_label") or "race"))
+                    lines.append(f"🎯 {weeks:.1f} weeks to {label}")
+            except (TypeError, ValueError):
+                pass
+    except Exception:
+        pass
+
+    return lines
+
+
 def generate_report(target_date: str) -> str:
     """Generate a detailed daily report."""
     if not CHAT_ID:
@@ -134,6 +337,7 @@ def generate_report(target_date: str) -> str:
         lines.append("No meals logged today. 🍽️")
         lines.append("")
         lines.append("<i>Send food photos to @junjia_calorie_bot to start tracking!</i>")
+        lines.extend(_fitness_sections(chat_id, target_date, 0))
         return "\n".join(lines)
 
     # ─── Per-meal breakdown ────────────────────────────────────
@@ -248,6 +452,8 @@ def generate_report(target_date: str) -> str:
         lines.append(f"  🍞 Carbs: {c_pct}%")
         lines.append(f"  🧈 Fat: {f_pct}%")
 
+    lines.extend(_fitness_sections(chat_id, target_date, grand_cal))
+
     return "\n".join(lines)
 
 
@@ -355,6 +561,52 @@ def resolve_auto_target_date(local_time: datetime, health_data: dict) -> Optiona
     return target
 
 
+def _sync_garmin_activity(target_date: str):
+    """Best-effort Garmin daily-activity pull + persist for ``target_date``.
+
+    This is the ONLY place the report path touches the network; generate_report
+    stays a pure offline formatter. Gated on garmin.is_configured(); import is
+    lazy/guarded so a missing optional dependency is a no-op. Every failure is
+    swallowed and recorded in service_health so Garmin can never block or crash
+    the report.
+    """
+    try:
+        import garmin
+    except Exception:
+        return
+
+    try:
+        if not garmin.is_configured():
+            return
+    except Exception:
+        return
+
+    if not CHAT_ID:
+        return
+    try:
+        chat_id = int(CHAT_ID)
+    except (TypeError, ValueError):
+        return
+
+    ok = False
+    error_summary = ""
+    try:
+        daily = garmin.fetch_daily_activity(target_date)
+        if daily is not None:
+            database.save_activity(chat_id, target_date, **garmin.to_activity_kwargs(daily))
+            ok = True
+        else:
+            error_summary = "Garmin returned no activity for this date."
+    except Exception as e:
+        error_summary = f"{type(e).__name__}: {e}"
+        print(f"[WARN] Garmin activity sync failed: {error_summary}")
+
+    try:
+        _record_activity_health(ok, target_date, source="garmin", error_summary=error_summary)
+    except Exception:
+        pass
+
+
 def main():
     is_auto = len(sys.argv) == 1
     source = "cron" if is_auto else "manual"
@@ -369,6 +621,11 @@ def main():
         target_date = sys.argv[1]
 
     print(f"📊 Generating daily report for {target_date}...")
+
+    # Best-effort network pull of Garmin cardio for the report date. Fully
+    # self-guarded: a Garmin failure is logged/recorded but never blocks the
+    # report below.
+    _sync_garmin_activity(target_date)
 
     try:
         # Generate report

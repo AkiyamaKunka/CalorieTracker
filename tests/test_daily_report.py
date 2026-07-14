@@ -541,3 +541,287 @@ def test_generate_report_survives_hostile_analysis_shapes(monkeypatch):
 
     assert "Daily Calorie Report" in report
     assert "Daily Summary" in report  # reached the totals section
+
+
+# ─── Fitness sections ──────────────────────────────────────────────
+
+def _no_fitness_data(monkeypatch):
+    """Force every fitness accessor to report an empty footprint."""
+    monkeypatch.setattr(daily_report.database, "get_fitness_profile", lambda cid: None)
+    monkeypatch.setattr(daily_report.database, "get_latest_body_weight", lambda cid: None)
+    monkeypatch.setattr(daily_report.database, "get_activities", lambda *a, **k: [])
+    monkeypatch.setattr(daily_report.database, "get_workouts", lambda *a, **k: [])
+    monkeypatch.setattr(daily_report.database, "get_body_weights", lambda *a, **k: [])
+
+
+def test_report_byte_identical_without_fitness_data(monkeypatch):
+    # A user with no profile/weigh-in/activity/workout must get the exact
+    # pre-fitness report: the whole fitness block collapses to nothing.
+    items = [{"name": "Fish", "estimated_calories": 300}, {"name": "Rice", "estimated_calories": 200}]
+    _patch_meals(monkeypatch, [_meal(calories=500, items=items)])
+    _no_fitness_data(monkeypatch)
+
+    with_guard = daily_report.generate_report("2026-06-25")
+
+    # Baseline: same inputs but the fitness helper forced to contribute nothing.
+    monkeypatch.setattr(daily_report, "_fitness_sections", lambda *a, **k: [])
+    baseline = daily_report.generate_report("2026-06-25")
+
+    assert with_guard == baseline
+    for marker in ("Macro check", "Energy Balance", "Today's Training", "kg/wk"):
+        assert marker not in with_guard
+
+
+def test_report_byte_identical_without_fitness_data_no_food(monkeypatch):
+    # The no-meals early-return branch must also stay byte-identical.
+    _patch_meals(monkeypatch, [])
+    _no_fitness_data(monkeypatch)
+
+    with_guard = daily_report.generate_report("2026-06-25")
+
+    monkeypatch.setattr(daily_report, "_fitness_sections", lambda *a, **k: [])
+    baseline = daily_report.generate_report("2026-06-25")
+
+    assert with_guard == baseline
+    assert "No meals logged today" in with_guard
+    assert "Today's Training" not in with_guard
+
+
+def test_diet_targets_section_appears_when_diet_mode_set(monkeypatch):
+    _patch_meals(monkeypatch, [_meal(calories=500, protein=30, carbs=40, fat=15)])
+    _no_fitness_data(monkeypatch)
+    monkeypatch.setattr(daily_report.database, "get_fitness_profile", lambda cid: {"diet_mode": "keto"})
+    monkeypatch.setattr(
+        daily_report.database, "get_latest_body_weight",
+        lambda cid: {"weight_kg": 80.0, "date": "2026-06-25"},
+    )
+
+    report = daily_report.generate_report("2026-06-25")
+
+    assert "🥗 Macro check — Keto" in report
+    assert "Informational only — not medical advice." in report
+
+
+def test_energy_balance_section_appears_with_activity(monkeypatch):
+    _patch_meals(monkeypatch, [_meal(calories=500)])
+    _no_fitness_data(monkeypatch)
+    monkeypatch.setattr(
+        daily_report.database, "get_activities",
+        lambda *a, **k: [{"active_calories": 450, "distance_km": 8.0, "raw": {"steps": 9000}}],
+    )
+
+    report = daily_report.generate_report("2026-06-25")
+
+    assert "⚡ Energy Balance" in report
+    assert "Active burn: ~450 kcal" in report
+    assert "Steps: 9,000" in report
+    assert "Distance: 8.0 km" in report
+    # Net defaults to consumed − ACTIVE burn: 500 − 450 = 50.
+    assert "Net: ~50 kcal (consumed − active burn)" in report
+
+
+def test_energy_balance_net_uses_total_when_env_set(monkeypatch):
+    monkeypatch.setenv("GARMIN_NET_USE_TOTAL", "1")
+    _patch_meals(monkeypatch, [_meal(calories=2000)])
+    _no_fitness_data(monkeypatch)
+    monkeypatch.setattr(
+        daily_report.database, "get_activities",
+        lambda *a, **k: [{"active_calories": 450, "raw": {"total_calories": 2600}}],
+    )
+
+    report = daily_report.generate_report("2026-06-25")
+
+    # With total basis: 2000 − 2600 = -600, and the basis word is "total".
+    assert "Net: ~-600 kcal (consumed − total burn)" in report
+
+
+def test_energy_balance_falls_back_to_active_when_total_absent(monkeypatch):
+    monkeypatch.setenv("GARMIN_NET_USE_TOTAL", "1")
+    _patch_meals(monkeypatch, [_meal(calories=500)])
+    _no_fitness_data(monkeypatch)
+    # Env asks for total, but no total is persisted -> active basis is used.
+    monkeypatch.setattr(
+        daily_report.database, "get_activities",
+        lambda *a, **k: [{"active_calories": 450}],
+    )
+
+    report = daily_report.generate_report("2026-06-25")
+
+    assert "Net: ~50 kcal (consumed − active burn)" in report
+
+
+def test_weight_section_appears_with_body_weight(monkeypatch):
+    _patch_meals(monkeypatch, [_meal(calories=500)])
+    _no_fitness_data(monkeypatch)
+    monkeypatch.setattr(
+        daily_report.database, "get_latest_body_weight",
+        lambda cid: {"weight_kg": 79.3, "date": "2026-06-25"},
+    )
+    monkeypatch.setattr(
+        daily_report.database, "get_body_weights",
+        lambda *a, **k: [
+            {"date": "2026-06-18", "weight_kg": 80.0},
+            {"date": "2026-06-25", "weight_kg": 79.3},
+        ],
+    )
+
+    report = daily_report.generate_report("2026-06-25")
+
+    assert "⚖️ Weight" in report
+    assert "Latest: <b>79.3 kg</b>" in report
+    # 0.7 kg drop over 7 days -> -0.70 kg/wk, trending down.
+    assert "7-day trend: ⬇️ -0.70 kg/wk" in report
+
+
+def test_training_section_always_renders_for_fitness_user(monkeypatch):
+    _patch_meals(monkeypatch, [_meal(calories=500)])
+    _no_fitness_data(monkeypatch)
+    # A bare weigh-in is enough to make this a fitness user; training still
+    # renders off default_profile even without a running profile.
+    monkeypatch.setattr(
+        daily_report.database, "get_latest_body_weight",
+        lambda cid: {"weight_kg": 79.3, "date": "2026-06-25"},
+    )
+
+    report = daily_report.generate_report("2026-06-25")
+
+    assert "🏃 Today's Training" in report
+
+
+def test_training_section_shows_weeks_to_race(monkeypatch):
+    _patch_meals(monkeypatch, [_meal(calories=500)])
+    _no_fitness_data(monkeypatch)
+    monkeypatch.setattr(
+        daily_report.database, "get_fitness_profile",
+        lambda cid: {"goal_race_date": "2026-08-11", "race_label": "Marathon <PB>"},
+    )
+
+    report = daily_report.generate_report("2026-07-14")
+
+    # 2026-07-14 -> 2026-08-11 is 28 days == 4.0 weeks; label is HTML-escaped.
+    assert "🎯 4.0 weeks to Marathon &lt;PB&gt;" in report
+
+
+def test_generate_report_stays_offline(monkeypatch):
+    import garmin
+
+    _patch_meals(monkeypatch, [_meal(calories=500)])
+    _no_fitness_data(monkeypatch)
+
+    def explode(*a, **k):
+        raise AssertionError("generate_report must not touch the network")
+
+    monkeypatch.setattr(daily_report.requests, "post", explode)
+    pulls = []
+    monkeypatch.setattr(garmin, "fetch_daily_activity", lambda d: pulls.append(d))
+
+    report = daily_report.generate_report("2026-06-25")
+
+    assert "Daily Calorie Report" in report
+    assert pulls == []  # no Garmin network pull happened inside generate_report
+
+
+def test_fitness_sections_never_raise_on_hostile_rows(monkeypatch):
+    monkeypatch.setattr(daily_report.database, "get_fitness_profile", lambda cid: {"diet_mode": "keto", "goal_race_date": ["nope"]})
+    monkeypatch.setattr(daily_report.database, "get_latest_body_weight", lambda cid: {"weight_kg": "heavy"})
+    monkeypatch.setattr(
+        daily_report.database, "get_activities",
+        lambda *a, **k: ["junk", {"active_calories": "lots", "distance_km": None}, {"active_calories": 300}],
+    )
+    monkeypatch.setattr(daily_report.database, "get_workouts", lambda *a, **k: [])
+    monkeypatch.setattr(
+        daily_report.database, "get_body_weights",
+        lambda *a, **k: [{"date": "bad", "weight_kg": None}, {"date": "2026-06-25", "weight_kg": 80.0}],
+    )
+    monkeypatch.setattr(daily_report.database, "get_meals", lambda *a, **k: -1)
+
+    # Must not raise despite hostile shapes throughout.
+    lines = daily_report._fitness_sections(12345, "2026-06-25", grand_cal="not-a-number")
+
+    assert isinstance(lines, list)
+
+
+# ─── Garmin main() network hook ────────────────────────────────────
+
+def _stub_main_send(monkeypatch, health_path, report_path):
+    monkeypatch.setattr(daily_report, "SERVICE_HEALTH_PATH", health_path)
+    monkeypatch.setattr(daily_report.sys, "argv", ["daily_report.py", "2026-07-14"])
+    monkeypatch.setattr(daily_report, "generate_report", lambda target_date: "<b>Report</b>")
+    monkeypatch.setattr(daily_report, "save_report_file", lambda target_date, report: report_path)
+    monkeypatch.setattr(daily_report, "send_telegram", lambda report: True)
+    monkeypatch.setattr(daily_report, "send_wechat", lambda report, target_date: None)
+
+
+def test_main_garmin_hook_skipped_when_not_configured(monkeypatch, tmp_path):
+    import garmin
+
+    _stub_main_send(monkeypatch, tmp_path / "health.json", tmp_path / "report.md")
+    monkeypatch.setattr(garmin, "is_configured", lambda: False)
+    pulls = []
+    monkeypatch.setattr(garmin, "fetch_daily_activity", lambda d: pulls.append(d))
+
+    assert daily_report.main() == 0
+    assert pulls == []
+    # No activity record is written when the feature is off.
+    health = json.loads((tmp_path / "health.json").read_text())
+    assert "activity" not in health
+
+
+def test_main_garmin_hook_syncs_and_records_when_configured(monkeypatch, tmp_path):
+    import garmin
+
+    _stub_main_send(monkeypatch, tmp_path / "health.json", tmp_path / "report.md")
+    monkeypatch.setattr(daily_report, "CHAT_ID", "12345")
+    monkeypatch.setattr(garmin, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        garmin, "fetch_daily_activity",
+        lambda d: garmin.DailyActivity(active_calories=450, total_calories=2600,
+                                       steps=9000, distance_m=8000),
+    )
+    saved = []
+    monkeypatch.setattr(
+        daily_report.database, "save_activity",
+        lambda chat_id, date_str, **kw: saved.append((chat_id, date_str, kw)) or 1,
+    )
+
+    assert daily_report.main() == 0
+    assert len(saved) == 1
+    chat_id, date_str, kw = saved[0]
+    assert (chat_id, date_str) == (12345, "2026-07-14")
+    assert kw["source"] == "garmin"
+    assert kw["active_calories"] == 450
+
+    health = json.loads((tmp_path / "health.json").read_text())
+    assert health["activity"]["last_ok"] is True
+    assert health["activity"]["last_target_date"] == "2026-07-14"
+    assert health["activity"]["last_source"] == "garmin"
+
+
+def test_main_garmin_failure_never_blocks_report(monkeypatch, tmp_path):
+    import garmin
+
+    _stub_main_send(monkeypatch, tmp_path / "health.json", tmp_path / "report.md")
+    monkeypatch.setattr(daily_report, "CHAT_ID", "12345")
+    monkeypatch.setattr(garmin, "is_configured", lambda: True)
+
+    def boom(date_str):
+        raise RuntimeError("garmin exploded")
+
+    monkeypatch.setattr(garmin, "fetch_daily_activity", boom)
+
+    # The report still succeeds; the Garmin failure is recorded, not raised.
+    assert daily_report.main() == 0
+    health = json.loads((tmp_path / "health.json").read_text())
+    assert health["activity"]["last_ok"] is False
+    assert "garmin exploded" in health["activity"]["last_error_summary"]
+
+
+def test_record_activity_health_wrapper_writes_file(monkeypatch, tmp_path):
+    health_path = tmp_path / "service_health.json"
+    monkeypatch.setattr(daily_report, "SERVICE_HEALTH_PATH", health_path)
+
+    daily_report._record_activity_health(True, "2026-07-14")
+
+    data = json.loads(health_path.read_text())
+    assert data["activity"]["last_ok"] is True
+    assert data["activity"]["last_source"] == "garmin"

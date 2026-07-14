@@ -43,6 +43,32 @@ def test_apply_report_health_schema():
     assert len(report["events"]) == 2
 
 
+def test_apply_activity_health_schema():
+    data = {}
+    service_health.apply_activity_health(data, True, "2026-07-14", source="garmin")
+    activity = data["activity"]
+    assert activity["last_ok"] is True
+    assert activity["last_target_date"] == "2026-07-14"
+    assert activity["last_source"] == "garmin"
+    assert activity["consecutive_failures"] == 0
+    assert activity["events"][-1]["source"] == "garmin"
+    # The activity record lives under its own key, never clobbering daily_report.
+    assert "daily_report" not in data
+
+    service_health.apply_activity_health(data, False, "2026-07-15", source="garmin",
+                                         error_summary="boom")
+    activity = data["activity"]
+    assert activity["last_ok"] is False
+    assert activity["consecutive_failures"] == 1
+    assert activity["last_error_summary"] == "boom"
+    assert len(activity["events"]) == 2
+
+    # A subsequent success clears the error and resets the failure streak.
+    service_health.apply_activity_health(data, True, "2026-07-16", source="garmin")
+    assert data["activity"]["consecutive_failures"] == 0
+    assert "last_error_summary" not in data["activity"]
+
+
 def test_report_health_wrappers_share_schema(tmp_path, monkeypatch):
     bot_path = tmp_path / "bot_health.json"
     report_path = tmp_path / "report_health.json"
