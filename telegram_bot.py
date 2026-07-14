@@ -2272,6 +2272,14 @@ _PLAN_QUERY_RE = re.compile(
     r"my\s+(?:training\s+)?plan\s+this\s+week)",
     re.IGNORECASE,
 )
+# Logging-shaped messages (any number, or an ate/had/burned/log/weigh/hit
+# verb) must NOT be intercepted by the read-only fast path above: "had 2 eggs
+# before today's run" is a meal log, not a run question, even though it
+# contains "today's run". These go to the Gemini NL pipeline instead.
+_FITNESS_LOG_GUARD_RE = re.compile(
+    r"\d|\b(?:ate|eat|had|burn(?:ed|t)?|log(?:ged|ging)?|weigh(?:ed|ing|t)?|hit)\b",
+    re.IGNORECASE,
+)
 
 
 def _iso_date(value) -> Optional[date]:
@@ -3084,6 +3092,12 @@ def _maybe_answer_fitness_query(bot: TelegramBot, chat_id: int, text: str) -> bo
     """
     if not isinstance(text, str) or not text.strip():
         return False
+    # A message that looks like it LOGS something (numbers, eating/burning/
+    # logging verbs) must reach the NL pipeline so the meal/activity is saved;
+    # answering it here would silently drop the log. Worst case a wordy
+    # question falls through to Gemini and is still answered — just not free.
+    if _FITNESS_LOG_GUARD_RE.search(text):
+        return False
     if _RUN_QUERY_RE.search(text):
         bot.send_message(chat_id, format_todays_run(chat_id))
         log.info("  🏃 Deterministic run query answered (no Gemini spend)")
@@ -3471,7 +3485,12 @@ def handle_text_message(
         bot.send_message(chat_id, "❌ Error contacting AI. Please try again.")
         return
 
-    handler = _NL_INTENT_HANDLERS.get(result.get("intent"), _nl_chat)
+    # Gemini runs in JSON mode without a response_schema, so "intent" can be
+    # any JSON type. An unhashable value (list/dict) would make dict.get raise
+    # TypeError and kill the polling loop; non-string intents fall through to
+    # the chat reply, exactly like the pre-refactor if/elif == chain did.
+    intent = result.get("intent")
+    handler = _NL_INTENT_HANDLERS.get(intent, _nl_chat) if isinstance(intent, str) else _nl_chat
     handler(bot, chat_id, text, meals, result)
 
 

@@ -1856,3 +1856,63 @@ def test_today_summary_ignores_activity_from_other_days(mock_db, monkeypatch):
     summary = telegram_bot.format_today_summary(CHAT)
     assert "Burned:" not in summary
     assert "Net:" not in summary
+
+
+# ── Regression: hostile Gemini payloads & fast-path hijacks ─────────
+@pytest.mark.parametrize("bad_intent", [["correction"], {"intent": "delete"}, None, 7])
+def test_nl_unhashable_or_nonstring_intent_falls_back_to_chat(mock_db, monkeypatch, bad_intent):
+    """A Gemini-supplied non-string intent (list/dict/null/number) must not
+    raise TypeError out of handle_text_message (which would kill the polling
+    loop) — it falls through to the chat reply like the old ==-chain did."""
+    _stable_tz(monkeypatch)
+    _no_pause(monkeypatch)
+    monkeypatch.setattr(telegram_bot, "get_recent_meals", _wide_recent_meals)
+    bot = FakeBot()
+    client = _intent_client({"intent": bad_intent, "reply": "hostile-intent reply"})
+    telegram_bot.handle_text_message(client, bot, CHAT, "what did I eat today?")
+    assert any("hostile-intent reply" in m["text"] for m in bot.sent)
+    # Nothing was misrouted into a write path.
+    assert database.get_meals(CHAT, "1970-01-01", "9999-12-31") == []
+    assert database.get_activities(CHAT, "1970-01-01", "9999-12-31") == []
+
+
+@pytest.mark.parametrize("text", [
+    "had 2 eggs and toast before today's run",
+    "burned 450 kcal on today's run",
+    "log my run today: 9.2km",
+    "chicken salad wrap, trying to hit my macros",
+])
+def test_fitness_fastpath_ignores_logging_shaped_messages(mock_db, monkeypatch, text):
+    """Meal/activity LOGGING sentences that merely contain 'today's run' or
+    'my macros' must reach the Gemini NL pipeline (so they get saved), not be
+    swallowed by the zero-Gemini read-only fast path."""
+    _stable_tz(monkeypatch)
+    bot = FakeBot()
+    assert telegram_bot._maybe_answer_fitness_query(bot, CHAT, text) is False
+    assert bot.sent == []
+
+
+def test_fitness_fastpath_logging_message_still_logs_via_gemini(mock_db, monkeypatch):
+    """End-to-end: 'burned 450 kcal on today's run' goes through exactly one
+    Gemini classification and the activity is actually saved."""
+    _stable_tz(monkeypatch)
+    _no_pause(monkeypatch)
+    monkeypatch.setattr(telegram_bot, "get_recent_meals", _wide_recent_meals)
+    client, calls = _counting_client({"intent": "log_activity", "active_calories": 450,
+                                      "steps": 0, "distance_km": 0, "reply": "ok"})
+    bot = FakeBot()
+    telegram_bot.handle_text_message(client, bot, CHAT, "burned 450 kcal on today's run")
+    assert len(calls) == 1
+    today = database.user_local_now().date().isoformat()
+    rows = database.get_activities(CHAT, today, today)
+    assert len(rows) == 1
+    assert rows[0]["active_calories"] == 450
+
+
+def test_fitness_fastpath_still_answers_plain_questions(mock_db, monkeypatch):
+    """The guard must not break the genuine zero-Gemini queries."""
+    _stable_tz(monkeypatch)
+    bot = FakeBot()
+    assert telegram_bot._maybe_answer_fitness_query(bot, CHAT, "what should I run today?") is True
+    assert telegram_bot._maybe_answer_fitness_query(bot, CHAT, "how's my protein?") is True
+    assert telegram_bot._maybe_answer_fitness_query(bot, CHAT, "what's this week's plan?") is True

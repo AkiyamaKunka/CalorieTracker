@@ -641,9 +641,23 @@ def test_parse_weight_kg_realistic_phrasings(text, expected):
     "10,000 steps today",
     "the flight is 72 minutes",   # bare number without weigh-keyword
     "72,5 kg",                    # European decimal comma: pinned unsupported
+    "ran 42 kilometers today",    # 'kilo' prefix must not read as kilograms
+    "cycled 50 kilometres",       # British spelling, same trap
 ])
 def test_parse_weight_kg_rejects_non_bodyweight_numbers(text):
     assert parse_weight_kg(text) is None
+
+
+@pytest.mark.parametrize("text,expected", [
+    # Regression: 'kilos?' used to match the 'kilo' prefix of 'kilometers',
+    # so an in-bounds distance mentioned before the real weight was logged
+    # as the body weight (e.g. 42.0 here).
+    ("ran 42 kilometers, weighed 70kg", 70.0),
+    ("weighed in at 70 this morning after my 42 kilometers long run", 70.0),
+    ("42 kilometres done, weight 72.5 kg", 72.5),
+])
+def test_parse_weight_kg_distance_does_not_shadow_weight(text, expected):
+    assert parse_weight_kg(text) == expected
 
 
 @pytest.mark.parametrize("text", [

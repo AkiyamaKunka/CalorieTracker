@@ -1278,3 +1278,46 @@ def test_report_on_weigh_in_day_unchanged_by_bounded_anchor(monkeypatch, tmp_pat
 
     assert "Latest: <b>70.0 kg</b>" in report
     assert "/ 140g" in report                          # 2.0 g/kg × 70.0 kg
+
+
+def test_sync_garmin_primary_activity_appearing_does_not_double_count(monkeypatch, tmp_path):
+    # The row carries WHOLE-DAY aggregates, so its identity must be the day.
+    # Before the always-date-derived id, a morning sync (no workouts ->
+    # garmin-day-X) followed by an evening re-sync (run logged -> the kwargs
+    # carried garmin-<activityId>) left TWO rows each claiming the full day,
+    # doubling burn/steps/distance in every sum.
+    import garmin
+
+    monkeypatch.delenv("GARMIN_NET_USE_TOTAL", raising=False)
+    monkeypatch.setattr(daily_report.database, "DB_PATH", tmp_path / "transition.db")
+    daily_report.database.init_db()
+    monkeypatch.setattr(daily_report, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(daily_report, "CHAT_ID", "12345")
+    monkeypatch.setattr(garmin, "is_configured", lambda: True)
+
+    # Morning: day aggregate only, no discrete activity yet.
+    monkeypatch.setattr(
+        garmin, "fetch_daily_activity",
+        lambda d: garmin.DailyActivity(active_calories=120, steps=3000, activities=[]),
+    )
+    daily_report._sync_garmin_activity("2026-07-14")
+
+    # Evening: the day's run now exists, with a real Garmin activityId.
+    monkeypatch.setattr(
+        garmin, "fetch_daily_activity",
+        lambda d: garmin.DailyActivity(
+            active_calories=640, steps=12000, distance_m=9200,
+            activities=[{"activityId": 987654, "activityType": {"typeKey": "running"},
+                         "distance": 9200.0, "duration": 3120.0, "calories": 610}],
+        ),
+    )
+    daily_report._sync_garmin_activity("2026-07-14")
+
+    rows = daily_report.database.get_activities(12345, "2026-07-14", "2026-07-14")
+    assert len(rows) == 1                                     # one row per day, always
+    assert rows[0]["external_id"] == "garmin-day-2026-07-14"  # stable day identity
+    assert rows[0]["active_calories"] == 640                  # latest sync wins
+
+    report = daily_report.generate_report("2026-07-14")
+    assert "🔥 Active burn: ~640 kcal" in report
+    assert "~760" not in report                               # 120+640 never summed

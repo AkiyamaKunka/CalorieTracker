@@ -632,12 +632,13 @@ def _sync_garmin_activity(target_date: str):
         daily = garmin.fetch_daily_activity(target_date)
         if daily is not None:
             kwargs = garmin.to_activity_kwargs(daily)
-            if not kwargs.get("external_id"):
-                # A day with no discrete activity yields external_id=None, and
-                # NULLs never conflict in UNIQUE(chat_id, source, external_id)
-                # — every re-sync (cron retry, /report) would insert a fresh
-                # row and double the burn. A date-derived id upserts in place.
-                kwargs["external_id"] = f"garmin-day-{target_date}"
+            # The row carries WHOLE-DAY aggregates (day burn, day steps, day
+            # distance), so its identity must be the day itself — always use
+            # the date-derived id. A per-activity id would change once the
+            # day's primary activity appears (garmin-day-X -> garmin-<id>),
+            # leaving two rows that each claim the full day and double every
+            # sum. The primary activity's own id stays in raw for reference.
+            kwargs["external_id"] = f"garmin-day-{target_date}"
             database.save_activity(chat_id, target_date, **kwargs)
             ok = True
         else:

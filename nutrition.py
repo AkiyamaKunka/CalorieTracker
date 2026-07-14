@@ -415,8 +415,11 @@ def report_line(analysis_result, targets, mode) -> str:
 
 # The (?<![\w.]) lookbehind stops the number from starting mid-token, so
 # scientific notation like "1e72" can't have its exponent read as 72 kg.
+# The (?![a-z]) lookahead stops the unit from matching mid-token, so the
+# "kilo" prefix of "kilometers"/"kilometres" can't be read as kilograms.
 _WEIGHT_UNIT_RE = re.compile(
-    r"(?<![\w.])(\d+(?:\.\d+)?)\s*(kgs?|kilograms?|kilos?|lbs?|pounds?)", re.IGNORECASE
+    r"(?<![\w.])(\d+(?:\.\d+)?)\s*(kgs?|kilograms?|kilos?|lbs?|pounds?)(?![a-z])",
+    re.IGNORECASE,
 )
 # Bare number guarded by an explicit weigh(ed/s/t) keyword, interpreted as kg.
 _WEIGHT_KEYWORD_RE = re.compile(
