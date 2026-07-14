@@ -194,7 +194,7 @@ def test_upload_uses_declared_original_hash(monkeypatch, tmp_path):
     monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries",
                         lambda client, image_bytes: {"is_food": True, "total_calories": 500})
     monkeypatch.setattr(telegram_bot, "save_meal",
-                        lambda chat_id, analysis, source, file_id, img_hash: saved.append(img_hash) or 77)
+                        lambda chat_id, analysis, source, file_id, img_hash, **kwargs: saved.append(img_hash) or 77)
     monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash",
                         lambda chat_id, image_hash, *a, **k: reserved.append(image_hash) or True)
     monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status", lambda *a, **k: None)
@@ -1915,3 +1915,48 @@ def test_fitness_fastpath_still_answers_plain_questions(mock_db, monkeypatch):
     assert telegram_bot._maybe_answer_fitness_query(bot, CHAT, "what should I run today?") is True
     assert telegram_bot._maybe_answer_fitness_query(bot, CHAT, "how's my protein?") is True
     assert telegram_bot._maybe_answer_fitness_query(bot, CHAT, "what's this week's plan?") is True
+
+
+@pytest.mark.parametrize("captured_at,expect_capture_dating", [
+    ("2026-07-10 16:58:08", True),     # sane backfill: capture-day ledger
+    ("garbage", False),                 # unparseable -> upload-time dating
+    ("2199-01-01 00:00:00", False),     # future -> rejected
+    ("2020-01-01 12:00:00", False),     # older than the honor window -> rejected
+])
+def test_upload_captured_at_dates_meal_on_capture_day(mock_db, monkeypatch, tmp_path,
+                                                      captured_at, expect_capture_dating):
+    # A photo taken days ago but uploaded today (nightly sync / offline-queue
+    # drain) must land on the ledger of the day it was TAKEN — the wrong-day
+    # dating found in the 2026-07-14 on-device test session.
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "failed")
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(database, "get_android_timezone", lambda *a, **k: "+0800")
+    monkeypatch.setattr(
+        telegram_bot, "analyze_food_photo_with_retries",
+        lambda client, image_bytes: {"is_food": True, "meal_description": "Backfill",
+                                     "total_calories": 300, "food_items": []},
+    )
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
+
+    app = telegram_bot._build_api_app(FakeBot(), object())
+    resp = app.test_client().post(
+        "/upload",
+        headers={"X-API-Key": "test-upload-key"},
+        data={
+            "photo": (io.BytesIO(b"backfilled-photo-bytes-" + captured_at.encode()), "meal.jpg"),
+            "captured_at": captured_at,
+        },
+    )
+
+    assert resp.status_code == 200
+    if expect_capture_dating:
+        meals = database.get_meals(12345, "2026-07-10", "2026-07-10")
+        assert len(meals) == 1
+        assert meals[0]["time"] == "04:58 PM"
+    else:
+        today = database.user_local_now().date().isoformat()
+        meals = database.get_meals(12345, today, today)
+        assert len(meals) == 1                     # fell back to upload-time dating

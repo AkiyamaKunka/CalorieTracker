@@ -9,6 +9,7 @@ import hashlib
 import re
 import shutil
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 # --- Configuration ---
@@ -365,6 +366,26 @@ def _recompress_for_upload(original_bytes):
     return recompressed
 
 
+_FILENAME_TS_RE = re.compile(r"(?:^|[^0-9])(\d{8})_(\d{6})")
+
+
+def _captured_at_from_filename(name):
+    """Extract device-local capture time from a camera filename.
+
+    Honor/most Androids name photos IMG_YYYYMMDD_HHMMSS.jpg in local wall
+    time. Returns 'YYYY-MM-DD HH:MM:SS' or None when the name has no valid
+    timestamp (the server then falls back to upload-time dating).
+    """
+    match = _FILENAME_TS_RE.search(name or "")
+    if not match:
+        return None
+    try:
+        captured = datetime.strptime(match.group(1) + match.group(2), "%Y%m%d%H%M%S")
+    except ValueError:
+        return None
+    return captured.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _upload_photo_status(file_path):
     """Upload a photo and return (status, body_is_json).
 
@@ -391,11 +412,17 @@ def _upload_photo_status(file_path):
             upload_name = Path(file_path).stem + ".jpg"
             print(f"[{time.strftime('%X')}] Recompressed {Path(file_path).name}: "
                   f"{len(original_bytes)} -> {len(upload_bytes)} bytes")
+        form_data = {"original_hash": original_hash}
+        captured_at = _captured_at_from_filename(Path(file_path).name)
+        if captured_at:
+            # Backfilled photos (nightly sync, offline-queue drain) must land
+            # on the day they were TAKEN, not the day the upload succeeded.
+            form_data["captured_at"] = captured_at
         response = requests.post(
             f"{SERVER_URL}/upload",
             headers=get_headers(),
             files={"photo": (upload_name, upload_bytes)},
-            data={"original_hash": original_hash},
+            data=form_data,
             timeout=30,
         )
     except (requests.exceptions.RequestException, RuntimeError, OSError) as e:

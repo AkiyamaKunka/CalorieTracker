@@ -1178,16 +1178,45 @@ def maybe_warn_ios_vpn_unverified(bot: TelegramBot, endpoint: str):
     )
 
 
-def save_meal(chat_id: int, analysis: Dict, source: str, file_id: str = "", image_hash: str = ""):
-    """Save a meal analysis to the log (from direct Telegram photo)."""
+def save_meal(chat_id: int, analysis: Dict, source: str, file_id: str = "", image_hash: str = "",
+              captured_at: Optional[datetime] = None):
+    """Save a meal analysis to the log (from direct Telegram photo).
+
+    captured_at, when given, is the device-local moment the photo was TAKEN
+    (from the camera filename) — a backfilled photo from yesterday must land
+    on yesterday's ledger, not on the day the sync finally uploaded it.
+    """
     # Meal date/time use the user's clock so late-night meals land on the right
     # day; timestamp stays on the server clock because duplicate detection and
     # reservation staleness compare against datetime.now().
-    user_now = database.user_local_now()
+    user_now = captured_at or database.user_local_now()
     date_str = user_now.date().isoformat()
     time_str = user_now.strftime("%I:%M %p")
     timestamp_str = datetime.now().isoformat()
     return database.save_meal(chat_id, date_str, time_str, timestamp_str, source, image_hash, file_id, analysis)
+
+
+# Oldest capture time /upload will honor; anything older (or unparseable, or
+# in the future) falls back to upload-time dating rather than trusting junk.
+CAPTURED_AT_MAX_AGE_DAYS = _env_int("CAPTURED_AT_MAX_AGE_DAYS", 45, 1, 365)
+
+
+def _parse_captured_at(raw: str) -> Optional[datetime]:
+    """Validate the additive captured_at form field ('YYYY-MM-DD HH:MM:SS').
+
+    The value is device-local wall time taken from the camera filename, so it
+    is compared against the user-local clock, allowing an hour of skew.
+    """
+    try:
+        captured = datetime.strptime((raw or "").strip(), "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return None
+    now_local = database.user_local_now().replace(tzinfo=None)
+    if captured > now_local + timedelta(hours=1):
+        return None
+    if captured < now_local - timedelta(days=CAPTURED_AT_MAX_AGE_DAYS):
+        return None
+    return captured
 
 
 def _format_age(iso_value: Optional[str]) -> str:
@@ -3641,6 +3670,10 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
             # The phone may recompress before uploading; dedup, /reconcile,
             # and the meals ledger must key on the ORIGINAL file's hash.
             img_hash = declared_hash
+        # Additive: the client may declare when the photo was TAKEN so a
+        # backfilled upload (nightly sync, offline-queue drain) lands on the
+        # capture day's ledger instead of the upload day's.
+        captured_at = _parse_captured_at(request.form.get("captured_at", ""))
 
         existing_failed = _find_failed_upload_by_hash(img_hash)
         if existing_failed:
@@ -3674,7 +3707,7 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
             return jsonify({"error": "Could not stage upload"}), 500
 
         # Process the photo in a background thread to return 200 OK instantly to iOS
-        def background_process(upload_file_path, hsh, device):
+        def background_process(upload_file_path, hsh, device, captured=None):
             device_display = _html(device)
             staged_path = Path(upload_file_path)
             processing_msg = None
@@ -3750,7 +3783,8 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
                     return
 
                 if analysis.get("is_food"):
-                    meal_id = save_meal(ALLOWED_CHAT_ID, analysis, "api_auto", "api", hsh)
+                    meal_id = save_meal(ALLOWED_CHAT_ID, analysis, "api_auto", "api", hsh,
+                                        captured_at=captured)
                     database.mark_photo_hash_status(ALLOWED_CHAT_ID, hsh, "saved", meal_id, source="api_auto")
                     log.info(f"  ✅ API Food: {analysis.get('meal_description')} (~{analysis.get('total_calories')} kcal)")
                     result_text = format_food_result(ALLOWED_CHAT_ID, analysis)
@@ -3780,7 +3814,7 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
             finally:
                 _finish_api_upload_processing(hsh)
 
-        threading.Thread(target=background_process, args=(str(upload_path), img_hash, device_name)).start()
+        threading.Thread(target=background_process, args=(str(upload_path), img_hash, device_name, captured_at)).start()
 
         return jsonify({"status": "processing_in_background"})
 
