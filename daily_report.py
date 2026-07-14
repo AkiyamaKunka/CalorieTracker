@@ -195,6 +195,17 @@ def _fitness_sections(chat_id, target_date, grand_cal):
         latest_weight = database.get_latest_body_weight(chat_id)
     except Exception:
         latest_weight = None
+    # Weight anchor for THIS report's date: the latest weigh-in at or before
+    # target_date, so a catch-up report for yesterday never uses this
+    # morning's weigh-in. Identical to latest_weight when nothing newer exists.
+    try:
+        anchor_floor = (
+            datetime.strptime(target_date, "%Y-%m-%d") - timedelta(days=366)
+        ).date().isoformat()
+        past_weights = database.get_body_weights(chat_id, anchor_floor, target_date)
+        anchor_weight = past_weights[-1] if past_weights else None
+    except Exception:
+        anchor_weight = None
     try:
         activities_today = database.get_activities(chat_id, target_date, target_date)
     except Exception:
@@ -215,8 +226,20 @@ def _fitness_sections(chat_id, target_date, grand_cal):
         diet_mode = (profile or {}).get("diet_mode")
         if diet_mode:
             import nutrition
-            weight_kg = safe_number((latest_weight or {}).get("weight_kg")) or None
-            targets = nutrition.diet_targets(diet_mode, weight_kg)
+            weight_kg = safe_number((anchor_weight or {}).get("weight_kg")) or None
+            targets = nutrition.diet_targets(
+                diet_mode,
+                weight_kg,
+                calorie_target=(profile or {}).get("target_calories"),
+                protein_g_per_kg=(profile or {}).get("protein_g_per_kg"),
+            )
+            # Explicit gram targets from '/diet target …' win over mode-derived
+            # ones, mirroring telegram_bot._resolved_diet_targets so the report
+            # and /macros always agree.
+            for key in ("target_protein_g", "target_carbs_g", "target_fat_g"):
+                stored = safe_number((profile or {}).get(key), None)
+                if stored is not None:
+                    targets[key] = stored
             meals_today = database.get_meals(chat_id, target_date, target_date)
             analysis_result = nutrition.analyze_macros(meals_today, targets)
             block = nutrition.format_macro_report(analysis_result, targets, diet_mode)
@@ -271,7 +294,7 @@ def _fitness_sections(chat_id, target_date, grand_cal):
         if weights:
             lines.append("")
             lines.append("<b>⚖️ Weight</b>")
-            latest_kg = safe_number((latest_weight or {}).get("weight_kg"))
+            latest_kg = safe_number((anchor_weight or {}).get("weight_kg"))
             if latest_kg > 0:
                 lines.append(f"Latest: <b>{latest_kg:.1f} kg</b>")
             slope = _weekly_weight_slope(weights)
@@ -593,7 +616,14 @@ def _sync_garmin_activity(target_date: str):
     try:
         daily = garmin.fetch_daily_activity(target_date)
         if daily is not None:
-            database.save_activity(chat_id, target_date, **garmin.to_activity_kwargs(daily))
+            kwargs = garmin.to_activity_kwargs(daily)
+            if not kwargs.get("external_id"):
+                # A day with no discrete activity yields external_id=None, and
+                # NULLs never conflict in UNIQUE(chat_id, source, external_id)
+                # — every re-sync (cron retry, /report) would insert a fresh
+                # row and double the burn. A date-derived id upserts in place.
+                kwargs["external_id"] = f"garmin-day-{target_date}"
+            database.save_activity(chat_id, target_date, **kwargs)
             ok = True
         else:
             error_summary = "Garmin returned no activity for this date."

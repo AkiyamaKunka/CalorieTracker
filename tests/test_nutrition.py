@@ -592,14 +592,10 @@ def test_analyze_macros_negative_grams_never_raise_and_still_render():
     assert isinstance(report_line(result, targets, "keto"), str)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="BUG: negative gram totals yield actual_split percentages outside 0..100 (e.g. P -100%)",
-)
 def test_actual_split_percentages_stay_within_zero_and_hundred():
-    # Hostile meal with negative protein grams currently produces
-    # actual_split {'protein': -100, 'carbs': 200, 'fat': 0}, which renders
-    # as "Split: P -100% · C 200% · F 0%" in a user-facing report.
+    # Hostile meal with negative protein grams used to produce
+    # actual_split {'protein': -100, 'carbs': 200, 'fat': 0}, rendering as
+    # "Split: P -100% · C 200% · F 0%"; negative totals now clamp to zero.
     result = analyze_macros(
         [_meal(total_protein_g=-50, total_carbs_g=100, total_fat_g=0)], {}
     )
@@ -647,6 +643,16 @@ def test_parse_weight_kg_realistic_phrasings(text, expected):
     "72,5 kg",                    # European decimal comma: pinned unsupported
 ])
 def test_parse_weight_kg_rejects_non_bodyweight_numbers(text):
+    assert parse_weight_kg(text) is None
+
+
+@pytest.mark.parametrize("text", [
+    "1e72",             # no unit, no keyword
+    "1e72 kg",          # exponent digits must not read as "72 kg"
+    "weighed 1e72",     # keyword path grabs the mantissa (1.0, out of bounds)
+    "6.02e23 kilos",
+])
+def test_parse_weight_kg_scientific_notation_is_not_misread(text):
     assert parse_weight_kg(text) is None
 
 

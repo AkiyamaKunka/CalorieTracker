@@ -172,6 +172,18 @@ def to_activity_kwargs(daily: DailyActivity) -> dict:
     elevation = safe_number(primary.get("elevationGain"))
     start_time = primary.get("startTimeLocal")
 
+    # Day-level steps and whole-day total burn are not first-class activity
+    # columns; the report reads them ONLY from the persisted ``raw`` blob, so
+    # merge them in alongside the primary-activity payload (copied, so the
+    # caller's dict is never mutated).
+    raw = dict(primary)
+    steps = safe_number(daily.steps)
+    if steps > 0:
+        raw["steps"] = steps
+    total_calories = safe_number(daily.total_calories)
+    if total_calories > 0:
+        raw["total_calories"] = total_calories
+
     return {
         "source": "garmin",
         "external_id": external_id,
@@ -182,5 +194,5 @@ def to_activity_kwargs(daily: DailyActivity) -> dict:
         "avg_hr_bpm": int(avg_hr) if avg_hr else None,
         "elevation_gain_m": elevation or None,
         "start_time": str(start_time) if start_time not in (None, "") else None,
-        "raw": primary or None,
+        "raw": raw or None,
     }

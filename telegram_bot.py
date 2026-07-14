@@ -2263,7 +2263,7 @@ _RUN_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 _MACRO_QUERY_RE = re.compile(
-    r"(how'?s\s+my\s+(?:protein|macros?|carbs?|fat)|how\s+are\s+my\s+macros|"
+    r"(how(?:'s|s|\s+is|\s+are)\s+my\s+(?:protein|macros?|carbs?|fat)|"
     r"macros?\s+(?:today|so\s+far)|my\s+macros)",
     re.IGNORECASE,
 )
@@ -2353,6 +2353,11 @@ def _resolved_diet_targets(profile: Dict, latest_weight: Optional[Dict]):
         calorie_target=(profile or {}).get("target_calories"),
         protein_g_per_kg=(profile or {}).get("protein_g_per_kg"),
     )
+    # Explicit gram targets from '/diet target …' win over mode-derived ones.
+    for key in ("target_protein_g", "target_carbs_g", "target_fat_g"):
+        stored = safe_number((profile or {}).get(key), None)
+        if stored is not None:
+            targets[key] = stored
     return mode, targets
 
 
@@ -2791,6 +2796,8 @@ def _parse_race_time(token) -> Optional[float]:
         try:
             nums = [float(p) for p in parts]
         except ValueError:
+            return None
+        if any(num >= 60 for num in nums[1:]):  # 19:99 is never a real time
             return None
         seconds = 0.0
         for num in nums:

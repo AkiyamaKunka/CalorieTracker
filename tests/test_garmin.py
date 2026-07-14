@@ -165,6 +165,7 @@ def test_to_activity_kwargs_handles_empty_day():
     assert kwargs["distance_km"] is None
     assert kwargs["duration_min"] is None
     assert kwargs["avg_hr_bpm"] is None
+    assert kwargs["raw"] is None  # nothing to persist -> NULL, not '{}'
 
 
 def test_to_activity_kwargs_coerces_hostile_activity_fields():
@@ -315,8 +316,11 @@ def test_realistic_garmin_day_parses_field_for_field(monkeypatch):
         "avg_hr_bpm": 148,
         "elevation_gain_m": 57.0,
         "start_time": "2026-07-13 06:12:04",
-        "raw": _REAL_RUN,
+        # The primary-activity payload plus the day-level steps/total burn the
+        # report reads exclusively from raw.
+        "raw": {**_REAL_RUN, "steps": 12340, "total_calories": 2214},
     }
+    assert daily.activities == [_REAL_RUN]  # the merge never mutates the payload
 
 
 def test_to_activity_kwargs_feeds_save_activity_end_to_end(monkeypatch, tmp_path):
@@ -344,7 +348,9 @@ def test_to_activity_kwargs_feeds_save_activity_end_to_end(monkeypatch, tmp_path
     assert row["avg_hr_bpm"] == 148
     assert row["elevation_gain_m"] == 57.0
     assert row["start_time"] == "2026-07-13 06:12:04"
-    assert row["raw"] == _REAL_RUN  # raw payload survives the JSON round-trip
+    # The raw payload (primary run + merged day-level steps/total burn)
+    # survives the JSON round-trip.
+    assert row["raw"] == {**_REAL_RUN, "steps": 12340, "total_calories": 2214}
 
     # Evening re-sync of the same day (calories grew): still exactly one row.
     fake2 = _FakeGarmin(stats=dict(_REAL_STATS, activeKilocalories=655),
@@ -356,6 +362,29 @@ def test_to_activity_kwargs_feeds_save_activity_end_to_end(monkeypatch, tmp_path
     rows = database.get_activities(7, "2026-07-13", "2026-07-13")
     assert len(rows) == 1
     assert rows[0]["active_calories"] == 655
+
+
+def test_day_aggregate_round_trip_renders_steps_and_total_net(monkeypatch, tmp_path):
+    # Round-trip contract for a workout-less Garmin day: the day-level steps
+    # and total burn must survive to_activity_kwargs -> save_activity -> the
+    # report, so the Steps line renders and GARMIN_NET_USE_TOTAL has effect
+    # from a real pull (both were silently dropped before the raw merge).
+    import daily_report
+
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "roundtrip.db")
+    database.init_db()
+    monkeypatch.setattr(daily_report, "CHAT_ID", "7")
+    monkeypatch.setenv("GARMIN_NET_USE_TOTAL", "1")
+
+    daily = garmin.DailyActivity(steps=9000, total_calories=2600,
+                                 active_calories=450, activities=[])
+    database.save_activity(7, "2026-07-13", **garmin.to_activity_kwargs(daily))
+
+    report = daily_report.generate_report("2026-07-13")
+
+    assert "👟 Steps: 9,000" in report
+    # Total-basis net: 0 kcal consumed − 2600 kcal whole-day burn.
+    assert "⚖️ Net: ~-2,600 kcal (consumed − total burn)" in report
 
 
 def test_token_dir_env_quotes_and_whitespace_are_stripped(monkeypatch):

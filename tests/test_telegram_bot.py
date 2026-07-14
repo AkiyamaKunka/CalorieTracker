@@ -1254,10 +1254,9 @@ def test_weight_fullwidth_unicode_digits_are_understood(mock_db, monkeypatch):
     assert latest["weight_kg"] == 72.5
 
 
-@pytest.mark.xfail(strict=False, reason="BUG: _WEIGHT_UNIT_RE extracts the exponent digits of scientific notation, so '/weight 1e72' silently logs 72 kg")
 def test_weight_scientific_notation_junk_is_not_misread_as_weight(mock_db, monkeypatch):
-    # '1e400' is only rejected because 400 > 300; '1e72' lands in range and
-    # writes a bogus weigh-in the user never entered.
+    # Regression: _WEIGHT_UNIT_RE used to extract the exponent digits of
+    # scientific notation ('1e72' -> 72 kg); fixed with a (?<![\w.]) lookbehind.
     _stable_tz(monkeypatch)
     bot = FakeBot()
     telegram_bot._cmd_weight(bot, CHAT, ["1e72"])
@@ -1315,7 +1314,6 @@ def test_train_run_marathon_sub3_computes_daniels_vdot(mock_db, monkeypatch):
     assert "Marathon" in reply
 
 
-@pytest.mark.xfail(strict=False, reason="BUG: _parse_race_time accepts second fields >= 60, so '/train_run 5k 19:99' silently stores a 20:39 race and a wrong VDOT")
 def test_train_run_rejects_impossible_seconds_field(mock_db, monkeypatch):
     # 19:99 is never a real race time; treating it as 1239 s trains the user
     # at paces derived from a race they did not run.
@@ -1323,6 +1321,8 @@ def test_train_run_rejects_impossible_seconds_field(mock_db, monkeypatch):
     bot = FakeBot()
     telegram_bot._cmd_train_run(bot, CHAT, ["5k", "19:99"])
     assert database.get_fitness_profile(CHAT) is None
+    assert bot.sent  # replies with usage help, never goes silent
+    assert "/train_run" in bot.sent[-1]["text"]
 
 
 # ── /activity arg fuzz ──────────────────────────────────────────────
@@ -1382,6 +1382,31 @@ def test_macros_selector_junk_clamps_to_sane_window(mock_db, monkeypatch, select
     text = bot.sent[-1]["text"]
     assert f"Window: {label}" in text
     assert "Macro check" in text
+
+
+def test_explicit_diet_gram_targets_override_mode_split_in_macros(mock_db, monkeypatch):
+    """'/diet target 2000 150 100 80' sets explicit gram targets; /macros must
+    judge intake against THOSE numbers, not carbs/fat re-derived from the
+    high-protein %-split (which would claim 200g C / 67g F and contradict the
+    plan the user typed in)."""
+    _stable_tz(monkeypatch)
+    bot = FakeBot()
+    telegram_bot._cmd_diet(bot, CHAT, ["high_protein"])
+    telegram_bot._cmd_diet(bot, CHAT, ["target", "2000", "150", "100", "80"])
+
+    today = database.user_local_now().date().isoformat()
+    database.save_meal(CHAT, today, "12:00", datetime.now().isoformat(), "t",
+                       "target-h", "f",
+                       {"is_food": True, "meal_description": "Big bowl",
+                        "total_calories": 1200, "total_protein_g": 90,
+                        "total_carbs_g": 120, "total_fat_g": 40})
+
+    bot = FakeBot()
+    telegram_bot._cmd_macros(bot, CHAT, ["today"])
+    text = bot.sent[-1]["text"]
+    assert "Protein: 90g / 150g" in text
+    assert "Carbs: 120g / 100g ⬆️" in text  # over the user's 100g, not under the split's 200g
+    assert "Fat: 40g / 80g" in text
 
 
 # ── HTML injection end-to-end ───────────────────────────────────────
@@ -1568,7 +1593,6 @@ def test_mixed_activity_and_meal_sentence_goes_to_gemini_once(mock_db, monkeypat
     assert rows[0]["distance_km"] == 10
 
 
-@pytest.mark.xfail(strict=False, reason="BUG: _MACRO_QUERY_RE only matches \"how's/hows my protein\", so the plain phrasing 'how is my protein today' burns a Gemini call for a pure read query")
 def test_plain_macro_question_answers_without_gemini(mock_db, monkeypatch):
     _stable_tz(monkeypatch)
     _no_pause(monkeypatch)

@@ -621,6 +621,29 @@ def test_energy_balance_section_appears_with_activity(monkeypatch):
 
 
 def test_energy_balance_net_uses_total_when_env_set(monkeypatch):
+    # The row is built via the REAL producer (garmin.to_activity_kwargs) so
+    # this exercises the exact persisted shape a Garmin pull writes.
+    import garmin
+
+    monkeypatch.setenv("GARMIN_NET_USE_TOTAL", "1")
+    _patch_meals(monkeypatch, [_meal(calories=2000)])
+    _no_fitness_data(monkeypatch)
+    row = garmin.to_activity_kwargs(
+        garmin.DailyActivity(active_calories=450, total_calories=2600, activities=[])
+    )
+    monkeypatch.setattr(
+        daily_report.database, "get_activities", lambda *a, **k: [row]
+    )
+
+    report = daily_report.generate_report("2026-06-25")
+
+    # With total basis: 2000 − 2600 = -600, and the basis word is "total".
+    assert "Net: ~-600 kcal (consumed − total burn)" in report
+
+
+def test_energy_balance_net_uses_total_from_hand_crafted_raw(monkeypatch):
+    # Hand-crafted variant kept on purpose: documents that the reader
+    # tolerates a bare row whose raw blob carries only total_calories.
     monkeypatch.setenv("GARMIN_NET_USE_TOTAL", "1")
     _patch_meals(monkeypatch, [_meal(calories=2000)])
     _no_fitness_data(monkeypatch)
@@ -631,18 +654,22 @@ def test_energy_balance_net_uses_total_when_env_set(monkeypatch):
 
     report = daily_report.generate_report("2026-06-25")
 
-    # With total basis: 2000 − 2600 = -600, and the basis word is "total".
     assert "Net: ~-600 kcal (consumed − total burn)" in report
 
 
 def test_energy_balance_falls_back_to_active_when_total_absent(monkeypatch):
+    import garmin
+
     monkeypatch.setenv("GARMIN_NET_USE_TOTAL", "1")
     _patch_meals(monkeypatch, [_meal(calories=500)])
     _no_fitness_data(monkeypatch)
-    # Env asks for total, but no total is persisted -> active basis is used.
+    # Env asks for total, but Garmin reported none: the real producer then
+    # persists no total_calories and the active basis is used.
+    row = garmin.to_activity_kwargs(
+        garmin.DailyActivity(active_calories=450, activities=[])
+    )
     monkeypatch.setattr(
-        daily_report.database, "get_activities",
-        lambda *a, **k: [{"active_calories": 450}],
+        daily_report.database, "get_activities", lambda *a, **k: [row]
     )
 
     report = daily_report.generate_report("2026-06-25")
@@ -722,6 +749,7 @@ def test_generate_report_stays_offline(monkeypatch):
 
 
 def test_fitness_sections_never_raise_on_hostile_rows(monkeypatch):
+    monkeypatch.delenv("GARMIN_NET_USE_TOTAL", raising=False)
     monkeypatch.setattr(daily_report.database, "get_fitness_profile", lambda cid: {"diet_mode": "keto", "goal_race_date": ["nope"]})
     monkeypatch.setattr(daily_report.database, "get_latest_body_weight", lambda cid: {"weight_kg": "heavy"})
     monkeypatch.setattr(
@@ -739,6 +767,14 @@ def test_fitness_sections_never_raise_on_hostile_rows(monkeypatch):
     lines = daily_report._fitness_sections(12345, "2026-06-25", grand_cal="not-a-number")
 
     assert isinstance(lines, list)
+    # Hostile siblings must degrade, not destroy: the one valid 300-kcal
+    # activity row still yields its Energy Balance content, and the one
+    # parseable weigh-in still renders.
+    joined = "\n".join(lines)
+    assert "<b>⚡ Energy Balance</b>" in joined
+    assert "🔥 Active burn: ~300 kcal" in joined
+    assert "⚖️ Net: ~-300 kcal (consumed − active burn)" in joined
+    assert "Latest: <b>80.0 kg</b>" in joined
 
 
 # ─── Garmin main() network hook ────────────────────────────────────
@@ -825,6 +861,37 @@ def test_record_activity_health_wrapper_writes_file(monkeypatch, tmp_path):
     data = json.loads(health_path.read_text())
     assert data["activity"]["last_ok"] is True
     assert data["activity"]["last_source"] == "garmin"
+
+
+def test_sync_garmin_resync_of_day_aggregate_does_not_duplicate(monkeypatch, tmp_path):
+    # A Garmin day with no discrete activity has no activityId; before the
+    # date-derived fallback external_id, its NULL never conflicted in
+    # UNIQUE(chat_id, source, external_id), so every re-sync (cron retry,
+    # /report) inserted a fresh row and doubled the day's burn.
+    import garmin
+
+    monkeypatch.delenv("GARMIN_NET_USE_TOTAL", raising=False)
+    monkeypatch.setattr(daily_report.database, "DB_PATH", tmp_path / "resync.db")
+    daily_report.database.init_db()
+    monkeypatch.setattr(daily_report, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(daily_report, "CHAT_ID", "12345")
+    monkeypatch.setattr(garmin, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        garmin, "fetch_daily_activity",
+        lambda d: garmin.DailyActivity(active_calories=450, activities=[]),
+    )
+
+    daily_report._sync_garmin_activity("2026-07-14")
+    daily_report._sync_garmin_activity("2026-07-14")  # cron retry / manual /report
+
+    rows = daily_report.database.get_activities(12345, "2026-07-14", "2026-07-14")
+    assert len(rows) == 1
+    assert rows[0]["external_id"] == "garmin-day-2026-07-14"
+    assert rows[0]["active_calories"] == 450
+
+    report = daily_report.generate_report("2026-07-14")
+    assert "🔥 Active burn: ~450 kcal" in report
+    assert "~900" not in report
 
 
 # ─── Weight slope arithmetic ───────────────────────────────────────
@@ -1069,12 +1136,10 @@ def test_html_to_plain_full_fitness_report_keeps_numbers_and_drops_tags(monkeypa
 
 # ─── Report vs /macros target consistency ──────────────────────────
 
-@pytest.mark.xfail(strict=False, reason="BUG: daily_report._fitness_sections ignores stored protein_g_per_kg/target_calories so the nightly report and /macros disagree on targets")
 def test_report_macro_targets_honor_stored_profile_overrides(monkeypatch):
-    # Robert runs /diet protein 2.2 and /diet target 2400 …; /macros then
-    # targets 158 g protein and 2,400 kcal, but the nightly report recomputes
-    # from the bare mode defaults (2.0 g/kg, no calorie target) — the two
-    # surfaces show different targets for the same day.
+    # Robert runs /diet protein 2.2 and /diet target 2400 …; /macros targets
+    # 158 g protein and 2,400 kcal, and the nightly report must resolve the
+    # SAME stored overrides instead of recomputing from bare mode defaults.
     _patch_meals(monkeypatch, [_meal(calories=500, protein=30, carbs=40, fat=15)])
     _no_fitness_data(monkeypatch)
     monkeypatch.setattr(
@@ -1082,12 +1147,68 @@ def test_report_macro_targets_honor_stored_profile_overrides(monkeypatch):
         lambda cid: {"diet_mode": "high_protein", "protein_g_per_kg": 2.2,
                      "target_calories": 2400},
     )
-    monkeypatch.setattr(
-        daily_report.database, "get_latest_body_weight",
-        lambda cid: {"weight_kg": 71.8, "date": "2026-06-25"},
-    )
+    _seed_weights(monkeypatch, [{"weight_kg": 71.8, "date": "2026-06-25"}])
 
     report = daily_report.generate_report("2026-06-25")
 
     assert "/ 158g" in report                          # round(2.2 * 71.8)
     assert "Calories: <b>500</b> / 2,400 kcal" in report
+
+
+def test_report_macro_targets_overlay_explicit_gram_targets(monkeypatch):
+    # Explicit gram targets stored via '/diet target 2400 150 200 70' must
+    # win over the mode-derived split in the report, exactly as in /macros.
+    _patch_meals(monkeypatch, [_meal(calories=500, protein=30, carbs=40, fat=15)])
+    _no_fitness_data(monkeypatch)
+    monkeypatch.setattr(
+        daily_report.database, "get_fitness_profile",
+        lambda cid: {"diet_mode": "high_protein", "target_calories": 2400,
+                     "target_protein_g": 150, "target_carbs_g": 200,
+                     "target_fat_g": 70},
+    )
+    _seed_weights(monkeypatch, [{"weight_kg": 71.8, "date": "2026-06-25"}])
+
+    report = daily_report.generate_report("2026-06-25")
+
+    assert "Protein: 30g / 150g" in report             # not weight-derived 144g
+    assert "Carbs: 40g / 200g" in report
+    assert "Fat: 15g / 70g" in report
+
+
+# ─── Weight anchor is bounded by the report date ───────────────────
+
+def test_catch_up_report_anchors_weight_on_or_before_target_date(monkeypatch, tmp_path):
+    # Robert weighs 72.0 on the 13th and 70.0 on the morning of the 14th; a
+    # catch-up report FOR the 13th must show 72.0 and anchor the protein
+    # target on 72.0, not on the next morning's weigh-in.
+    monkeypatch.setattr(daily_report.database, "DB_PATH", tmp_path / "anchor.db")
+    daily_report.database.init_db()
+    monkeypatch.setattr(daily_report, "CHAT_ID", "12345")
+    daily_report.database.save_fitness_profile(12345, diet_mode="high_protein")
+    daily_report.database.save_body_weight(12345, "2026-07-13", 72.0)
+    daily_report.database.save_body_weight(12345, "2026-07-14", 70.0)
+
+    report = daily_report.generate_report("2026-07-13")
+
+    assert "Latest: <b>72.0 kg</b>" in report
+    # high_protein: 2.0 g/kg × 72.0 kg = 144 g, anchored on the 13th; the
+    # 14th's 70.0 kg would have produced 140 g.
+    assert "/ 144g" in report
+    assert "/ 140g" not in report
+    assert "70.0 kg" not in report
+
+
+def test_report_on_weigh_in_day_unchanged_by_bounded_anchor(monkeypatch, tmp_path):
+    # When every weigh-in is on or before the report date the bounded anchor
+    # must behave exactly like the old unbounded latest-weight lookup.
+    monkeypatch.setattr(daily_report.database, "DB_PATH", tmp_path / "anchor2.db")
+    daily_report.database.init_db()
+    monkeypatch.setattr(daily_report, "CHAT_ID", "12345")
+    daily_report.database.save_fitness_profile(12345, diet_mode="high_protein")
+    daily_report.database.save_body_weight(12345, "2026-07-13", 72.0)
+    daily_report.database.save_body_weight(12345, "2026-07-14", 70.0)
+
+    report = daily_report.generate_report("2026-07-14")
+
+    assert "Latest: <b>70.0 kg</b>" in report
+    assert "/ 140g" in report                          # 2.0 g/kg × 70.0 kg

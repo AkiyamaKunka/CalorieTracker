@@ -179,10 +179,12 @@ def analyze_macros(meals, targets) -> dict:
 
     consumed = {"protein": 0.0, "carbs": 0.0, "fat": 0.0, "calories": 0.0}
     for analysis in _iter_analyses(meals):
-        consumed["protein"] += safe_number(analysis.get("total_protein_g"))
-        consumed["carbs"] += safe_number(analysis.get("total_carbs_g"))
-        consumed["fat"] += safe_number(analysis.get("total_fat_g"))
-        consumed["calories"] += safe_number(analysis.get("total_calories"))
+        # Negative totals are physically impossible; clamp so a hostile
+        # payload can't push actual_split outside 0..100.
+        consumed["protein"] += max(0.0, safe_number(analysis.get("total_protein_g")))
+        consumed["carbs"] += max(0.0, safe_number(analysis.get("total_carbs_g")))
+        consumed["fat"] += max(0.0, safe_number(analysis.get("total_fat_g")))
+        consumed["calories"] += max(0.0, safe_number(analysis.get("total_calories")))
 
     # Actual macro split by calories contributed.
     macro_kcal = {
@@ -388,12 +390,14 @@ def report_line(analysis_result, targets, mode) -> str:
     )
 
 
+# The (?<![\w.]) lookbehind stops the number from starting mid-token, so
+# scientific notation like "1e72" can't have its exponent read as 72 kg.
 _WEIGHT_UNIT_RE = re.compile(
-    r"(\d+(?:\.\d+)?)\s*(kgs?|kilograms?|kilos?|lbs?|pounds?)", re.IGNORECASE
+    r"(?<![\w.])(\d+(?:\.\d+)?)\s*(kgs?|kilograms?|kilos?|lbs?|pounds?)", re.IGNORECASE
 )
 # Bare number guarded by an explicit weigh(ed/s/t) keyword, interpreted as kg.
 _WEIGHT_KEYWORD_RE = re.compile(
-    r"weigh(?:ed|s|t)?\D{0,12}?(\d+(?:\.\d+)?)", re.IGNORECASE
+    r"weigh(?:ed|s|t)?\D{0,12}?(?<![\w.])(\d+(?:\.\d+)?)", re.IGNORECASE
 )
 _LB_TO_KG = 0.45359237
 _MIN_KG = 30
