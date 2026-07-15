@@ -269,8 +269,12 @@ def _section_training(lines, chat_id, profile, target_date):
         today_day = datetime.strptime(target_date, "%Y-%m-%d").date()
         weeks = fitness_plan.weeks_to_race(profile, today_day)
         if weeks is not None:
-            label = escape(str((profile or {}).get("race_label") or "race"))
-            lines.append(f"🎯 {weeks:.1f} weeks to {label}")
+            # race_label names the VDOT-source race (a past result), not the
+            # goal — date the countdown to the goal race instead. weeks is
+            # non-None only when goal_race_date normalised to a real date, so
+            # its first 10 chars are the ISO day for str/date/datetime alike.
+            when = escape(str(goal_race_date)[:10])
+            lines.append(f"🎯 {weeks:.1f} weeks to race ({when})")
 
 
 def _fitness_sections(chat_id, target_date, grand_cal):
@@ -409,10 +413,12 @@ def generate_report(target_date: str) -> str:
         # Per-item breakdown
         for item in safe_food_items(a):
             item_name = escape(str(item.get("name", "?")))
-            item_cal = item.get("estimated_calories") or 0
-            item_p = item.get("protein_g") or 0
-            item_c = item.get("carbs_g") or 0
-            item_f = item.get("fat_g") or 0
+            # safe_number: JSON Infinity/NaN in item fields must not leak
+            # 'inf kcal' / 'P:nang' into the report.
+            item_cal = safe_number(item.get("estimated_calories"))
+            item_p = safe_number(item.get("protein_g"))
+            item_c = safe_number(item.get("carbs_g"))
+            item_f = safe_number(item.get("fat_g"))
             lines.append(f"  • {item_name}: {item_cal} kcal")
             lines.append(f"    P:{item_p}g | C:{item_c}g | F:{item_f}g")
 

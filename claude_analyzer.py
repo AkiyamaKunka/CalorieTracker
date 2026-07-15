@@ -75,8 +75,10 @@ def analyze_food_photo(image_bytes: bytes) -> Optional[Dict]:
         with tempfile.NamedTemporaryFile(
             prefix="ct_claude_", suffix=".jpg", delete=False
         ) as tmp:
-            tmp.write(image_bytes)
+            # Record the path before writing so a failed write (e.g. ENOSPC)
+            # still gets the file cleaned up by the finally block.
             tmp_path = tmp.name
+            tmp.write(image_bytes)
 
         cmd = [
             cli, "-p", _build_prompt(tmp_path),
@@ -116,6 +118,14 @@ def analyze_food_photo(image_bytes: bytes) -> Optional[Dict]:
         if not isinstance(analysis, dict) or "is_food" not in analysis:
             log.warning("Claude analysis JSON missing the is_food contract.")
             return None
+        # The CLI has no JSON mode, so is_food may arrive as a quoted
+        # "false" — truthy downstream. Coerce to a real bool or reject.
+        if not isinstance(analysis["is_food"], bool):
+            coerced = parse_boolish(analysis["is_food"])
+            if coerced is None:
+                log.warning("Claude analysis is_food was not boolean-like.")
+                return None
+            analysis["is_food"] = coerced
         log.info("✅ Photo analyzed by Claude (subscription).")
         return analysis
     except subprocess.TimeoutExpired:

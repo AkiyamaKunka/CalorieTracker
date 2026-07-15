@@ -2061,3 +2061,369 @@ def test_photo_analysis_unconfigured_claude_is_invisible(monkeypatch, tmp_path):
     )
 
     assert telegram_bot.analyze_food_photo_with_retries(object(), b"img") == {"is_food": False}
+
+# ── /upload raw-body path: magic bytes, size caps, headers, dedup ────
+# Targets: _looks_like_image, _parse_captured_at, and the raw-body branch
+# of /upload (iOS Shortcuts "Request Body: File" workaround).
+
+from werkzeug.test import EnvironBuilder as _EnvironBuilder, run_wsgi_app as _run_wsgi_app
+
+JPEG_MAGIC = b"\xff\xd8\xff"
+PNG_SIG = b"\x89PNG\r\n\x1a\n"
+
+
+def _upload_app(monkeypatch, tmp_path, analysis="skip"):
+    """Standard /upload rig: tmp dirs, test API key, synchronous background.
+
+    analysis: "food" (logs a meal), "skip" (not food), "fail" (Gemini gave
+    up -> None), or "forbidden" (the request must be rejected before any
+    analysis happens).
+    """
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "failed")
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(database, "get_android_timezone", lambda *a, **k: "+0800")
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
+    if analysis == "forbidden":
+        def stub(client, image_bytes):
+            raise AssertionError("analysis must not run for this request")
+    else:
+        stub = {
+            "food": lambda client, image_bytes: {"is_food": True, "meal_description": "Pinned",
+                                                 "total_calories": 111, "food_items": []},
+            "skip": lambda client, image_bytes: {"is_food": False},
+            "fail": lambda client, image_bytes: None,
+        }[analysis]
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", stub)
+    bot = FakeBot()
+    return telegram_bot._build_api_app(bot, object()), bot
+
+
+# ---- _looks_like_image magic bytes ----------------------------------
+
+@pytest.mark.parametrize("brand", [b"heic", b"heix", b"mif1", b"avif", b"isom"])
+def test_looks_like_image_accepts_any_ftyp_brand(brand):
+    # HEIC/HEIF/AVIF share the ISO BMFF layout: 4-byte size + 'ftyp' + brand.
+    # The check keys on 'ftyp' only, so EVERY brand is accepted — including
+    # 'isom' (an MP4 video). Pinned as the documented permissive design:
+    # a non-image BMFF container gets a 200 and fails analysis later.
+    assert telegram_bot._looks_like_image(b"\x00\x00\x00\x18ftyp" + brand + b"\x00" * 8) is True
+
+
+@pytest.mark.parametrize("header,verdict", [
+    (JPEG_MAGIC, False),                        # bare 3-byte magic: under the 12-byte floor
+    (JPEG_MAGIC + b"\x00" * 8, False),          # 11 bytes: still under the floor
+    (JPEG_MAGIC + b"\x00" * 9, True),           # exactly 12: smallest accepted JPEG
+    (PNG_SIG + b"abc", False),                  # 11 bytes
+    (PNG_SIG + b"abcd", True),                  # exactly 12
+    (b"", False),                               # empty body
+    (b"RIFF\x24\x00\x00\x00WAVE", False),       # RIFF but wrong tag (a WAV file)
+    (b"RIFF\x24\x00\x00\x00WEBP", True),        # real WebP header
+    (b"II*\x00" + b"\x00" * 8, True),           # TIFF little-endian
+    (b"MM\x00*" + b"\x00" * 8, True),           # TIFF big-endian
+    (PNG_SIG + b"\xffnot-real-png-chunks", True),  # prefix-only check: trailing garbage OK
+])
+def test_looks_like_image_magic_and_length_gates(header, verdict):
+    assert telegram_bot._looks_like_image(header) is verdict
+
+
+def test_upload_raw_body_bare_jpeg_magic_rejected_before_analysis(mock_db, monkeypatch, tmp_path):
+    # A 3-byte body IS the JPEG magic, but the 12-byte floor rejects it
+    # before staging or analysis: 400, nothing reserved, nothing sent.
+    app, bot = _upload_app(monkeypatch, tmp_path, analysis="forbidden")
+    resp = app.test_client().post("/upload", headers={"X-API-Key": "test-upload-key"},
+                                  data=JPEG_MAGIC, content_type="image/jpeg")
+    assert resp.status_code == 400
+    assert resp.get_json() == {"error": "No photo provided"}
+    assert bot.sent == []
+
+
+def test_upload_raw_body_minimal_jpeg_fails_analysis_gracefully(mock_db, monkeypatch, tmp_path):
+    # The smallest body that passes the magic check (12 bytes: magic +
+    # padding) is not a decodable image. The route must still 200 (accepted
+    # for background processing) and then fail analysis gracefully: photo
+    # kept in the failed dir, user notified, nothing logged.
+    app, bot = _upload_app(monkeypatch, tmp_path, analysis="fail")
+    resp = app.test_client().post("/upload", headers={"X-API-Key": "test-upload-key"},
+                                  data=JPEG_MAGIC + b"\x00" * 9, content_type="image/jpeg")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"status": "processing_in_background"}
+    assert len(list((tmp_path / "failed").iterdir())) == 1
+    assert list((tmp_path / "pending").iterdir()) == []
+    assert any("could not be analyzed" in m["text"] for m in bot.sent)
+    assert database.get_meals(12345, "1970-01-01", "9999-12-31") == []
+
+
+@pytest.mark.parametrize("brand", [b"heic", b"heix", b"mif1", b"avif"])
+def test_upload_raw_body_heic_family_accepted(mock_db, monkeypatch, tmp_path, brand):
+    app, _ = _upload_app(monkeypatch, tmp_path, analysis="food")
+    body = b"\x00\x00\x00\x18ftyp" + brand + b"\x00" * 20
+    resp = app.test_client().post("/upload", headers={"X-API-Key": "test-upload-key"},
+                                  data=body, content_type="application/octet-stream")
+    assert resp.status_code == 200
+    assert len(database.get_meals(12345, "1970-01-01", "9999-12-31")) == 1
+
+
+def test_upload_raw_body_png_with_trailing_garbage_accepted(mock_db, monkeypatch, tmp_path):
+    # Only the 8-byte PNG signature is checked; trailing junk must not
+    # demote the body to "not an image".
+    app, _ = _upload_app(monkeypatch, tmp_path, analysis="food")
+    resp = app.test_client().post("/upload", headers={"X-API-Key": "test-upload-key"},
+                                  data=PNG_SIG + b"\xffgarbage-not-real-chunks",
+                                  content_type="image/png")
+    assert resp.status_code == 200
+    assert len(database.get_meals(12345, "1970-01-01", "9999-12-31")) == 1
+
+
+def test_upload_raw_body_content_type_lie_accepted_by_design(mock_db, monkeypatch, tmp_path):
+    # iOS Shortcuts often declares text/plain for file bodies; the server
+    # trusts magic bytes over the Content-Type header. Pinned as design.
+    app, _ = _upload_app(monkeypatch, tmp_path, analysis="food")
+    resp = app.test_client().post("/upload", headers={"X-API-Key": "test-upload-key"},
+                                  data=JPEG_MAGIC + b"\xe0" + b"jpeg-body" * 4,
+                                  content_type="text/plain")
+    assert resp.status_code == 200
+    assert len(database.get_meals(12345, "1970-01-01", "9999-12-31")) == 1
+
+
+# ---- Content-Length absent (chunked transfer) -----------------------
+
+def _post_upload_chunked(app, body, content_type="image/jpeg"):
+    """POST /upload the way a chunked client arrives at WSGI: no
+    CONTENT_LENGTH in the environ, body readable to EOF.
+
+    Bypasses the Flask test client because its environ round-trip
+    (EnvironBuilder.from_environ) re-derives CONTENT_LENGTH.
+    """
+    builder = _EnvironBuilder(path="/upload", method="POST", data=body,
+                              content_type=content_type,
+                              headers={"X-API-Key": "test-upload-key",
+                                       "Transfer-Encoding": "chunked"})
+    environ = builder.get_environ()
+    environ.pop("CONTENT_LENGTH", None)
+    environ.pop("HTTP_CONTENT_LENGTH", None)
+    environ["wsgi.input_terminated"] = True
+    app_iter, status, _headers = _run_wsgi_app(app, environ, buffered=True)
+    return int(status.split()[0]), json.loads(b"".join(app_iter))
+
+
+def test_upload_chunked_no_content_length_over_cap_still_413(mock_db, monkeypatch, tmp_path):
+    # With Transfer-Encoding: chunked, request.content_length is None, so the
+    # early size guard is skipped. The cap must still hold via the
+    # get_data()[:MAX+1] slice + len check. Body is 2 bytes over the cap.
+    app, bot = _upload_app(monkeypatch, tmp_path, analysis="forbidden")
+    # Shrink the cap AFTER building the app: the route reads the module
+    # global per-request, while app.config['MAX_CONTENT_LENGTH'] keeps the
+    # real value so Werkzeug's own limit cannot mask the route's logic.
+    monkeypatch.setattr(telegram_bot, "MAX_API_UPLOAD_BYTES", 8192)
+    body = JPEG_MAGIC + b"\x00" * (8192 + 2 - len(JPEG_MAGIC))
+    status, payload = _post_upload_chunked(app, body)
+    assert status == 413
+    assert payload == {"error": "Photo too large"}
+    assert bot.sent == []
+
+
+def test_upload_chunked_no_content_length_at_cap_accepted(mock_db, monkeypatch, tmp_path):
+    # Exactly-at-cap stays accepted (the cap is inclusive): pins the
+    # [:MAX+1] slice against off-by-one regressions.
+    app, _ = _upload_app(monkeypatch, tmp_path, analysis="skip")
+    monkeypatch.setattr(telegram_bot, "MAX_API_UPLOAD_BYTES", 8192)
+    body = JPEG_MAGIC + b"\x00" * (8192 - len(JPEG_MAGIC))
+    status, payload = _post_upload_chunked(app, body)
+    assert status == 200
+    assert payload == {"status": "processing_in_background"}
+
+
+# ---- Hybrid multipart/raw confusion ---------------------------------
+
+def test_upload_multipart_empty_photo_field_wins_over_raw_sniff(mock_db, monkeypatch, tmp_path):
+    # When a multipart 'photo' FILE field exists but is empty, the multipart
+    # branch wins and reports "Empty photo" — the server must not fall back
+    # to sniffing the raw (multipart-encoded) body.
+    app, _ = _upload_app(monkeypatch, tmp_path, analysis="forbidden")
+    resp = app.test_client().post("/upload", headers={"X-API-Key": "test-upload-key"},
+                                  data={"photo": (io.BytesIO(b""), "empty.jpg")})
+    assert resp.status_code == 400
+    assert resp.get_json() == {"error": "Empty photo"}
+
+
+def test_upload_multipart_photo_text_field_falls_to_raw_and_400s(mock_db, monkeypatch, tmp_path):
+    # 'photo' sent as a plain form VALUE (the iOS coercion failure mode) is
+    # not in request.files: the raw branch runs, sees a form-encoded body
+    # (already consumed by form parsing), and rejects with the other error.
+    app, _ = _upload_app(monkeypatch, tmp_path, analysis="forbidden")
+    resp = app.test_client().post("/upload", headers={"X-API-Key": "test-upload-key"},
+                                  data={"photo": "this-is-text-not-a-file"})
+    assert resp.status_code == 400
+    assert resp.get_json() == {"error": "No photo provided"}
+
+
+# ---- captured_at: source priority + validation window ---------------
+
+@pytest.mark.parametrize("form_value_kind", ["form-wins", "empty-form-falls-back"])
+def test_upload_captured_at_form_field_beats_header(mock_db, monkeypatch, tmp_path, form_value_kind):
+    # Both the form field and X-Captured-At present: the form field wins.
+    # An EMPTY form field is falsy, so the header takes over.
+    app, _ = _upload_app(monkeypatch, tmp_path, analysis="food")
+    base = database.user_local_now()
+    form_day = (base - timedelta(days=2)).date()
+    header_day = (base - timedelta(days=3)).date()
+    form_value = f"{form_day.isoformat()} 09:00:00" if form_value_kind == "form-wins" else ""
+    resp = app.test_client().post(
+        "/upload",
+        headers={"X-API-Key": "test-upload-key",
+                 "X-Captured-At": f"{header_day.isoformat()} 18:00:00"},
+        data={"photo": (io.BytesIO(b"priority-body-" + form_value_kind.encode()), "meal.jpg"),
+              "captured_at": form_value},
+    )
+    assert resp.status_code == 200
+    if form_value_kind == "form-wins":
+        meals = database.get_meals(12345, form_day.isoformat(), form_day.isoformat())
+        assert len(meals) == 1
+        assert meals[0]["time"] == "09:00 AM"
+    else:
+        meals = database.get_meals(12345, header_day.isoformat(), header_day.isoformat())
+        assert len(meals) == 1
+        assert meals[0]["time"] == "06:00 PM"
+
+
+_FROZEN_LOCAL = datetime(2026, 7, 15, 12, 0, 0)
+
+
+def _freeze_user_clock(monkeypatch):
+    monkeypatch.setattr(database, "user_local_now", lambda *a, **k: _FROZEN_LOCAL)
+
+
+def test_parse_captured_at_future_boundary_inclusive_at_plus_1h(monkeypatch):
+    # Exactly now+1h is ACCEPTED (comparison is strict '>'), one second past
+    # is rejected. Pins the inclusive/exclusive semantics of the skew window.
+    _freeze_user_clock(monkeypatch)
+    at_edge = _FROZEN_LOCAL + timedelta(hours=1)
+    assert telegram_bot._parse_captured_at(at_edge.strftime("%Y-%m-%d %H:%M:%S")) == at_edge
+    past_edge = at_edge + timedelta(seconds=1)
+    assert telegram_bot._parse_captured_at(past_edge.strftime("%Y-%m-%d %H:%M:%S")) is None
+
+
+def test_parse_captured_at_age_boundary_inclusive_at_max_age(monkeypatch):
+    # Exactly now-45d is ACCEPTED (strict '<'), one second older is rejected.
+    _freeze_user_clock(monkeypatch)
+    at_edge = _FROZEN_LOCAL - timedelta(days=telegram_bot.CAPTURED_AT_MAX_AGE_DAYS)
+    assert telegram_bot._parse_captured_at(at_edge.strftime("%Y-%m-%d %H:%M:%S")) == at_edge
+    past_edge = at_edge - timedelta(seconds=1)
+    assert telegram_bot._parse_captured_at(past_edge.strftime("%Y-%m-%d %H:%M:%S")) is None
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("  2026-07-10 16:58:08  ", datetime(2026, 7, 10, 16, 58, 8)),   # outer ws stripped
+    ("2026-07-10  16:58:08", datetime(2026, 7, 10, 16, 58, 8)),      # strptime tolerates ws runs
+    ("2026-07-10\t16:58:08", datetime(2026, 7, 10, 16, 58, 8)),      # tab separator tolerated
+    ("2026-07-10 16:58:08Z", None),                                  # tz suffixes rejected...
+    ("2026-07-10 16:58:08+08:00", None),
+    ("2026-07-10 16:58:08 UTC", None),
+    ("2026-07-10T16:58:08", None),                                   # ISO 'T' rejected
+    ("", None),
+    (None, None),
+])
+def test_parse_captured_at_spacing_and_timezone_suffixes(monkeypatch, raw, expected):
+    # Unparseable values fall back to upload-time dating (None), they never
+    # raise out of the route.
+    _freeze_user_clock(monkeypatch)
+    assert telegram_bot._parse_captured_at(raw) == expected
+
+
+# ---- X-Original-Hash normalization + dedup via the raw path ---------
+
+def test_upload_raw_body_uppercase_original_hash_normalized(mock_db, monkeypatch, tmp_path):
+    # iOS hex is uppercase; the ledger keys on lowercase. The declared hash
+    # must be lowercased before it replaces the md5 of the recompressed body.
+    app, _ = _upload_app(monkeypatch, tmp_path, analysis="food")
+    declared = "ABCDEF0123456789ABCDEF0123456789"
+    resp = app.test_client().post("/upload",
+                                  headers={"X-API-Key": "test-upload-key",
+                                           "X-Original-Hash": declared},
+                                  data=JPEG_MAGIC + b"\xe0uppercase-hash-body",
+                                  content_type="image/jpeg")
+    assert resp.status_code == 200
+    meals = database.get_meals(12345, "1970-01-01", "9999-12-31")
+    assert len(meals) == 1
+    assert meals[0]["image_hash"] == declared.lower()
+
+
+@pytest.mark.parametrize("junk", [
+    "abcdef0123456789abcdef012345678",      # 31 chars: too short
+    "abcdef0123456789abcdef0123456789a",    # 33 chars: too long
+    "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",     # 32 chars but not hex
+    "0xabcdef0123456789abcdef01234567",     # 0x-prefixed
+    "   ",                                  # whitespace only
+])
+def test_upload_raw_body_non_md5_original_hash_ignored(mock_db, monkeypatch, tmp_path, junk):
+    # Junk declarations must be ignored (fall back to md5 of the received
+    # bytes), never crash and never become the ledger key.
+    app, _ = _upload_app(monkeypatch, tmp_path, analysis="food")
+    body = JPEG_MAGIC + b"\xe0junk-hash-body"
+    resp = app.test_client().post("/upload",
+                                  headers={"X-API-Key": "test-upload-key",
+                                           "X-Original-Hash": junk},
+                                  data=body, content_type="image/jpeg")
+    assert resp.status_code == 200
+    meals = database.get_meals(12345, "1970-01-01", "9999-12-31")
+    assert len(meals) == 1
+    assert meals[0]["image_hash"] == hashlib.md5(body).hexdigest()
+
+
+def test_upload_raw_body_declared_hash_of_saved_meal_is_duplicate(mock_db, monkeypatch, tmp_path):
+    # The phone recompresses before upload, so the BYTES differ from the
+    # already-logged photo. Dedup must still fire off the DECLARED original
+    # hash — case-insensitively — even via the raw-body path.
+    app, bot = _upload_app(monkeypatch, tmp_path, analysis="forbidden")
+    saved_hash = "0123456789abcdef0123456789abcdef"
+    today = database.user_local_now().date().isoformat()
+    database.save_meal(12345, today, "12:00 PM", datetime.now().isoformat(),
+                       "api_auto", saved_hash, "f", {"is_food": True})
+    resp = app.test_client().post("/upload",
+                                  headers={"X-API-Key": "test-upload-key",
+                                           "X-Original-Hash": saved_hash.upper()},
+                                  data=JPEG_MAGIC + b"\xe0recompressed-different-bytes",
+                                  content_type="image/jpeg")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"status": "duplicate"}
+    assert len(database.get_meals(12345, "1970-01-01", "9999-12-31")) == 1
+    assert bot.sent == []
+
+
+def test_upload_raw_body_declared_hash_of_failed_upload_saved_for_retry(mock_db, monkeypatch, tmp_path):
+    # A declared hash matching a kept-for-retry failed upload must short-
+    # circuit to already_saved_for_retry (no re-analysis, no double file).
+    app, bot = _upload_app(monkeypatch, tmp_path, analysis="forbidden")
+    failed_hash = "fedcba9876543210fedcba9876543210"
+    failed_dir = tmp_path / "failed"
+    failed_dir.mkdir(parents=True)
+    (failed_dir / f"20260714T010101_{failed_hash[:12]}.jpg").write_bytes(b"earlier-failed-bytes")
+    resp = app.test_client().post("/upload",
+                                  headers={"X-API-Key": "test-upload-key",
+                                           "X-Original-Hash": failed_hash},
+                                  data=JPEG_MAGIC + b"\xe0retry-candidate-bytes",
+                                  content_type="image/jpeg")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"status": "already_saved_for_retry"}
+    assert bot.sent == []
+    assert len(list(failed_dir.iterdir())) == 1
+
+
+# ---- Just-under-cap body: staging must not choke --------------------
+
+def test_upload_raw_body_just_under_cap_stages_and_completes(mock_db, monkeypatch, tmp_path):
+    # MAX-1 bytes: the largest body the cap allows. Must pass both size
+    # guards, stage to disk, and complete the (stubbed) pipeline. The
+    # zero-filled tail keeps allocation cheap so the test stays fast.
+    app, _ = _upload_app(monkeypatch, tmp_path, analysis="skip")
+    max_bytes = telegram_bot.MAX_API_UPLOAD_BYTES
+    body = JPEG_MAGIC + bytes(max_bytes - 1 - len(JPEG_MAGIC))
+    assert len(body) == max_bytes - 1
+    resp = app.test_client().post("/upload", headers={"X-API-Key": "test-upload-key"},
+                                  data=body, content_type="image/jpeg")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"status": "processing_in_background"}
+    assert list((tmp_path / "pending").iterdir()) == []   # not food -> discarded

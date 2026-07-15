@@ -72,6 +72,7 @@ from utils import (
     safe_food_items,
     safe_number,
     telegram_message_chunks,
+    utf16_len,
 )
 
 # ─── Constants ─────────────────────────────────────────────────────
@@ -311,9 +312,18 @@ class TelegramBot:
 
     def send_message(self, chat_id: int, text: str, parse_mode: str = "HTML", reply_markup: Optional[dict] = None):
         """Send a text message. Returns the Message dict on success, or None."""
-        # Truncate if too long for Telegram (4096 char limit)
-        if len(text) > 4000:
-            text = text[:4000] + "\n\n<i>(truncated)</i>"
+        # Truncate if too long for Telegram (4096-char limit, counted in
+        # UTF-16 code units — astral emoji are 2 units each). Rebuilding
+        # from codepoints means we can never split a surrogate pair.
+        if utf16_len(text) > 4000:
+            kept = []
+            units = 0
+            for ch in text:
+                units += 2 if ord(ch) > 0xFFFF else 1
+                if units > 4000:
+                    break
+                kept.append(ch)
+            text = "".join(kept) + "\n\n<i>(truncated)</i>"
         payload = {
             "chat_id": chat_id,
             "text": text,
@@ -1408,25 +1418,30 @@ _ORIGINAL_HASH_RE = re.compile(r"^[0-9a-f]{32}$")
 _UPLOAD_NAME_HASH_RE = re.compile(r"_([0-9a-fA-F]{12})(?:\.[^.]+)?$")
 
 
-def _upload_file_ledger_hash(path: Path, image_bytes: bytes) -> str:
+def _upload_file_ledger_hash(path: Path, image_bytes: Optional[bytes] = None) -> str:
     """Ledger hash for a staged/failed upload file.
 
     When the phone recompresses before upload it declares the ORIGINAL
     file's hash, which becomes the ledger key and the filename prefix —
     the staged bytes hash differently. Resolve through the ledger first;
-    fall back to hashing the bytes for legacy files.
+    fall back to hashing the bytes for legacy files, reading them from
+    ``path`` only when the caller didn't supply them.
     """
     match = _UPLOAD_NAME_HASH_RE.search(path.name)
     if match:
         ledger_hash = database.find_photo_hash_by_prefix(ALLOWED_CHAT_ID, match.group(1))
         if ledger_hash:
             return ledger_hash
+    if image_bytes is None:
+        image_bytes = path.read_bytes()
     return hashlib.md5(image_bytes).hexdigest()
 
 
 def _retry_failed_upload_path(gemini_client, path: Path) -> Dict:
-    pause = _gemini_quota_pause()
-    if pause:
+    # A Gemini-only quota pause must not block the Claude-first analyzer;
+    # the Gemini leg inside analyze_food_photo_with_retries still respects
+    # the pause. Only short-circuit when Claude cannot run at all.
+    if _gemini_quota_pause() and not claude_analyzer.is_configured():
         return {
             "status": "quota_paused",
             "name": path.name,
@@ -1468,6 +1483,12 @@ def _retry_failed_upload_path(gemini_client, path: Path) -> Dict:
     analysis = analyze_food_photo_with_retries(gemini_client, image_bytes)
     if analysis is None:
         database.mark_photo_hash_status(ALLOWED_CHAT_ID, img_hash, "failed", source="api_retry")
+        if _gemini_quota_pause():
+            return {
+                "status": "quota_paused",
+                "name": path.name,
+                "message": "Gemini daily quota is paused; file kept for later retry",
+            }
         return {
             "status": "analysis_failed",
             "name": path.name,
@@ -2219,9 +2240,13 @@ def format_food_result(chat_id: int, analysis: Dict) -> str:
     for item in safe_food_items(analysis):
         name = item.get("name", "?")
         cals = item.get("estimated_calories", "?")
-        p = item.get("protein_g") or 0
-        c = item.get("carbs_g") or 0
-        f = item.get("fat_g") or 0
+        if isinstance(cals, (int, float)):
+            # safe_number: JSON Infinity/NaN must never render as 'inf kcal';
+            # non-numeric strings still display escaped as-is.
+            cals = safe_number(cals)
+        p = safe_number(item.get("protein_g"))
+        c = safe_number(item.get("carbs_g"))
+        f = safe_number(item.get("fat_g"))
         lines.append(f"  • {_html(name)}: ~{_html(cals)} kcal")
         lines.append(f"    P:{p}g | C:{c}g | F:{f}g")
 
@@ -2255,10 +2280,12 @@ def format_daily_totals(chat_id: int) -> str:
     meals = get_todays_meals(chat_id)
     if not meals:
         return ""
-    total_cal = sum(safe_number(m["analysis"].get("total_calories")) for m in meals)
-    total_p = sum(safe_number(m["analysis"].get("total_protein_g")) for m in meals)
-    total_c = sum(safe_number(m["analysis"].get("total_carbs_g")) for m in meals)
-    total_f = sum(safe_number(m["analysis"].get("total_fat_g")) for m in meals)
+    # max(0, ...): a negative hallucinated total must not subtract from the
+    # day (mirrors the per-meal clamp in _daily_average_meals).
+    total_cal = sum(max(0, safe_number(m["analysis"].get("total_calories"))) for m in meals)
+    total_p = sum(max(0, safe_number(m["analysis"].get("total_protein_g"))) for m in meals)
+    total_c = sum(max(0, safe_number(m["analysis"].get("total_carbs_g"))) for m in meals)
+    total_f = sum(max(0, safe_number(m["analysis"].get("total_fat_g"))) for m in meals)
     lines = [
         f"📋 <b>Today's Total ({len(meals)} meals):</b>",
         f"🔥 {total_cal:,} kcal",
@@ -2277,7 +2304,8 @@ def _daily_calorie_totals(chat_id: int, start_date: str, end_date: str) -> Dict[
         if not analysis.get("is_food"):
             continue
         d = m.get("date", "")
-        totals[d] = totals.get(d, 0) + safe_number(analysis.get("total_calories"))
+        # max(0, ...): negative hallucinated totals must not subtract from a day.
+        totals[d] = totals.get(d, 0) + max(0, safe_number(analysis.get("total_calories")))
     return totals
 
 
@@ -3888,13 +3916,19 @@ def _sweep_stranded_pending_uploads(bot: TelegramBot):
     the failed dir so /retry_failed can see it instead of it sitting invisible.
     """
     moved = []
+    still_pending = []
     for path in _pending_upload_items():
         try:
-            img_hash = _upload_file_ledger_hash(path, path.read_bytes())
+            # Bytes are read lazily, only when the ledger has no entry.
+            img_hash = _upload_file_ledger_hash(path)
         except OSError as e:
             log.warning(f"Could not read stranded pending upload {path}: {e}")
+            still_pending.append(path)
             continue
         failed_path = _keep_failed_api_upload(path, img_hash)
+        if failed_path == path:
+            # The move failed; the file stayed behind in the pending dir.
+            still_pending.append(path)
         database.mark_photo_hash_status(ALLOWED_CHAT_ID, img_hash, "failed", source="startup_sweep")
         moved.append(failed_path.name)
 
@@ -3908,7 +3942,7 @@ def _sweep_stranded_pending_uploads(bot: TelegramBot):
     # DO back their reservation — parse the hash prefix from the filename so
     # we never release a row whose file merely failed to read.
     pending_prefixes = set()
-    for path in _pending_upload_items():
+    for path in still_pending:
         match = _UPLOAD_NAME_HASH_RE.search(path.name)
         if match:
             pending_prefixes.add(match.group(1).lower())

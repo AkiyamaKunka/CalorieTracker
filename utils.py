@@ -105,24 +105,49 @@ def parse_boolish(value) -> Optional[bool]:
     return None
 
 
+def utf16_len(text: str) -> int:
+    """Telegram measures message limits in UTF-16 code units, not codepoints."""
+    return len(text.encode("utf-16-le")) // 2
+
+
 def telegram_message_chunks(text: str, limit: int = 3900) -> List[str]:
-    """Split a Telegram message into <=limit chunks without breaking normal lines."""
+    """Split a Telegram message into <=limit chunks without breaking normal lines.
+
+    ``limit`` counts UTF-16 code units (Telegram's yardstick): astral emoji
+    are 2 units each. Overlong lines are split codepoint-by-codepoint, so a
+    boundary can never fall inside a surrogate pair.
+    """
     chunks = []
     current = ""
+    current_units = 0
     for line in str(text).splitlines(keepends=True):
-        if len(line) > limit:
+        line_units = utf16_len(line)
+        if line_units > limit:
             if current:
                 chunks.append(current.rstrip())
                 current = ""
-            for start in range(0, len(line), limit):
-                chunks.append(line[start:start + limit].rstrip())
+                current_units = 0
+            piece = ""
+            piece_units = 0
+            for ch in line:
+                ch_units = 2 if ord(ch) > 0xFFFF else 1
+                if piece_units + ch_units > limit:
+                    chunks.append(piece.rstrip())
+                    piece = ""
+                    piece_units = 0
+                piece += ch
+                piece_units += ch_units
+            if piece:
+                chunks.append(piece.rstrip())
             continue
 
-        if current and len(current) + len(line) > limit:
+        if current and current_units + line_units > limit:
             chunks.append(current.rstrip())
             current = line
+            current_units = line_units
         else:
             current += line
+            current_units += line_units
 
     if current:
         chunks.append(current.rstrip())

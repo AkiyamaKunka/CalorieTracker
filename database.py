@@ -397,7 +397,11 @@ def get_meals(chat_id: int, start_date: str, end_date: str) -> List[Dict]:
         results = []
         for row in cursor.fetchall():
             meal = dict(row)
-            meal["analysis"] = json.loads(meal["analysis"])
+            # A stored JSON literal like 'null' or '"str"' parses to a
+            # non-dict; consumers call meal["analysis"].get(...), so coerce
+            # anything non-dict to {} instead of crashing every reader.
+            parsed = json.loads(meal["analysis"])
+            meal["analysis"] = parsed if isinstance(parsed, dict) else {}
             meal["corrected"] = bool(meal["corrected"])
             results.append(meal)
         return results

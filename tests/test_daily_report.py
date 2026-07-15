@@ -805,8 +805,11 @@ def test_training_section_shows_weeks_to_race(monkeypatch):
 
     report = daily_report.generate_report("2026-07-14")
 
-    # 2026-07-14 -> 2026-08-11 is 28 days == 4.0 weeks; label is HTML-escaped.
-    assert "🎯 4.0 weeks to Marathon &lt;PB&gt;" in report
+    # 2026-07-14 -> 2026-08-11 is 28 days == 4.0 weeks. The countdown is to
+    # the GOAL race and is dated as such; race_label describes the VDOT
+    # source (a past result) and must not be borrowed as the goal's name.
+    assert "🎯 4.0 weeks to race (2026-08-11)" in report
+    assert "weeks to Marathon" not in report
 
 
 def test_generate_report_stays_offline(monkeypatch):
