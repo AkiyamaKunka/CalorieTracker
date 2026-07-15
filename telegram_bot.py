@@ -3652,6 +3652,15 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
             return jsonify({"error": "Unauthorized"}), 401
 
         if 'photo' not in request.files:
+            # Field-level detail makes a malformed client (e.g. an iOS
+            # Shortcut whose photo variable coerced to text) diagnosable
+            # from the server log alone.
+            log.info(
+                f"  ❌ /upload 400: no 'photo' file field. "
+                f"files={list(request.files.keys())} form={list(request.form.keys())} "
+                f"content_length={request.content_length} "
+                f"platform={request.headers.get('X-Client-Platform', '?')}"
+            )
             return jsonify({"error": "No photo provided"}), 400
 
         file = request.files['photo']
@@ -3662,6 +3671,10 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         if len(image_bytes) > MAX_API_UPLOAD_BYTES:
             return jsonify({"error": "Photo too large"}), 413
         if not image_bytes:
+            log.info(
+                f"  ❌ /upload 400: empty photo bytes (filename={file.filename!r}, "
+                f"platform={request.headers.get('X-Client-Platform', '?')})"
+            )
             return jsonify({"error": "Empty photo"}), 400
 
         img_hash = hashlib.md5(image_bytes).hexdigest()
