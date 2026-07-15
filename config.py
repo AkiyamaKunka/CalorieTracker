@@ -44,9 +44,15 @@ REPORTS_DIR = Path.home() / "CalorieTracker" / "reports"
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".tiff"}
 
 # ─── Prompt ────────────────────────────────────────────────────────
-FOOD_DETECTION_PROMPT = """Analyze this photo and determine if it contains food or a meal.
+FOOD_DETECTION_PROMPT = """Analyze this photo and determine if it contains food, a meal, or a beverage.
 
-If the image does NOT contain food, respond with exactly:
+Beverages COUNT as food here: coffee (including plain black coffee), tea,
+lattes, juice, soda, bubble tea, protein shakes, beer, and any other drink
+a calorie tracker should log. Estimate their calories from what is visible
+(cup size, milk foam, color). Only plain water counts as no calories — log
+it as is_food false.
+
+If the image contains NO food, meal, or beverage, respond with exactly:
 {"is_food": false}
 
 If the image DOES contain food, respond with a JSON object like this:
