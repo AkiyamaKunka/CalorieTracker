@@ -48,6 +48,7 @@ try:
 except ImportError:
     pass
 
+import claude_analyzer
 import database
 import fitness_plan
 import nutrition
@@ -704,7 +705,17 @@ def analyze_food_photo_with_retries(
     image_bytes: bytes,
     max_attempts: int = GEMINI_ANALYSIS_MAX_ATTEMPTS,
 ) -> Optional[Dict]:
-    """Analyze a photo with bounded retry/backoff for retryable Gemini errors."""
+    """Analyze a photo: Claude (subscription) first, Gemini as fallback/default.
+
+    The Claude hop is best-effort — unconfigured, rate-windowed, or failing,
+    it returns None and the original Gemini retry path below runs unchanged.
+    """
+    if claude_analyzer.is_configured():
+        result = claude_analyzer.analyze_food_photo(image_bytes)
+        if result is not None:
+            return result
+        log.warning("Claude analyzer unavailable/failed; falling back to Gemini.")
+
     pause = _gemini_quota_pause()
     if pause:
         log.warning("Skipping Gemini photo analysis because daily quota pause is active.")

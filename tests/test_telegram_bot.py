@@ -2009,3 +2009,55 @@ def test_upload_raw_body_non_image_still_rejected(mock_db, monkeypatch, tmp_path
     )
 
     assert resp.status_code == 400
+
+
+def test_photo_analysis_prefers_claude_and_skips_gemini(monkeypatch, tmp_path):
+    # Claude-first: when the subscription analyzer answers, Gemini must not
+    # even be consulted (no quota spend, no API call).
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot.claude_analyzer, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        telegram_bot.claude_analyzer, "analyze_food_photo",
+        lambda image_bytes: {"is_food": True, "meal_description": "From Claude",
+                             "total_calories": 300, "food_items": []},
+    )
+
+    class ExplodingGemini:
+        def __getattr__(self, name):
+            raise AssertionError("Gemini must not be touched when Claude succeeds")
+
+    result = telegram_bot.analyze_food_photo_with_retries(ExplodingGemini(), b"img")
+    assert result["meal_description"] == "From Claude"
+
+
+def test_photo_analysis_falls_back_to_gemini_when_claude_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot.claude_analyzer, "is_configured", lambda: True)
+    monkeypatch.setattr(telegram_bot.claude_analyzer, "analyze_food_photo",
+                        lambda image_bytes: None)   # window exhausted / CLI error
+    monkeypatch.setattr(
+        telegram_bot, "_analyze_food_photo_once",
+        lambda client, image_bytes: {"is_food": True, "meal_description": "From Gemini",
+                                     "total_calories": 400, "food_items": []},
+    )
+
+    result = telegram_bot.analyze_food_photo_with_retries(object(), b"img")
+    assert result["meal_description"] == "From Gemini"
+
+
+def test_photo_analysis_unconfigured_claude_is_invisible(monkeypatch, tmp_path):
+    # Default state (knob off): behavior must be byte-identical to before —
+    # straight to Gemini, no Claude involvement.
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot.claude_analyzer, "is_configured", lambda: False)
+
+    def boom(image_bytes):
+        raise AssertionError("analyze_food_photo must not run when unconfigured")
+
+    monkeypatch.setattr(telegram_bot.claude_analyzer, "analyze_food_photo", boom)
+    monkeypatch.setattr(
+        telegram_bot, "_analyze_food_photo_once",
+        lambda client, image_bytes: {"is_food": False},
+    )
+
+    assert telegram_bot.analyze_food_photo_with_retries(object(), b"img") == {"is_food": False}
