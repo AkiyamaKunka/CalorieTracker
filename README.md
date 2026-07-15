@@ -61,7 +61,7 @@ flowchart LR
 | --- | --- | --- |
 | Bot interface | Telegram Bot API, long polling | User commands, corrections, photo feedback, operational alerts |
 | Upload API | Flask | Authenticated phone uploads, heartbeat pings, Android reconciliation |
-| AI analysis | Google Gemini 2.5 Flash | Food detection, calorie and macro estimation, correction parsing |
+| AI analysis | Google Gemini 2.5 Flash (default) + optional Claude-first analyzer | Food detection, calorie and macro estimation, correction parsing; photo analysis can run Claude-first via the Claude Code CLI on a Claude subscription, with Gemini as automatic fallback |
 | Persistence | SQLite | Meals, hashes, correction state, Android heartbeat, photo ingestion guard, fitness data (weight, workouts, activities, profile) |
 | Mobile clients | Android Termux, iOS Shortcuts | Camera automation, VPN evidence headers, offline queueing |
 | Scheduling | systemd or launchd | Always-on bot service and local-time daily reports |
@@ -70,7 +70,10 @@ flowchart LR
 
 ## Core Features
 
-- Food photo analysis with Google Gemini (native JSON output; photos are downscaled on the phone and again server-side before each call, so quota and bandwidth aren't spent on 25MB camera files).
+- Food photo analysis with Google Gemini (native JSON output; photos are downscaled on the phone and again server-side before each call, so quota and bandwidth aren't spent on 25MB camera files). Beverages count as loggable food — a latte gets calories, plain water doesn't.
+- Optional Claude-first analysis: with `CLAUDE_ANALYZER_ENABLED=1` and a `claude setup-token` credential, photos are analyzed through the Claude Code CLI on a Claude subscription (no per-token API cost); any failure — usage window, timeout, bad output — falls back to Gemini automatically, so the default path never degrades.
+- Backfilled photos land on the day they were **taken**, not uploaded: clients declare `captured_at` (Android derives it from the camera filename; iOS sends the photo's Creation Date header) and the server validates it before dating the meal.
+- iOS uploads may send the image as a raw request body (`Request Body: File` in Shortcuts) — the server accepts both multipart and raw-image POSTs, working around an iOS bug where Form file fields silently coerce to text.
 - Calories, protein, carbs, fat, meal source, photo hash, and correction state in SQLite.
 - Reports flag meals whose item calories contradict their total and likely duplicates; the daily report includes a 7-day average and `/today` shows your typical-day intake.
 - Uploads from Telegram photos, Android Termux, and iOS Shortcuts.
@@ -100,6 +103,7 @@ bash scripts/check_public_safety.sh
 | Python 3.10+ | GCP/Linux VM with `systemd` |
 | Google Gemini API key | PushPlus token/topic for WeChat forwarding |
 | Telegram bot token | Reverse proxy, HTTPS, or VPN for phone uploads |
+| | Claude Code CLI + `claude setup-token` credential for Claude-first photo analysis (`CLAUDE_ANALYZER_ENABLED=1`) |
 | Numeric Telegram chat ID | Android Termux and iOS Shortcuts clients |
 | Long random `ANDROID_API_KEY` | Personal `dietary_profile.txt` |
 
@@ -274,11 +278,12 @@ Required request shape:
 | --- | --- |
 | URL | `https://your-domain.example/upload` or `http://YOUR_SERVER_IP/upload` |
 | Method | `POST` |
-| Body | Form field `photo` |
+| Body | `Request Body: File` with the (converted-to-JPEG) photo — recommended; iOS silently breaks Form file fields. Multipart form field `photo` also works. |
 | `X-API-Key` | Same `ANDROID_API_KEY` |
 | `X-Client-Platform` | `iOS` |
 | `X-Device-Name` | `iPhone` |
 | `X-VPN-Required` | `true` |
+| `X-Captured-At` | Optional: photo Creation Date as `yyyy-MM-dd HH:mm:ss`, so delayed uploads date to the capture day |
 
 Do not commit exported `.shortcut` or `.wflow` files.
 
