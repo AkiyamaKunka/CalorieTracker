@@ -1960,3 +1960,52 @@ def test_upload_captured_at_dates_meal_on_capture_day(mock_db, monkeypatch, tmp_
         today = database.user_local_now().date().isoformat()
         meals = database.get_meals(12345, today, today)
         assert len(meals) == 1                     # fell back to upload-time dating
+
+
+def test_upload_accepts_raw_body_image(mock_db, monkeypatch, tmp_path):
+    # iOS Shortcuts "Request Body: File" sends the image as the raw request
+    # body (no multipart) — a workaround for an iOS bug where Form file
+    # fields silently coerce to text. The server accepts it, honoring the
+    # X-Captured-At header in place of the form field.
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "failed")
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(database, "get_android_timezone", lambda *a, **k: "+0800")
+    monkeypatch.setattr(
+        telegram_bot, "analyze_food_photo_with_retries",
+        lambda client, image_bytes: {"is_food": True, "meal_description": "Raw upload",
+                                     "total_calories": 200, "food_items": []},
+    )
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
+
+    app = telegram_bot._build_api_app(FakeBot(), object())
+    resp = app.test_client().post(
+        "/upload",
+        headers={"X-API-Key": "test-upload-key", "X-Client-Platform": "iOS",
+                 "X-Captured-At": "2026-07-11 09:30:00"},
+        data=b"\xff\xd8\xff\xe0" + b"jpeg-ish-body" * 10,
+        content_type="image/jpeg",
+    )
+
+    assert resp.status_code == 200
+    meals = database.get_meals(12345, "2026-07-11", "2026-07-11")
+    assert len(meals) == 1                       # dated by the header
+    assert meals[0]["time"] == "09:30 AM"
+
+
+def test_upload_raw_body_non_image_still_rejected(mock_db, monkeypatch, tmp_path):
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+
+    app = telegram_bot._build_api_app(FakeBot(), object())
+    resp = app.test_client().post(
+        "/upload",
+        headers={"X-API-Key": "test-upload-key"},
+        data=b"this is just text, not an image, and must not reach Gemini",
+        content_type="text/plain",
+    )
+
+    assert resp.status_code == 400

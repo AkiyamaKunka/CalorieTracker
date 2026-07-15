@@ -1201,6 +1201,19 @@ def save_meal(chat_id: int, analysis: Dict, source: str, file_id: str = "", imag
 CAPTURED_AT_MAX_AGE_DAYS = _env_int("CAPTURED_AT_MAX_AGE_DAYS", 45, 1, 365)
 
 
+def _looks_like_image(data: bytes) -> bool:
+    """Magic-byte check for the raw-body upload path (JPEG/PNG/HEIC/TIFF/WebP)."""
+    if not data or len(data) < 12:
+        return False
+    return (
+        data[:3] == b"\xff\xd8\xff"                     # JPEG
+        or data[:8] == b"\x89PNG\r\n\x1a\n"             # PNG
+        or data[4:8] == b"ftyp"                          # HEIC/HEIF/AVIF (ISO BMFF)
+        or data[:4] in (b"II*\x00", b"MM\x00*")         # TIFF
+        or (data[:4] == b"RIFF" and data[8:12] == b"WEBP")  # WebP
+    )
+
+
 def _parse_captured_at(raw: str) -> Optional[datetime]:
     """Validate the additive captured_at form field ('YYYY-MM-DD HH:MM:SS').
 
@@ -3651,34 +3664,52 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         if not _authorized_api_request():
             return jsonify({"error": "Unauthorized"}), 401
 
-        if 'photo' not in request.files:
-            # Field-level detail makes a malformed client (e.g. an iOS
-            # Shortcut whose photo variable coerced to text) diagnosable
-            # from the server log alone.
-            log.info(
-                f"  ❌ /upload 400: no 'photo' file field. "
-                f"files={list(request.files.keys())} form={list(request.form.keys())} "
-                f"content_length={request.content_length} "
-                f"platform={request.headers.get('X-Client-Platform', '?')}"
-            )
-            return jsonify({"error": "No photo provided"}), 400
-
-        file = request.files['photo']
         if request.content_length and request.content_length > MAX_API_UPLOAD_BYTES:
             return jsonify({"error": "Photo too large"}), 413
 
-        image_bytes = file.stream.read(MAX_API_UPLOAD_BYTES + 1)
+        if 'photo' in request.files:
+            file = request.files['photo']
+            image_bytes = file.stream.read(MAX_API_UPLOAD_BYTES + 1)
+            upload_name = file.filename or "upload"
+        else:
+            # iOS Shortcuts "Request Body: File" sends the image as the RAW
+            # request body with no multipart wrapper — the practical
+            # workaround for an iOS bug where Form file fields silently
+            # coerce to ~50 bytes of text. Accept the body when it actually
+            # looks like an image.
+            body = request.get_data()[:MAX_API_UPLOAD_BYTES + 1]
+            if _looks_like_image(body):
+                image_bytes = body
+                upload_name = "raw_body.jpg"
+                log.info(
+                    f"  📥 /upload raw-body image ({len(body)} bytes, "
+                    f"platform={request.headers.get('X-Client-Platform', '?')})"
+                )
+            else:
+                # Field-level detail makes a malformed client diagnosable
+                # from the server log alone.
+                log.info(
+                    f"  ❌ /upload 400: no 'photo' file field and body is not an image. "
+                    f"files={list(request.files.keys())} form={list(request.form.keys())} "
+                    f"content_length={request.content_length} "
+                    f"platform={request.headers.get('X-Client-Platform', '?')}"
+                )
+                return jsonify({"error": "No photo provided"}), 400
+
         if len(image_bytes) > MAX_API_UPLOAD_BYTES:
             return jsonify({"error": "Photo too large"}), 413
         if not image_bytes:
             log.info(
-                f"  ❌ /upload 400: empty photo bytes (filename={file.filename!r}, "
-                f"platform={request.headers.get('X-Client-Platform', '?')})"
+                f"  ❌ /upload 400: empty photo bytes "
+                f"(platform={request.headers.get('X-Client-Platform', '?')})"
             )
             return jsonify({"error": "Empty photo"}), 400
 
         img_hash = hashlib.md5(image_bytes).hexdigest()
-        declared_hash = (request.form.get("original_hash") or "").strip().lower()
+        # Raw-body clients have no form fields, so both declarations are also
+        # accepted as headers.
+        declared_hash = (request.form.get("original_hash")
+                         or request.headers.get("X-Original-Hash") or "").strip().lower()
         if _ORIGINAL_HASH_RE.match(declared_hash):
             # The phone may recompress before uploading; dedup, /reconcile,
             # and the meals ledger must key on the ORIGINAL file's hash.
@@ -3686,7 +3717,8 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         # Additive: the client may declare when the photo was TAKEN so a
         # backfilled upload (nightly sync, offline-queue drain) lands on the
         # capture day's ledger instead of the upload day's.
-        captured_at = _parse_captured_at(request.form.get("captured_at", ""))
+        captured_at = _parse_captured_at(request.form.get("captured_at", "")
+                                         or request.headers.get("X-Captured-At", ""))
 
         existing_failed = _find_failed_upload_by_hash(img_hash)
         if existing_failed:
@@ -3712,7 +3744,7 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
             return jsonify({"status": "already_processing"})
 
         try:
-            upload_path = _stage_api_upload(image_bytes, img_hash, file.filename or "upload")
+            upload_path = _stage_api_upload(image_bytes, img_hash, upload_name)
         except OSError as e:
             database.release_photo_hash(ALLOWED_CHAT_ID, img_hash)
             _finish_api_upload_processing(img_hash)
