@@ -63,6 +63,9 @@ QUEUE_DIR = Path.home() / ".offline_queue"
 # heartbeats.
 QUEUE_BATCH_LIMIT = _env_int("QUEUE_BATCH_LIMIT", 10, 1, 100)
 QUEUE_LOCK_STALE_SECONDS = _env_int("QUEUE_LOCK_STALE_SECONDS", 600, 30, 86400)
+# How many days back --sync reconciles (today counts as day 1). Widen after a
+# long outage; every photo in the window is offered for AI classification.
+SYNC_LOOKBACK_DAYS = _env_int("SYNC_LOOKBACK_DAYS", 2, 1, 30)
 SUPPORTED_QUEUE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".heif"}
 # Statuses where retrying the same file can never succeed (bad request, too
 # large, unsupported type): quarantine instead of wedging the queue forever.
@@ -485,12 +488,14 @@ def sync_photos():
     if not camera_dir.exists():
         return
 
-    # Photos taken after yesterday's 23:00 sync (e.g. while the watcher was
-    # down) would otherwise never be reconciled; server-side dedup makes
-    # re-offering yesterday's hashes idempotent.
+    # Photos taken while the watcher was down would otherwise never be
+    # reconciled; server-side dedup makes re-offering hashes idempotent.
+    # SYNC_LOOKBACK_DAYS widens recovery after longer outages — note that
+    # EVERY photo in the window is offered to the server (and the AI) for
+    # classification, so keep the window as small as your outages allow.
     valid_days = {
-        time.strftime("%Y%m%d"),
-        time.strftime("%Y%m%d", time.localtime(time.time() - 86400)),
+        time.strftime("%Y%m%d", time.localtime(time.time() - 86400 * d))
+        for d in range(SYNC_LOOKBACK_DAYS)
     }
     photo_hashes = {}
 
@@ -510,7 +515,7 @@ def sync_photos():
                     print(f"[{time.strftime('%X')}] Error hashing {item.name}: {e}")
 
     if not photo_hashes:
-        print(f"[{time.strftime('%X')}] No photos from the last two days to sync.")
+        print(f"[{time.strftime('%X')}] No photos from the last {SYNC_LOOKBACK_DAYS} day(s) to sync.")
         return
 
     # Ask the server which hashes are missing

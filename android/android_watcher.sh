@@ -98,6 +98,18 @@ echo "[$(date)] Starting CalorieTracker Android Watcher..." | tee -a "$LOG_FILE"
 ) &
 PING_PID=$!
 
+# Startup catch-up sync: photos taken while the watcher was OFF would
+# otherwise wait for the 23:00 sync (or age past the lookback window).
+# Termux:Boot starts the watcher on boot, so this recovers an outage's
+# backlog within a minute of the phone coming back. The 30s delay lets
+# the initial ping/queue-drain settle first; server-side dedup makes a
+# sync that overlaps the seeding harmless.
+(
+  sleep 30
+  echo "[$(date)] Startup catch-up sync (watcher was just started)..." | tee -a "$LOG_FILE"
+  python3 ~/upload_photo.py --sync >> "$LOG_FILE" 2>&1
+) &
+
 # Start Daily Sync Reconciliation (11:00 PM)
 (
   while true; do
