@@ -367,19 +367,21 @@ def test_empty_image_bytes_short_circuit(monkeypatch, tmp_path):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_concurrent_analyses_use_distinct_temp_files(monkeypatch, tmp_path):
-    """Two in-flight analyses must never share a ct_claude_*.jpg path."""
+    """Two in-flight analyses must never share a ct_claude_*.jpg path.
+
+    The memory-heavy CLI subprocess itself is serialized by _CLI_LOCK, so
+    the stub asserts one-at-a-time execution rather than barrier-forcing an
+    overlap; each caller still stages its own temp file before queueing."""
     _configure(monkeypatch)
     _redirect_tempdir(monkeypatch, tmp_path)
-    barrier = threading.Barrier(2, timeout=15)
     seen = []
-    lock = threading.Lock()
 
     def run(cmd, **kwargs):
         path = _prompt_image_path(cmd)
-        with lock:
-            seen.append(path)
-        barrier.wait()                       # both temp files alive at once
+        assert claude_analyzer._CLI_LOCK.locked()  # serialized by the lock
         assert os.path.exists(path)
+        seen.append(path)
+        time.sleep(0.05)  # widen the window: the second caller must queue
         return SimpleNamespace(returncode=0,
                                stdout=_envelope(json.dumps(GOOD_ANALYSIS)), stderr="")
 
@@ -708,3 +710,31 @@ def test_status_label_states(monkeypatch, enabled, cli, expected):
     monkeypatch.setattr(claude_analyzer.shutil, "which", lambda *a, **k: cli)
 
     assert claude_analyzer.status_label() == expected
+
+
+def test_cli_runs_hold_the_serialization_lock(monkeypatch):
+    """The Node CLI is memory-heavy; a burst of photo threads (e.g. a
+    Telegram album) must serialize on _CLI_LOCK around the subprocess."""
+    _configure(monkeypatch)
+    locked_during_run = []
+
+    def run(cmd, **kwargs):
+        locked_during_run.append(claude_analyzer._CLI_LOCK.locked())
+        return SimpleNamespace(returncode=0, stdout=_envelope(json.dumps(dict(GOOD_ANALYSIS))),
+                               stderr="")
+
+    monkeypatch.setattr(claude_analyzer.subprocess, "run", run)
+
+    assert claude_analyzer.analyze_food_photo(b"jpegbytes") is not None
+    assert locked_during_run == [True]
+    assert claude_analyzer._CLI_LOCK.locked() is False  # released on the way out
+
+
+def test_cli_lock_released_after_timeout(monkeypatch):
+    """A TimeoutExpired inside the lock must not leave it held — queued
+    photo threads would deadlock forever."""
+    _configure(monkeypatch)
+    _fake_run(monkeypatch, raise_timeout=True)
+
+    assert claude_analyzer.analyze_food_photo(b"jpegbytes") is None
+    assert claude_analyzer._CLI_LOCK.locked() is False

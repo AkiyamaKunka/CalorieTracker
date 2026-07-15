@@ -2462,10 +2462,11 @@ def test_handle_photo_message_ignores_non_photo_messages(monkeypatch):
     assert bot.sent == []
 
 
-def test_handle_photo_message_food_photo_saved_via_background_thread(mock_db, monkeypatch):
+def test_handle_photo_message_food_photo_saved_via_background_thread(mock_db, monkeypatch, tmp_path):
     reserves, statuses, saved = [], [], []
     bot = PhotoBot()
 
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
     monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: False)
     monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash",
                         lambda *args, **kwargs: reserves.append((args, kwargs)) or True)
@@ -2494,9 +2495,11 @@ def test_handle_photo_message_food_photo_saved_via_background_thread(mock_db, mo
     # The processing placeholder was deleted and the result was sent.
     assert bot.deleted == [(12345, 1)]
     assert "Noodles" in bot.sent[-1]["text"]
+    # The crash-recovery copy is removed once the meal is saved.
+    assert list((tmp_path / "pending").iterdir()) == []
 
 
-def test_handle_photo_message_spawns_thread_instead_of_blocking(monkeypatch):
+def test_handle_photo_message_spawns_thread_instead_of_blocking(monkeypatch, tmp_path):
     """The long-poll caller must return before analysis runs: the spawn goes
     through the module-level threading.Thread (non-daemon, so shutdown joins
     it) and analysis only happens inside the spawned target."""
@@ -2510,6 +2513,7 @@ def test_handle_photo_message_spawns_thread_instead_of_blocking(monkeypatch):
             pass  # deliberately never runs the target
 
     bot = PhotoBot()
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
     monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: False)
     monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: True)
     monkeypatch.setattr(telegram_bot, "analyze_food_photo",
@@ -2523,6 +2527,11 @@ def test_handle_photo_message_spawns_thread_instead_of_blocking(monkeypatch):
     assert len(spawns) == 1
     assert spawns[0]["target"] is telegram_bot._analyze_telegram_photo_background
     assert not spawns[0]["daemon"]  # non-daemon: SIGTERM shutdown joins in-flight analyses
+    # The crash-recovery copy is staged BEFORE the thread spawns and its
+    # path handed to the background worker, which owns its cleanup.
+    staged = list((tmp_path / "pending").iterdir())
+    assert len(staged) == 1
+    assert spawns[0]["args"][6] == staged[0]
 
 
 def test_handle_photo_message_duplicate_short_circuits_before_reserving(monkeypatch):
@@ -2561,6 +2570,7 @@ def test_handle_photo_message_analysis_failure_releases_and_notifies(monkeypatch
     bot = PhotoBot()
 
     monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "service_health.json")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
     monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: False)
     monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: True)
     monkeypatch.setattr(telegram_bot.database, "release_photo_hash",
@@ -2574,15 +2584,18 @@ def test_handle_photo_message_analysis_failure_releases_and_notifies(monkeypatch
     assert handled is True
     assert released == [hashlib.md5(bot.image_bytes).hexdigest()]
     assert "couldn't analyze that photo" in bot.sent[-1]["text"]
+    # The crash-recovery copy is removed on the failure path too.
+    assert list((tmp_path / "pending").iterdir()) == []
 
 
-def test_handle_photo_message_background_crash_releases_and_redacts(monkeypatch):
+def test_handle_photo_message_background_crash_releases_and_redacts(monkeypatch, tmp_path):
     released = []
     bot = PhotoBot()
 
     def explode(client, image_bytes):
         raise RuntimeError("boom with https://api.telegram.org/botSECRET/getFile")
 
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
     monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: False)
     monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: True)
     monkeypatch.setattr(telegram_bot.database, "release_photo_hash",
@@ -2597,6 +2610,8 @@ def test_handle_photo_message_background_crash_releases_and_redacts(monkeypatch)
     assert released == [hashlib.md5(bot.image_bytes).hexdigest()]
     assert bot.redacted  # the token-bearing error went through bot._redact
     assert "Error processing your photo" in bot.sent[-1]["text"]
+    # Even a crashing analysis must not leak the crash-recovery copy.
+    assert list((tmp_path / "pending").iterdir()) == []
 
 
 def test_handle_photo_message_download_failure_reports_without_release(monkeypatch):
@@ -2611,6 +2626,97 @@ def test_handle_photo_message_download_failure_reports_without_release(monkeypat
     assert handled is True
     assert bot.redacted
     assert "Error processing your photo" in bot.sent[-1]["text"]
+
+
+def test_handle_photo_message_staging_failure_still_analyzes(mock_db, monkeypatch):
+    """An unwritable disk must not block analysis — the photo just loses its
+    crash-recovery copy, matching pre-staging behavior."""
+    saved = []
+    bot = PhotoBot()
+
+    def stage_explodes(image_bytes, image_hash, filename):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(telegram_bot, "_stage_api_upload", stage_explodes)
+    monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: False)
+    monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *a, **k: True)
+    monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status", lambda *a, **k: None)
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo",
+                        lambda client, image_bytes: {"is_food": True,
+                                                     "meal_description": "Toast",
+                                                     "total_calories": 210})
+    monkeypatch.setattr(telegram_bot, "save_meal", lambda *a, **k: saved.append(a) or 7)
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
+
+    handled = telegram_bot.handle_photo_message(
+        object(), bot, 12345, {"photo": [{"file_id": "f1"}]})
+
+    assert handled is True
+    assert len(saved) == 1
+    assert "Toast" in bot.sent[-1]["text"]
+
+
+def test_photo_background_quota_pause_moves_staged_copy_to_failed_dir(mock_db, monkeypatch, tmp_path):
+    """When analysis fails during a Gemini pause, the already-staged
+    crash-recovery copy is reused (not re-staged) and lands in the failed
+    dir for /retry_failed."""
+    stage_calls = []
+    real_stage = telegram_bot._stage_api_upload
+
+    def counting_stage(image_bytes, image_hash, filename):
+        stage_calls.append(filename)
+        return real_stage(image_bytes, image_hash, filename)
+
+    statuses = []
+    bot = PhotoBot()
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "failed")
+    monkeypatch.setattr(telegram_bot, "_stage_api_upload", counting_stage)
+    monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: False)
+    monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *a, **k: True)
+    monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status",
+                        lambda *args, **kwargs: statuses.append((args, kwargs)))
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo", lambda client, image_bytes: None)
+    monkeypatch.setattr(telegram_bot, "_gemini_quota_pause", lambda: True)
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
+
+    handled = telegram_bot.handle_photo_message(
+        object(), bot, 12345, {"photo": [{"file_id": "f1"}]})
+
+    assert handled is True
+    assert stage_calls == ["telegram_photo.jpg"]         # staged exactly once
+    assert list((tmp_path / "pending").iterdir()) == []  # nothing left behind
+    failed = list((tmp_path / "failed").iterdir())
+    assert len(failed) == 1
+    expected_hash = hashlib.md5(bot.image_bytes).hexdigest()
+    assert expected_hash[:12] in failed[0].name
+    assert statuses == [((12345, expected_hash, "failed"), {"source": "telegram"})]
+
+
+def test_retry_all_failed_uses_claude_when_gemini_paused(monkeypatch, tmp_path):
+    """The batch gate mirrors the single-file gate: a Gemini pause only holds
+    the batch when the Claude analyzer can't step in."""
+    failed_file = tmp_path / "20260715T010101_abcabcabcabc.jpg"
+    failed_file.write_bytes(b"failed-bytes")
+    retried = []
+
+    monkeypatch.setattr(telegram_bot, "_failed_upload_items", lambda: [failed_file])
+    monkeypatch.setattr(telegram_bot, "_gemini_quota_pause_summary",
+                        lambda: "paused until midnight")
+    monkeypatch.setattr(telegram_bot, "_retry_failed_upload_path",
+                        lambda client, path: retried.append(path) or
+                        {"status": "logged", "name": path.name, "message": "ok"})
+
+    monkeypatch.setattr(telegram_bot.claude_analyzer, "is_configured", lambda: False)
+    held = telegram_bot.retry_all_failed_uploads(object(), limit=3)
+    assert "Batch retry held" in held
+    assert retried == []
+
+    monkeypatch.setattr(telegram_bot.claude_analyzer, "is_configured", lambda: True)
+    result = telegram_bot.retry_all_failed_uploads(object(), limit=3)
+    assert "Batch retry held" not in result
+    assert retried == [failed_file]
+    assert "Logged: 1" in result
 
 
 # ---- Analyzer observability -----------------------------------------

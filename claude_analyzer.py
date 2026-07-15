@@ -22,6 +22,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -29,6 +30,12 @@ from config import FOOD_DETECTION_PROMPT
 from utils import parse_ai_json, parse_boolish
 
 log = logging.getLogger("claude_analyzer")
+
+# The CLI is a full Node process (hundreds of MB RSS). Serialize runs so a
+# burst of photos — e.g. a Telegram album fanning out one analysis thread per
+# photo — can't stack N of them and OOM a small host. The subprocess timeout
+# bounds how long any holder keeps the lock.
+_CLI_LOCK = threading.Lock()
 
 
 def _timeout_seconds() -> int:
@@ -101,13 +108,14 @@ def analyze_food_photo(image_bytes: bytes) -> Optional[Dict]:
         if model:
             cmd += ["--model", model]
 
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=_timeout_seconds(),
-            cwd=str(Path(tmp_path).parent),
-        )
+        with _CLI_LOCK:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=_timeout_seconds(),
+                cwd=str(Path(tmp_path).parent),
+            )
         if proc.returncode != 0:
             snippet = (proc.stderr or proc.stdout or "").strip()[:300]
             if "limit" in snippet.lower():

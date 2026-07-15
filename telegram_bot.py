@@ -1587,7 +1587,9 @@ def retry_all_failed_uploads(gemini_client, limit: int = 3) -> str:
         return "✅ <b>No failed saved uploads to retry.</b>"
 
     pause_summary = _gemini_quota_pause_summary()
-    if pause_summary:
+    # Same gate as the single-file path: a Gemini pause only holds the batch
+    # when the Claude-first analyzer can't step in.
+    if pause_summary and not claude_analyzer.is_configured():
         return (
             "⏸️ <b>Batch retry held.</b>\n\n"
             f"{pause_summary}\n\n"
@@ -3672,11 +3674,15 @@ def _analyze_telegram_photo_background(
     image_bytes: bytes,
     file_id: str,
     img_hash: str,
+    staged_path: Optional[Path] = None,
 ):
     """Analyze a Telegram photo off the long-poll thread and report the result.
 
     Owns the hash reservation made by handle_photo_message: every exit path
-    must mark it saved/skipped/failed or release it.
+    must mark it saved/skipped/failed or release it. Also owns the staged
+    crash-recovery copy: it is removed on every normal exit, so it only
+    survives a hard kill — where the boot sweep recovers it as a failed
+    upload and offers /retry_failed.
     """
     reserved_photo = True
     try:
@@ -3688,8 +3694,10 @@ def _analyze_telegram_photo_background(
         if analysis is None:
             if _gemini_quota_pause():
                 try:
-                    staged_path = _stage_api_upload(image_bytes, img_hash, "telegram_photo.jpg")
+                    if staged_path is None:
+                        staged_path = _stage_api_upload(image_bytes, img_hash, "telegram_photo.jpg")
                     failed_path = _keep_failed_api_upload(staged_path, img_hash)
+                    staged_path = None  # ownership moved to the failed dir
                     database.mark_photo_hash_status(chat_id, img_hash, "failed", source="telegram")
                     reserved_photo = False
                     _send_saved_upload_decision(
@@ -3740,6 +3748,9 @@ def _analyze_telegram_photo_background(
         # Defense in depth: network errors can embed the token URL.
         log.error(f"Error processing photo: {bot._redact(e)}")
         bot.send_message(chat_id, "❌ Error processing your photo. Please try again.")
+    finally:
+        if staged_path is not None:
+            _discard_api_upload(staged_path)
 
 
 def handle_photo_message(
@@ -3808,9 +3819,21 @@ def handle_photo_message(
             return True
         reserved_photo = True
 
+        # Stage a crash-recovery copy before spawning the thread: the
+        # long-poll offset is confirmed on the next getUpdates, so Telegram
+        # never re-delivers this photo. A hard kill mid-analysis leaves this
+        # file for the boot sweep; the background thread removes it on every
+        # normal exit. Best-effort — an unwritable disk must not block
+        # analysis (that photo just stays kill-unrecoverable, as before).
+        staged_path = None
+        try:
+            staged_path = _stage_api_upload(image_bytes, img_hash, "telegram_photo.jpg")
+        except OSError as e:
+            log.warning(f"Could not stage Telegram photo for crash recovery: {e}")
+
         threading.Thread(
             target=_analyze_telegram_photo_background,
-            args=(gemini_client, bot, chat_id, image_bytes, file_id, img_hash),
+            args=(gemini_client, bot, chat_id, image_bytes, file_id, img_hash, staged_path),
         ).start()
     except Exception as e:
         if reserved_photo:
