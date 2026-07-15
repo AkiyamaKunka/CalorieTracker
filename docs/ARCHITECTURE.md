@@ -12,15 +12,18 @@ core.
 
 ```
  Android (Termux watcher) ─┐
-   upload_photo.py + sh    │  multipart POST /upload  (X-API-Key)
-                           │
+   upload_photo.py + sh    │  POST /upload  (X-API-Key) —
+                           │  multipart or raw image body
  iOS (Shortcut)  ──────────┼──►  Flask upload API  ──►  photo-hash
    camera-close upload     │     (telegram_bot.py,      reservation ledger
                            │      port 5000)            (photo_ingestions)
  Telegram (direct photo) ──┘            │                     │
                                         ▼                     ▼
-                                  Gemini 2.5 Flash  ──►  SQLite (meals.db)
-                                  (vision + intents)         │
+                                  Claude Code CLI   ──►  SQLite (meals.db)
+                                  (opt-in, tried 1st)        │
+                                   └► Gemini 2.5 Flash       │
+                                      (fallback/default;     │
+                                       vision + intents)     │
                                         ▲                     ▼
  Telegram (text: correct/     ────────┘             daily_report.py (23:30)
    delete/log/chat)                                  ──► Telegram + PushPlus
@@ -31,8 +34,22 @@ core.
 
 - **Entry point:** `python3 telegram_bot.py` runs two loops — a Flask API on
   `0.0.0.0:5000` (daemon thread) and the main-thread Telegram long-poll.
-- **Analysis:** Google Gemini (`GEMINI_MODEL`, default `gemini-2.5-flash`),
-  requested in native-JSON mode; images are downscaled before the call.
+- **Analysis:** Claude-first when enabled, Gemini as the fallback and default.
+  With `CLAUDE_ANALYZER_ENABLED=1` and the Claude Code CLI installed, photo
+  analysis runs headless on a Claude subscription (`claude -p`, credential
+  minted by `claude setup-token`); any failure — CLI absent, usage window
+  exhausted, timeout, malformed output — falls back to Google Gemini
+  (`GEMINI_MODEL`, default `gemini-2.5-flash`), requested in native-JSON mode;
+  images are downscaled before the call. Text-intent parsing (corrections,
+  NL commands) stays on Gemini.
+- **Meal dating:** meals normally date to the user-local upload time, but a
+  client may declare when the photo was *taken* (`captured_at` form field or
+  `X-Captured-At` header, device-local `YYYY-MM-DD HH:MM:SS`; Android derives
+  it from the camera filename, iOS sends the photo's Creation Date), so
+  backfilled uploads — nightly sync, offline-queue drain — land on the capture
+  day's ledger. The server validates the value: unparseable, more than an hour
+  in the future, or older than `CAPTURED_AT_MAX_AGE_DAYS` (default 45) falls
+  back to upload-time dating.
 - **Storage:** one SQLite file, `~/CalorieTracker/meals.db` (WAL). Seven
   tables: `meals`, `heartbeats`, `photo_ingestions`, `body_weight`,
   `workouts`, `activities`, `fitness_profile`.
@@ -121,19 +138,22 @@ the full list and defaults). The most operationally relevant:
 | Var | Purpose |
 | --- | --- |
 | `GEMINI_API_KEY`, `GEMINI_MODEL` | Analysis model |
+| `CLAUDE_ANALYZER_ENABLED` | Try Claude (via the Claude Code CLI) before Gemini for photos (default off) |
+| `CLAUDE_ANALYZER_BIN`, `CLAUDE_ANALYZER_MODEL`, `CLAUDE_ANALYZER_TIMEOUT_SECONDS` | CLI binary (`claude`), optional `--model` override, per-analysis timeout (120s, clamped 10–600) |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Bot + single-user allowlist |
 | `ANDROID_API_KEY` | Upload API key (phones must match) |
 | `MEAL_RELAY_HOST`, `MEAL_RELAY_API_KEY` | Legacy relay bind/key |
 | `HEARTBEAT_STALE_WARNING_HOURS` | Phone-offline warning threshold (2h; 0 off) |
 | `TRUSTED_PROXY_ENABLED` | Honor `X-Forwarded-For` (default off) |
 | `MAX_API_UPLOAD_BYTES` | Upload size cap (25 MB) |
+| `CAPTURED_AT_MAX_AGE_DAYS` | Oldest client-declared capture date honored (45 days; older dates fall back to upload-time dating) |
 | `GARMIN_ENABLED` | Turn on the daily Garmin activity pull (default off) |
 | `GARMIN_TOKEN_DIR` | Pre-minted token directory — token-only auth, minted off-server |
 | `GARMIN_NET_USE_TOTAL` | Net calories against Garmin's whole-day total instead of active-only |
 
 Phone-side knobs (`PING_INTERVAL_SECONDS`, `SEED_FRESH_MINUTES`,
-`CALORIE_RECOMPRESS_MAX_EDGE`, `CAMERA_DIR`, …) are documented in the README's
-Android section.
+`CALORIE_RECOMPRESS_MAX_EDGE`, `CAMERA_DIR`, `SYNC_LOOKBACK_DAYS`, …) are
+documented in the README's Android section.
 
 ## 5. Ops runbook
 
@@ -150,6 +170,9 @@ Android section.
 2. Tap the 🔁 update widget (or `bash /sdcard/Download/install_and_start.sh`
    in Termux). The installer syntax-checks the payload before stopping the
    running watcher, so a truncated push cannot leave the phone watcher-less.
+   It also plants a Termux:Boot auto-start script
+   (`~/.termux/boot/start-calorie-tracker.sh`) so the watcher restarts after a
+   phone reboot — requires the Termux:Boot app installed and opened once.
 3. Optional: `pip install pillow` in Termux to enable pre-upload recompression.
 
 **Rotate the Telegram bot token.**
@@ -170,6 +193,7 @@ Android section.
 | --- | --- |
 | No daily report | Machine asleep at 23:30 (catches up next run), or `TELEGRAM_CHAT_ID` non-numeric. Check `/report_status`. |
 | Photos not arriving | Watcher dead or phone offline — the bot warns after 2h; check `~/watcher.log` and `/android`. |
+| Photos taken during a watcher outage | Recovered automatically: the watcher runs a catch-up `--sync` 30s after every start (with Termux:Boot, right after reboot) plus the nightly 23:00 sync. The window is `SYNC_LOOKBACK_DAYS` (default 2, up to 30 for long outages). |
 | "Gemini paused" replies | Daily free-tier quota hit; 12h circuit breaker. Kept photos recover via `/retry_failed` after it clears. |
 | Uploads rejected on cellular | Carrier blocks port 5000 — clients try port 80 first (needs the VM's 80→5000 redirect, not in the repo). |
 | Duplicate meals | Should not happen via one path; if seen, check `photo_ingestions` for a missing/`deleted` row and the reconcile suppression.

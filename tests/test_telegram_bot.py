@@ -2427,3 +2427,252 @@ def test_upload_raw_body_just_under_cap_stages_and_completes(mock_db, monkeypatc
     assert resp.status_code == 200
     assert resp.get_json() == {"status": "processing_in_background"}
     assert list((tmp_path / "pending").iterdir()) == []   # not food -> discarded
+
+
+# ---- Telegram photo handler (async analysis) ------------------------
+
+class PhotoBot(FakeBot):
+    """FakeBot + the photo-path surface (file download, redaction)."""
+
+    def __init__(self, image_bytes=b"telegram photo bytes"):
+        super().__init__()
+        self.image_bytes = image_bytes
+        self.redacted = []
+
+    def get_file(self, file_id):
+        if isinstance(self.image_bytes, Exception):
+            raise self.image_bytes
+        return self.image_bytes
+
+    def _redact(self, value):
+        self.redacted.append(value)
+        return str(value)
+
+
+def test_handle_photo_message_ignores_non_photo_messages(monkeypatch):
+    bot = PhotoBot()
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo",
+                        lambda *a, **k: pytest.fail("must not analyze without an image"))
+
+    assert telegram_bot.handle_photo_message(object(), bot, 12345, {"text": "hello"}) is False
+    assert telegram_bot.handle_photo_message(
+        object(), bot, 12345,
+        {"document": {"file_id": "doc-1", "mime_type": "application/pdf"}},
+    ) is False
+    assert bot.sent == []
+
+
+def test_handle_photo_message_food_photo_saved_via_background_thread(mock_db, monkeypatch):
+    reserves, statuses, saved = [], [], []
+    bot = PhotoBot()
+
+    monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: False)
+    monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash",
+                        lambda *args, **kwargs: reserves.append((args, kwargs)) or True)
+    monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status",
+                        lambda *args, **kwargs: statuses.append((args, kwargs)))
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo",
+                        lambda client, image_bytes: {"is_food": True,
+                                                     "meal_description": "Noodles",
+                                                     "total_calories": 480})
+    monkeypatch.setattr(
+        telegram_bot, "save_meal",
+        lambda chat_id, analysis, source, file_id, img_hash: saved.append((source, file_id, img_hash)) or 41,
+    )
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
+
+    handled = telegram_bot.handle_photo_message(
+        object(), bot, 12345, {"photo": [{"file_id": "low-res"}, {"file_id": "hi-res"}]})
+
+    assert handled is True
+    expected_hash = hashlib.md5(bot.image_bytes).hexdigest()
+    # Reservation keeps the deliberate-resend reclaim semantics.
+    assert reserves[0][0] == (12345, expected_hash, "telegram")
+    assert reserves[0][1] == {"reclaim_statuses": {"failed", "skipped", "deleted"}}
+    assert saved == [("telegram", "hi-res", expected_hash)]  # highest-res photo wins
+    assert statuses == [((12345, expected_hash, "saved", 41), {"source": "telegram"})]
+    # The processing placeholder was deleted and the result was sent.
+    assert bot.deleted == [(12345, 1)]
+    assert "Noodles" in bot.sent[-1]["text"]
+
+
+def test_handle_photo_message_spawns_thread_instead_of_blocking(monkeypatch):
+    """The long-poll caller must return before analysis runs: the spawn goes
+    through the module-level threading.Thread (non-daemon, so shutdown joins
+    it) and analysis only happens inside the spawned target."""
+    spawns = []
+
+    class RecordingThread:
+        def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+            spawns.append({"target": target, "args": args, "daemon": daemon})
+
+        def start(self):
+            pass  # deliberately never runs the target
+
+    bot = PhotoBot()
+    monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: False)
+    monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: True)
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo",
+                        lambda *a, **k: pytest.fail("analysis must run on the background thread"))
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=RecordingThread))
+
+    handled = telegram_bot.handle_photo_message(
+        object(), bot, 12345, {"photo": [{"file_id": "f1"}]})
+
+    assert handled is True
+    assert len(spawns) == 1
+    assert spawns[0]["target"] is telegram_bot._analyze_telegram_photo_background
+    assert not spawns[0]["daemon"]  # non-daemon: SIGTERM shutdown joins in-flight analyses
+
+
+def test_handle_photo_message_duplicate_short_circuits_before_reserving(monkeypatch):
+    bot = PhotoBot()
+    monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: True)
+    monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash",
+                        lambda *a, **k: pytest.fail("duplicates must not reserve"))
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo",
+                        lambda *a, **k: pytest.fail("duplicates must not analyze"))
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
+
+    handled = telegram_bot.handle_photo_message(
+        object(), bot, 12345, {"photo": [{"file_id": "f1"}]})
+
+    assert handled is True
+    assert "same photo you already sent" in bot.sent[-1]["text"]
+
+
+def test_handle_photo_message_reservation_denied_skips_analysis(monkeypatch):
+    bot = PhotoBot()
+    monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: False)
+    monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: False)
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo",
+                        lambda *a, **k: pytest.fail("denied reservation must not analyze"))
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
+
+    handled = telegram_bot.handle_photo_message(
+        object(), bot, 12345, {"photo": [{"file_id": "f1"}]})
+
+    assert handled is True
+    assert "already being processed or was already logged" in bot.sent[-1]["text"]
+
+
+def test_handle_photo_message_analysis_failure_releases_and_notifies(monkeypatch, tmp_path):
+    released = []
+    bot = PhotoBot()
+
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "service_health.json")
+    monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: False)
+    monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: True)
+    monkeypatch.setattr(telegram_bot.database, "release_photo_hash",
+                        lambda chat_id, image_hash: released.append(image_hash))
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo", lambda client, image_bytes: None)
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
+
+    handled = telegram_bot.handle_photo_message(
+        object(), bot, 12345, {"photo": [{"file_id": "f1"}]})
+
+    assert handled is True
+    assert released == [hashlib.md5(bot.image_bytes).hexdigest()]
+    assert "couldn't analyze that photo" in bot.sent[-1]["text"]
+
+
+def test_handle_photo_message_background_crash_releases_and_redacts(monkeypatch):
+    released = []
+    bot = PhotoBot()
+
+    def explode(client, image_bytes):
+        raise RuntimeError("boom with https://api.telegram.org/botSECRET/getFile")
+
+    monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: False)
+    monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: True)
+    monkeypatch.setattr(telegram_bot.database, "release_photo_hash",
+                        lambda chat_id, image_hash: released.append(image_hash))
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo", explode)
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
+
+    handled = telegram_bot.handle_photo_message(
+        object(), bot, 12345, {"photo": [{"file_id": "f1"}]})
+
+    assert handled is True
+    assert released == [hashlib.md5(bot.image_bytes).hexdigest()]
+    assert bot.redacted  # the token-bearing error went through bot._redact
+    assert "Error processing your photo" in bot.sent[-1]["text"]
+
+
+def test_handle_photo_message_download_failure_reports_without_release(monkeypatch):
+    bot = PhotoBot(image_bytes=OSError("network down"))
+    monkeypatch.setattr(telegram_bot.database, "release_photo_hash",
+                        lambda *a, **k: pytest.fail("nothing was reserved, nothing to release"))
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
+
+    handled = telegram_bot.handle_photo_message(
+        object(), bot, 12345, {"photo": [{"file_id": "f1"}]})
+
+    assert handled is True
+    assert bot.redacted
+    assert "Error processing your photo" in bot.sent[-1]["text"]
+
+
+# ---- Analyzer observability -----------------------------------------
+
+def test_photo_analysis_claude_success_tagged_analyzed_by(monkeypatch, tmp_path):
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot.claude_analyzer, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        telegram_bot.claude_analyzer, "analyze_food_photo",
+        lambda image_bytes: {"is_food": True, "meal_description": "From Claude",
+                             "total_calories": 300, "food_items": []},
+    )
+
+    result = telegram_bot.analyze_food_photo_with_retries(object(), b"img")
+
+    assert result["analyzed_by"] == "claude"
+
+
+def test_photo_analysis_gemini_success_logs_model_name(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot.claude_analyzer, "is_configured", lambda: False)
+    monkeypatch.setattr(
+        telegram_bot, "_analyze_food_photo_once",
+        lambda client, image_bytes: {"is_food": False},
+    )
+
+    with caplog.at_level("INFO", logger="calorie_bot"):
+        result = telegram_bot.analyze_food_photo_with_retries(object(), b"img")
+
+    assert result == {"is_food": False}
+    gemini_logs = [r.message for r in caplog.records if "analyzed by Gemini" in r.message]
+    assert gemini_logs and telegram_bot.GEMINI_MODEL in gemini_logs[0]
+
+
+def test_format_safe_config_reports_claude_analyzer_without_token_value(monkeypatch, tmp_path):
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "failed")
+    monkeypatch.setattr(telegram_bot, "REPORTS_DIR", tmp_path / "reports")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-secret-value")
+    monkeypatch.setattr(telegram_bot.claude_analyzer, "status_label", lambda: "enabled")
+
+    result = telegram_bot.format_safe_config()
+
+    assert "Claude analyzer: <code>enabled</code>" in result
+    assert "Claude OAuth token set: <code>True</code>" in result
+    assert "sk-ant-oat-secret-value" not in result
+
+
+@pytest.mark.parametrize("label,expected", [
+    ("enabled", "✅ Claude analyzer enabled (CLI found)"),
+    ("off", "⚪ Claude analyzer off — photos go straight to Gemini"),
+    ("enabled, CLI missing", "❌ Claude analyzer enabled but the CLI was not found"),
+])
+def test_run_doctor_reports_claude_analyzer_state(monkeypatch, tmp_path, label, expected):
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "failed")
+    monkeypatch.setattr(telegram_bot, "REPORTS_DIR", tmp_path / "reports")
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "service_health.json")
+    monkeypatch.setattr(telegram_bot.database, "get_meals", lambda *args: [])
+    monkeypatch.setattr(telegram_bot, "run_gemini_probe", lambda client: "🟢 <b>Gemini probe OK</b>")
+    monkeypatch.setattr(telegram_bot.claude_analyzer, "status_label", lambda: label)
+
+    result = telegram_bot.run_doctor(object())
+
+    assert expected in result

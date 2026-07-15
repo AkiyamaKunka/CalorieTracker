@@ -177,8 +177,9 @@ _pending_nl_deletes: Dict[int, Dict] = {}
 
 HELP_TEXT = """🍽️ <b>CalorieTracker Bot</b>
 
-I track your food automatically from your Photos library (iPhone/iCloud).
-You can also send food photos directly here (Android)!
+I log meals from food photos your phone uploads automatically
+(iPhone camera Shortcut / Android watcher). You can also send
+food photos directly here in the chat!
 
 <b>Commands:</b>
 /meals — View today's meals (numbered list)
@@ -723,6 +724,9 @@ def analyze_food_photo_with_retries(
     if claude_analyzer.is_configured():
         result = claude_analyzer.analyze_food_photo(image_bytes)
         if result is not None:
+            # Inert provenance marker: nothing reads it yet, but it lands in
+            # the saved meal's analysis JSON so engine mix is auditable later.
+            result["analyzed_by"] = "claude"
             return result
         log.warning("Claude analyzer unavailable/failed; falling back to Gemini.")
 
@@ -738,6 +742,8 @@ def analyze_food_photo_with_retries(
         try:
             result = _analyze_food_photo_once(client, image_bytes)
             _record_gemini_health(True, latency_seconds=time.time() - start)
+            # Log parity with the Claude success branch, including the model.
+            log.info(f"✅ Photo analyzed by Gemini ({GEMINI_MODEL}).")
             return result
         except json.JSONDecodeError as e:
             log.warning(f"Could not parse API response: {e}")
@@ -2088,6 +2094,8 @@ def format_safe_config() -> str:
         "⚙️ <b>Runtime Config</b>",
         f"Gemini model: <code>{escape(GEMINI_MODEL)}</code>",
         f"Gemini API key set: <code>{bool(GEMINI_API_KEY)}</code>",
+        f"Claude analyzer: <code>{escape(claude_analyzer.status_label())}</code>",
+        f"Claude OAuth token set: <code>{bool(os.environ.get('CLAUDE_CODE_OAUTH_TOKEN'))}</code>",
         f"Telegram bot token set: <code>{bool(BOT_TOKEN)}</code>",
         f"Telegram chat ID set: <code>{bool(TELEGRAM_CHAT_ID)}</code>",
         f"Android API key set: <code>{bool(ANDROID_API_KEY)}</code>",
@@ -2187,6 +2195,14 @@ def run_doctor(gemini_client) -> str:
     lines.append("✅ Telegram token configured" if BOT_TOKEN else "❌ Telegram token missing")
     lines.append("✅ Telegram chat configured" if TELEGRAM_CHAT_ID else "❌ Telegram chat ID missing")
     lines.append("✅ Gemini key configured" if GEMINI_API_KEY else "❌ Gemini key missing")
+
+    claude_state = claude_analyzer.status_label()
+    if claude_state == "enabled":
+        lines.append("✅ Claude analyzer enabled (CLI found)")
+    elif claude_state == "off":
+        lines.append("⚪ Claude analyzer off — photos go straight to Gemini")
+    else:
+        lines.append("❌ Claude analyzer enabled but the CLI was not found")
 
     gemini_probe = run_gemini_probe(gemini_client)
     probe_ok = "Gemini probe OK" in gemini_probe
@@ -3649,6 +3665,162 @@ def handle_callback_query(gemini_client, bot: TelegramBot, callback_query: Dict)
     return False
 
 
+def _analyze_telegram_photo_background(
+    gemini_client,
+    bot: TelegramBot,
+    chat_id: int,
+    image_bytes: bytes,
+    file_id: str,
+    img_hash: str,
+):
+    """Analyze a Telegram photo off the long-poll thread and report the result.
+
+    Owns the hash reservation made by handle_photo_message: every exit path
+    must mark it saved/skipped/failed or release it.
+    """
+    reserved_photo = True
+    try:
+        processing_msg = bot.send_message(chat_id, "🔍 Processing image... one moment!")
+        analysis = analyze_food_photo(gemini_client, image_bytes)
+        if processing_msg and processing_msg.get("message_id"):
+            bot.delete_message(chat_id, processing_msg["message_id"])
+
+        if analysis is None:
+            if _gemini_quota_pause():
+                try:
+                    staged_path = _stage_api_upload(image_bytes, img_hash, "telegram_photo.jpg")
+                    failed_path = _keep_failed_api_upload(staged_path, img_hash)
+                    database.mark_photo_hash_status(chat_id, img_hash, "failed", source="telegram")
+                    reserved_photo = False
+                    _send_saved_upload_decision(
+                        bot,
+                        chat_id,
+                        failed_path,
+                        img_hash,
+                        source_label="Telegram",
+                    )
+                except OSError as e:
+                    database.release_photo_hash(chat_id, img_hash)
+                    reserved_photo = False
+                    log.error(f"Could not save Telegram photo for later retry: {e}")
+                    bot.send_message(
+                        chat_id,
+                        "❌ <b>I couldn't analyze that photo and could not save it for retry.</b>\n\n"
+                        f"{_gemini_failure_context()}",
+                    )
+                return
+
+            database.release_photo_hash(chat_id, img_hash)
+            reserved_photo = False
+            bot.send_message(
+                chat_id,
+                "❌ <b>I couldn't analyze that photo.</b>\n\n"
+                f"{_gemini_failure_context()}\n\n"
+                "Try <code>/gemini</code> to run a live check.",
+            )
+            return
+
+        if analysis.get("is_food"):
+            meal_id = save_meal(chat_id, analysis, "telegram", file_id, img_hash)
+            database.mark_photo_hash_status(chat_id, img_hash, "saved", meal_id, source="telegram")
+            reserved_photo = False
+            log.info(
+                f"  ✅ Food: {analysis.get('meal_description')} "
+                f"(~{analysis.get('total_calories')} kcal)"
+            )
+            result_text = format_food_result(chat_id, analysis)
+            bot.send_message(chat_id, result_text)
+        else:
+            database.mark_photo_hash_status(chat_id, img_hash, "skipped", source="telegram")
+            reserved_photo = False
+            log.info("  ⏭️ Not food. Silently ignoring.")
+    except Exception as e:
+        if reserved_photo:
+            database.release_photo_hash(chat_id, img_hash)
+        # Defense in depth: network errors can embed the token URL.
+        log.error(f"Error processing photo: {bot._redact(e)}")
+        bot.send_message(chat_id, "❌ Error processing your photo. Please try again.")
+
+
+def handle_photo_message(
+    gemini_client,
+    bot: TelegramBot,
+    chat_id: int,
+    message: Dict,
+    user: str = "User",
+) -> bool:
+    """Handle a Telegram photo (or image document) message.
+
+    Returns True when the message carried an image, so the caller should stop
+    processing it. Download, duplicate detection, and the hash reservation run
+    synchronously — a re-send arriving in the same update batch still hits the
+    reservation — then analysis moves to a background thread so a slow
+    Claude/Gemini call cannot stall the long-poll loop (same shape as the
+    /upload background thread; non-daemon so shutdown joins in-flight work).
+    """
+    photos = message.get("photo")
+    document = message.get("document")
+    file_id = None
+
+    if photos:
+        file_id = photos[-1]["file_id"]
+    elif document:
+        mime = document.get("mime_type", "")
+        if mime.startswith("image/"):
+            file_id = document["file_id"]
+            log.info(f"  📎 Received image as document ({mime})")
+
+    if not file_id:
+        return False
+
+    log.info(f"[{user}] Received photo, analyzing...")
+    img_hash = ""
+    reserved_photo = False
+    try:
+        image_bytes = bot.get_file(file_id)
+
+        # Duplicate detection
+        img_hash = hashlib.md5(image_bytes).hexdigest()
+        if is_duplicate_photo(chat_id, img_hash):
+            log.info("  🔄 Duplicate photo detected, skipping")
+            bot.send_message(
+                chat_id,
+                "🔄 This looks like the same photo you already sent!\n"
+                "It won't be counted twice.",
+            )
+            return True
+
+        # A deliberate human re-send may re-log a photo that was
+        # previously skipped, failed, or whose meal was deleted;
+        # the automated /upload path stays strict.
+        if not database.reserve_photo_hash(
+            chat_id,
+            img_hash,
+            "telegram",
+            reclaim_statuses={"failed", "skipped", "deleted"},
+        ):
+            log.info("  🔄 Photo already reserved or logged, skipping")
+            bot.send_message(
+                chat_id,
+                "🔄 This photo is already being processed or was already logged.\n"
+                "It won't be counted twice.",
+            )
+            return True
+        reserved_photo = True
+
+        threading.Thread(
+            target=_analyze_telegram_photo_background,
+            args=(gemini_client, bot, chat_id, image_bytes, file_id, img_hash),
+        ).start()
+    except Exception as e:
+        if reserved_photo:
+            database.release_photo_hash(chat_id, img_hash)
+        # Defense in depth: network errors can embed the token URL.
+        log.error(f"Error processing photo: {bot._redact(e)}")
+        bot.send_message(chat_id, "❌ Error processing your photo. Please try again.")
+    return True
+
+
 # ─── Flask REST API ───────────────────────────────────────────────
 def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
     """Build the phone upload/heartbeat API app (module-level for testability)."""
@@ -4092,6 +4264,7 @@ def main():
 
                 if command == "/ping_android":
                     # Silent heartbeat ping
+                    # legacy — no known clients; watcher heartbeats via HTTP /ping
                     database.update_android_heartbeat()
                     continue
 
@@ -4236,115 +4409,7 @@ def main():
                     continue
 
                 # ─── Handle photos ────────────────────────────────
-                photos = message.get("photo")
-                document = message.get("document")
-                file_id = None
-
-                if photos:
-                    file_id = photos[-1]["file_id"]
-                elif document:
-                    mime = document.get("mime_type", "")
-                    if mime.startswith("image/"):
-                        file_id = document["file_id"]
-                        log.info(f"  📎 Received image as document ({mime})")
-
-                if file_id:
-                    log.info(f"[{user}] Received photo, analyzing...")
-                    img_hash = ""
-                    reserved_photo = False
-                    try:
-                        image_bytes = bot.get_file(file_id)
-
-                        # Duplicate detection
-                        img_hash = hashlib.md5(image_bytes).hexdigest()
-                        if is_duplicate_photo(chat_id, img_hash):
-                            log.info("  🔄 Duplicate photo detected, skipping")
-                            bot.send_message(
-                                chat_id,
-                                "🔄 This looks like the same photo you already sent!\n"
-                                "It won't be counted twice.",
-                            )
-                            continue
-
-                        # A deliberate human re-send may re-log a photo that was
-                        # previously skipped, failed, or whose meal was deleted;
-                        # the automated /upload path stays strict.
-                        if not database.reserve_photo_hash(
-                            chat_id,
-                            img_hash,
-                            "telegram",
-                            reclaim_statuses={"failed", "skipped", "deleted"},
-                        ):
-                            log.info("  🔄 Photo already reserved or logged, skipping")
-                            bot.send_message(
-                                chat_id,
-                                "🔄 This photo is already being processed or was already logged.\n"
-                                "It won't be counted twice.",
-                            )
-                            continue
-                        reserved_photo = True
-
-                        processing_msg = bot.send_message(chat_id, "🔍 Processing image... one moment!")
-                        analysis = analyze_food_photo(gemini_client, image_bytes)
-                        if processing_msg and processing_msg.get("message_id"):
-                            bot.delete_message(chat_id, processing_msg["message_id"])
-
-                        if analysis is None:
-                            if _gemini_quota_pause():
-                                try:
-                                    staged_path = _stage_api_upload(image_bytes, img_hash, "telegram_photo.jpg")
-                                    failed_path = _keep_failed_api_upload(staged_path, img_hash)
-                                    database.mark_photo_hash_status(chat_id, img_hash, "failed", source="telegram")
-                                    reserved_photo = False
-                                    _send_saved_upload_decision(
-                                        bot,
-                                        chat_id,
-                                        failed_path,
-                                        img_hash,
-                                        source_label="Telegram",
-                                    )
-                                except OSError as e:
-                                    database.release_photo_hash(chat_id, img_hash)
-                                    reserved_photo = False
-                                    log.error(f"Could not save Telegram photo for later retry: {e}")
-                                    bot.send_message(
-                                        chat_id,
-                                        "❌ <b>I couldn't analyze that photo and could not save it for retry.</b>\n\n"
-                                        f"{_gemini_failure_context()}",
-                                    )
-                                continue
-
-                            database.release_photo_hash(chat_id, img_hash)
-                            reserved_photo = False
-                            bot.send_message(
-                                chat_id,
-                                "❌ <b>I couldn't analyze that photo.</b>\n\n"
-                                f"{_gemini_failure_context()}\n\n"
-                                "Try <code>/gemini</code> to run a live check.",
-                            )
-                            continue
-
-                        if analysis.get("is_food"):
-                            meal_id = save_meal(chat_id, analysis, "telegram", file_id, img_hash)
-                            database.mark_photo_hash_status(chat_id, img_hash, "saved", meal_id, source="telegram")
-                            reserved_photo = False
-                            log.info(
-                                f"  ✅ Food: {analysis.get('meal_description')} "
-                                f"(~{analysis.get('total_calories')} kcal)"
-                            )
-                            result_text = format_food_result(chat_id, analysis)
-                            bot.send_message(chat_id, result_text)
-                        else:
-                            database.mark_photo_hash_status(chat_id, img_hash, "skipped", source="telegram")
-                            reserved_photo = False
-                            log.info("  ⏭️ Not food. Silently ignoring.")
-
-                    except Exception as e:
-                        if reserved_photo:
-                            database.release_photo_hash(chat_id, img_hash)
-                        # Defense in depth: network errors can embed the token URL.
-                        log.error(f"Error processing photo: {bot._redact(e)}")
-                        bot.send_message(chat_id, "❌ Error processing your photo. Please try again.")
+                if handle_photo_message(gemini_client, bot, chat_id, message, user):
                     continue
 
                 # ─── Ignore non-text messages ─────────────────────

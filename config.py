@@ -90,64 +90,6 @@ if dietary_profile_path.exists():
     except (OSError, UnicodeDecodeError) as e:
         print(f"[WARN] Could not load dietary profile from {dietary_profile_path}: {e}", file=sys.stderr)
 
-# ─── Correction Prompt ─────────────────────────────────────────────
-CORRECTION_PROMPT = """I previously analyzed a food photo and got this result:
-{previous_analysis}
-
-The user says this correction: "{user_correction}"
-
-Please re-analyze the photo with this correction in mind. Apply the user's feedback
-to produce a more accurate estimate.
-
-Respond with the corrected JSON in the same format:
-{{
-  "is_food": true,
-  "food_items": [
-    {{"name": "Item Name", "estimated_calories": 000, "protein_g": 00, "carbs_g": 00, "fat_g": 00}}
-  ],
-  "total_calories": 000,
-  "total_protein_g": 00,
-  "total_carbs_g": 00,
-  "total_fat_g": 00,
-  "meal_description": "...",
-  "confidence_note": "..."
-}}
-
-Rules:
-- Respond ONLY with valid JSON, no other text
-- Apply the user's correction to adjust the specific items mentioned
-- Keep other items unchanged unless the correction affects them
-- Recalculate all totals
-"""
-
-# ─── Text-Only Meal Prompt ─────────────────────────────────────────
-TEXT_MEAL_PROMPT = """The user didn't take a photo but described what they ate:
-
-"{meal_description}"
-
-Based on this description, estimate the calories and macros as accurately as possible.
-
-Respond with JSON in this exact format:
-{{
-  "is_food": true,
-  "food_items": [
-    {{"name": "Item Name", "estimated_calories": 000, "protein_g": 00, "carbs_g": 00, "fat_g": 00}}
-  ],
-  "total_calories": 000,
-  "total_protein_g": 00,
-  "total_carbs_g": 00,
-  "total_fat_g": 00,
-  "meal_description": "...",
-  "confidence_note": "Estimated from text description only"
-}}
-
-Rules:
-- Respond ONLY with valid JSON, no other text
-- Use typical portion sizes unless the user specifies
-- Be as specific as possible with your estimates
-- If the description is vague, make reasonable assumptions on portion size
-"""
-
 # ─── Duplicate Detection ──────────────────────────────────────────
 # Photos sent within this window with the same hash are considered duplicates
 DUPLICATE_WINDOW_MINUTES = 5

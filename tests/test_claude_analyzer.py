@@ -602,12 +602,13 @@ def _activate_gemini_pause(path, hours=2):
 
 def test_claude_success_skips_gemini_and_records_no_gemini_health(monkeypatch, tmp_path):
     health = _health_path(monkeypatch, tmp_path)
-    _patch_claude(monkeypatch, True, GOOD_ANALYSIS)
+    _patch_claude(monkeypatch, True, dict(GOOD_ANALYSIS))
     gemini_calls = _patch_gemini_once(monkeypatch, GEMINI_ANALYSIS)
 
     result = telegram_bot.analyze_food_photo_with_retries(object(), b"img")
 
-    assert result == GOOD_ANALYSIS
+    # Claude successes are tagged with an inert provenance marker.
+    assert result == {**GOOD_ANALYSIS, "analyzed_by": "claude"}
     assert gemini_calls == []          # Claude success must skip Gemini entirely
     assert not health.exists()         # and must not claim a Gemini health success
 
@@ -638,10 +639,12 @@ def test_gemini_quota_pause_does_not_block_claude_primary(monkeypatch, tmp_path)
     """A Gemini-only pause must not gate the Claude-first hop in with_retries."""
     health = _health_path(monkeypatch, tmp_path)
     _activate_gemini_pause(health)
-    _patch_claude(monkeypatch, True, GOOD_ANALYSIS)
+    _patch_claude(monkeypatch, True, dict(GOOD_ANALYSIS))
     gemini_calls = _patch_gemini_once(monkeypatch, GEMINI_ANALYSIS)
 
-    assert telegram_bot.analyze_food_photo_with_retries(object(), b"img") == GOOD_ANALYSIS
+    result = telegram_bot.analyze_food_photo_with_retries(object(), b"img")
+
+    assert result == {**GOOD_ANALYSIS, "analyzed_by": "claude"}
     assert gemini_calls == []
 
 
@@ -676,3 +679,32 @@ def test_retry_failed_upload_uses_claude_during_gemini_pause(monkeypatch, tmp_pa
     )
     assert gemini_calls == []
     assert not photo.exists()          # logged uploads are discarded
+
+
+# ── Observability helpers: is_enabled / status_label ─────────────────
+
+def test_is_enabled_tracks_only_the_knob(monkeypatch):
+    monkeypatch.delenv("CLAUDE_ANALYZER_ENABLED", raising=False)
+    assert claude_analyzer.is_enabled() is False
+
+    monkeypatch.setenv("CLAUDE_ANALYZER_ENABLED", "1")
+    monkeypatch.setattr(claude_analyzer.shutil, "which", lambda *a, **k: None)
+    # Knob on, CLI absent: enabled but not configured.
+    assert claude_analyzer.is_enabled() is True
+    assert claude_analyzer.is_configured() is False
+
+
+@pytest.mark.parametrize("enabled,cli,expected", [
+    (None, "/usr/local/bin/claude", "off"),
+    ("0", "/usr/local/bin/claude", "off"),
+    ("1", None, "enabled, CLI missing"),
+    ("1", "/usr/local/bin/claude", "enabled"),
+])
+def test_status_label_states(monkeypatch, enabled, cli, expected):
+    if enabled is None:
+        monkeypatch.delenv("CLAUDE_ANALYZER_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("CLAUDE_ANALYZER_ENABLED", enabled)
+    monkeypatch.setattr(claude_analyzer.shutil, "which", lambda *a, **k: cli)
+
+    assert claude_analyzer.status_label() == expected

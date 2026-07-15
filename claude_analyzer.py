@@ -43,6 +43,11 @@ def _cli_path() -> Optional[str]:
     return shutil.which(os.environ.get("CLAUDE_ANALYZER_BIN", "claude") or "claude")
 
 
+def is_enabled() -> bool:
+    """The CLAUDE_ANALYZER_ENABLED knob alone, ignoring CLI presence."""
+    return parse_boolish(os.environ.get("CLAUDE_ANALYZER_ENABLED")) is True
+
+
 def is_configured() -> bool:
     """Enabled by knob AND the CLI is actually installed.
 
@@ -50,9 +55,16 @@ def is_configured() -> bool:
     own stored login, and a missing/expired token simply fails the run —
     which the caller already treats as "fall back to Gemini".
     """
-    if parse_boolish(os.environ.get("CLAUDE_ANALYZER_ENABLED")) is not True:
-        return False
-    return _cli_path() is not None
+    return is_enabled() and _cli_path() is not None
+
+
+def status_label() -> str:
+    """One-phrase analyzer state for /config and /doctor."""
+    if not is_enabled():
+        return "off"
+    if _cli_path() is None:
+        return "enabled, CLI missing"
+    return "enabled"
 
 
 def _build_prompt(image_path: str) -> str:
