@@ -92,6 +92,22 @@ chmod 600 "$CONFIG_FILE"
 mkdir -p "$HOME/.offline_queue"
 rm -rf "$HOME/.offline_queue/.process_lock"
 
+# Termux:Boot — restart the watcher after a phone reboot. Requires the
+# Termux:Boot app (installed and opened once); scripts in ~/.termux/boot
+# run when the device boots. pgrep-guarded so a boot race can't start two.
+BOOT_DIR="$HOME/.termux/boot"
+mkdir -p "$BOOT_DIR"
+cat > "$BOOT_DIR/start-calorie-tracker.sh" <<'BOOT'
+#!/data/data/com.termux/files/usr/bin/sh
+termux-wake-lock
+# Let the network come up after boot before the first ping.
+sleep 20
+pgrep -f android_watcher.sh >/dev/null 2>&1 || \
+  nohup bash "$HOME/android_watcher.sh" >> "$HOME/watcher.log" 2>&1 &
+BOOT
+chmod +x "$BOOT_DIR/start-calorie-tracker.sh"
+echo "Installed Termux:Boot auto-start script."
+
 python3 "$HOME/upload_photo.py" --ping
 
 termux-wake-lock || true
