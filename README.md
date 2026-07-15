@@ -266,7 +266,7 @@ Watcher behavior worth knowing: new photos are marked as handled after a success
 
 If Pillow is installed in Termux (`pip install pillow`, optional), photos are recompressed to ≤1600px JPEG before upload — a 10–25MB camera shot becomes a few hundred KB on cellular — while dedup still keys on the original file's hash. Without Pillow (or for undecodable HEIC), originals upload unchanged.
 
-If your camera saves somewhere other than `DCIM/Camera`, set `CAMERA_DIR` (or `CALORIE_CAMERA_DIR`) in the environment for both the watcher and manual runs. Advanced env-only knobs: `PING_INTERVAL_SECONDS` (heartbeat, default 900), `SEED_FRESH_MINUTES`, `CALORIE_HOUSEKEEP_POLLS`, `CALORIE_RECOMPRESS_MAX_EDGE` (0 disables recompression) / `CALORIE_RECOMPRESS_JPEG_QUALITY`, `CALORIE_TRACKER_SERVER_URLS`, `CALORIE_TRACKER_ANDROID_CONFIG`, `QUEUE_BATCH_LIMIT`, `QUEUE_LOCK_STALE_SECONDS`, `ANDROID_VPN_ACTIVE`.
+If your camera saves somewhere other than `DCIM/Camera`, set `CAMERA_DIR` (or `CALORIE_CAMERA_DIR`) in the environment for both the watcher and manual runs. Advanced env-only knobs: `PING_INTERVAL_SECONDS` (heartbeat, default 900), `SEED_FRESH_MINUTES`, `CALORIE_HOUSEKEEP_POLLS`, `CALORIE_RECOMPRESS_MAX_EDGE` (0 disables recompression) / `CALORIE_RECOMPRESS_JPEG_QUALITY`, `CALORIE_TRACKER_SERVER_URLS`, `CALORIE_TRACKER_ANDROID_CONFIG`, `QUEUE_BATCH_LIMIT`, `QUEUE_LOCK_STALE_SECONDS`, `SYNC_LOOKBACK_DAYS`, `ANDROID_VPN_ACTIVE`.
 
 ### iPhone
 
@@ -296,7 +296,7 @@ What happens when parts of the pipeline are down:
 | Photo taken while the server is unreachable (Android) | Queued in `~/.offline_queue`; drained automatically after the next successful heartbeat. Photos the server permanently rejects are quarantined in `~/.offline_queue/rejected/` instead of blocking the queue. |
 | Uploader crashes on a photo | Retried on the next polls up to 3 attempts, then recorded with a loud log line; the nightly sync can still recover it. |
 | Photo taken just before starting the watcher | Uploaded by the first polls — startup seeding skips photos newer than `SEED_FRESH_MINUTES` (default 15). Older backlog is not mass-uploaded. |
-| Photo taken while the watcher was stopped | Recovered by the nightly `--sync` (covers today and yesterday) once the watcher is running again, or by a manual `--sync`. |
+| Photo taken while the watcher was stopped | Recovered automatically: the watcher runs a catch-up `--sync` 30s after every start (with Termux:Boot, that means right after reboot), plus the nightly 23:00 sync. The window covers `SYNC_LOOKBACK_DAYS` (default 2, up to 30 for long outages). |
 | Server crashes mid-analysis | On restart, staged uploads move to the failed store (recover with `/retry_failed`) and orphaned in-flight reservations are released so retries aren't misreported as duplicates. |
 | Phone stops reaching the server | The bot warns you in Telegram once the heartbeat is older than `HEARTBEAT_STALE_WARNING_HOURS` (default 2h). |
 | Gemini daily quota exhausted | 12h circuit breaker; failed uploads are kept with keep/discard buttons instead of being dropped. |
