@@ -23,12 +23,16 @@ def timestamp() -> str:
 
 def load(path=DEFAULT_PATH, warn=print) -> dict:
     try:
-        return json.loads(Path(path).read_text())
+        data = json.loads(Path(path).read_text())
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
     except OSError as e:
         warn(f"Could not read service health file: {e}")
         return {}
+    # Valid JSON that is not an object gets the same fail-open treatment as
+    # invalid JSON: every consumer (and update()'s mutate callbacks) assumes
+    # a dict, and a crash here at boot would be unrecoverable.
+    return data if isinstance(data, dict) else {}
 
 
 def save(data, path=DEFAULT_PATH, warn=print):

@@ -387,10 +387,15 @@ class TelegramBot:
         except Exception as e:
             log.error(f"Failed to send photo: {self._redact(e)}")
             if caption:
-                # Mirror send_message: retry without formatting/caption so a
-                # caption problem cannot lose the image itself.
+                # Mirror send_message exactly: the retry KEEPS the caption and
+                # drops only parse_mode — the meal card text is the payload
+                # this method exists to deliver, so it is never sacrificed
+                # (worst case the user sees raw <b> tags). Known trade-off: a
+                # response lost AFTER Telegram processed the first post makes
+                # this retry produce a duplicate photo — cosmetic, and rarer
+                # than the transient failures the retry recovers from.
                 try:
-                    return _post({"chat_id": chat_id})
+                    return _post({"chat_id": chat_id, "caption": caption})
                 except Exception:
                     return None
             return None
@@ -761,8 +766,15 @@ def _compress_photo_for_echo(image_bytes: bytes) -> Optional[bytes]:
         return buf.getvalue()
     except Exception as e:
         log.warning(f"Could not compress photo for echo: {e}")
-        # Telegram's sendPhoto cap is 10MB; small originals can go as-is.
-        return image_bytes if len(image_bytes) <= 9_000_000 else None
+        # Pass the original through only when Telegram will actually accept
+        # it (sendPhoto takes JPEG/PNG/WebP, capped at 10MB). Undecodable
+        # bytes in any other format would be a guaranteed-futile multipart
+        # upload (possibly two, with the retry) on every affected meal.
+        if len(image_bytes) > 9_000_000:
+            return None
+        is_jpeg = image_bytes[:3] == b"\xff\xd8\xff"
+        is_png = image_bytes[:8] == b"\x89PNG\r\n\x1a\n"
+        return image_bytes if (is_jpeg or is_png) else None
 
 
 def _echo_meal_photo(bot: TelegramBot, chat_id: int, image_bytes: bytes, result_text: str):
@@ -4279,11 +4291,16 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
                     database.mark_photo_hash_status(ALLOWED_CHAT_ID, hsh, "saved", meal_id, source="api_auto")
                     log.info(f"  ✅ API Food: {analysis.get('meal_description')} (~{analysis.get('total_calories')} kcal)")
                     result_text = format_food_result(ALLOWED_CHAT_ID, analysis)
+                    # Discard the staged file BEFORE the echo: the meal is
+                    # saved and hash-marked, and the echo's PIL decode is the
+                    # biggest memory spike on this path — dying inside it must
+                    # not leave a pending file for the boot sweep to "recover"
+                    # into a false failed-upload notice.
+                    _discard_api_upload(staged_path)
                     _echo_meal_photo(
                         bot, ALLOWED_CHAT_ID, bytes_data,
                         f"📲 <b>Auto-Logged from {device_display}:</b>\n\n" + result_text,
                     )
-                    _discard_api_upload(staged_path)
                 else:
                     log.info("  ⏭️ API Upload: Not food")
                     database.mark_photo_hash_status(ALLOWED_CHAT_ID, hsh, "skipped", source="api_auto")
@@ -4420,6 +4437,10 @@ def _poison_update_should_skip(bot: TelegramBot, update_id) -> bool:
     if n <= POISON_UPDATE_MAX_ATTEMPTS:
         return False
     log.error(f"☠️ Skipping poison update {update_id} after {n - 1} fatal attempts.")
+    # NOTE: the count only ever reaches this threshold for updates whose
+    # processing KILLED the process — _poison_update_clear() removes the
+    # entry once an update completes, so healthy updates that merely share
+    # re-delivered batches with a poison one never accumulate attempts.
     if n == POISON_UPDATE_MAX_ATTEMPTS + 1:  # notify once, not on every re-sight
         try:
             bot.send_message(
@@ -4433,31 +4454,77 @@ def _poison_update_should_skip(bot: TelegramBot, update_id) -> bool:
     return True
 
 
-def _record_boot_and_maybe_alert(bot: TelegramBot):
-    """Crash-loop tripwire: 3+ boots inside 10 minutes is never normal."""
-    now = datetime.now()
-    counted = {}
+def _poison_update_clear(update_id):
+    """Forget an update's attempt count once the poll loop survived it.
+
+    Without this, healthy updates sharing a re-delivered batch with a
+    poison one would accumulate attempts in lockstep and eventually be
+    skipped with a false "crashed me repeatedly" notice.
+    """
+    if update_id is None:
+        return
+    key = str(update_id)
 
     def mutate(data):
+        attempts = data.get("update_attempts")
+        if isinstance(attempts, dict) and key in attempts:
+            attempts.pop(key, None)
+            data["update_attempts"] = attempts
+
+    service_health.update(mutate, SERVICE_HEALTH_PATH, warn=log.warning)
+
+
+def _record_clean_shutdown():
+    """Stamp an orderly exit so the next boot doesn't count as a crash."""
+
+    def mutate(data):
+        data["last_clean_shutdown"] = service_health.timestamp()
+
+    service_health.update(mutate, SERVICE_HEALTH_PATH, warn=log.warning)
+
+
+def _record_boot_and_maybe_alert(bot: TelegramBot):
+    """Crash-loop tripwire: 3+ CRASH boots inside 10 minutes, alerted once.
+
+    A boot following a clean shutdown (systemctl restart, deploys) is normal
+    operation and never counts; only boots with no recent clean-shutdown
+    stamp — crashes, OOM kills — feed the alarm, and the alert latches for
+    10 minutes so a live crash loop doesn't also spam the chat.
+    """
+    now = datetime.now()
+    state = {}
+
+    def _within(data, key, seconds):
+        try:
+            return 0 <= (now - datetime.fromisoformat(data.get(key, ""))).total_seconds() <= seconds
+        except (ValueError, TypeError):
+            return False
+
+    def mutate(data):
+        clean_restart = _within(data, "last_clean_shutdown", 300)
+        data.pop("last_clean_shutdown", None)  # consume the stamp
         boots = []
-        for ts in data.get("recent_boots") or []:
+        for ts in data.get("recent_crash_boots") or []:
             try:
                 if (now - datetime.fromisoformat(ts)).total_seconds() <= 600:
                     boots.append(ts)
             except (ValueError, TypeError):
                 pass
-        boots.append(now.isoformat(timespec="seconds"))
-        data["recent_boots"] = boots[-10:]
-        counted["n"] = len(boots)
+        if not clean_restart:
+            boots.append(now.isoformat(timespec="seconds"))
+        data["recent_crash_boots"] = boots[-10:]
+        state["n"] = len(boots)
+        state["alert"] = len(boots) >= 3 and not _within(data, "last_boot_alert_at", 600)
+        if state["alert"]:
+            data["last_boot_alert_at"] = now.isoformat(timespec="seconds")
 
     service_health.update(mutate, SERVICE_HEALTH_PATH, warn=log.warning)
-    n = counted.get("n", 1)
-    if n >= 3:
-        log.warning(f"⚠️ {n} boots within 10 minutes — possible crash loop.")
+    if state.get("alert"):
+        log.warning(f"⚠️ {state['n']} crash boots within 10 minutes — possible crash loop.")
         try:
             bot.send_message(
                 ALLOWED_CHAT_ID,
-                f"⚠️ <b>I have restarted {n} times in the last 10 minutes.</b>\n\n"
+                f"⚠️ <b>I have crash-restarted {state['n']} times in the last 10 minutes.</b>\n\n"
                 "Something may be crashing me repeatedly. "
                 "Check recent errors with <code>/logs 20</code>.",
             )
@@ -4752,9 +4819,9 @@ def main():
 
             for update in updates:
                 update_id = update.get("update_id")
-                if _poison_update_should_skip(bot, update_id):
-                    continue
                 try:
+                    if _poison_update_should_skip(bot, update_id):
+                        continue
                     _process_update(gemini_client, bot, update)
                 except Exception as e:
                     # Contain per-update failures: an escape here would kill
@@ -4762,8 +4829,15 @@ def main():
                     # re-delivered update. The durable attempt ledger above
                     # backstops even hard kills (OOM/SIGKILL) this cannot see.
                     log.error(f"Unhandled error processing update {update_id}: {bot._redact(e)}")
+                # Survived (processed or contained): forget the attempt count
+                # so healthy batch-mates of a poison update never accumulate.
+                # A skipped poison update `continue`s past this on purpose.
+                _poison_update_clear(update_id)
 
     except KeyboardInterrupt:
+        # SIGTERM is routed here too, so systemctl stop/restart and deploys
+        # stamp a clean shutdown — the crash-loop tripwire ignores them.
+        _record_clean_shutdown()
         log.info("\n👋 Bot stopped.")
 
 

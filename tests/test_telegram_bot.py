@@ -3107,14 +3107,18 @@ def test_send_photo_multipart_shape_and_caption():
     assert call["data"]["parse_mode"] == "HTML"
 
 
-def test_send_photo_retries_captionless_then_gives_up():
+def test_send_photo_retry_keeps_caption_drops_parse_mode():
+    """The meal card rides in the caption — the retry must never sacrifice
+    it (mirror of send_message's parse_mode-only fallback)."""
     bot = telegram_bot.TelegramBot("123:abc")
     bot.session = _FakeSession([OSError("network"), {"ok": True, "result": {"message_id": 9}}])
     assert bot.send_photo(12345, b"x", caption="cap") == {"message_id": 9}
-    assert "caption" not in bot.session.calls[1]["data"]
+    retry = bot.session.calls[1]["data"]
+    assert retry["caption"] == "cap"
+    assert "parse_mode" not in retry
 
     bot.session = _FakeSession([OSError("network"), OSError("network")])
-    assert bot.send_photo(12345, b"x", caption="cap") is None
+    assert bot.send_photo(12345, b"x", caption="cap") is None  # caller falls back to text
 
     bot.session = _FakeSession([{"ok": False, "description": "bad"}])
     assert bot.send_photo(12345, b"x") is None
@@ -3125,10 +3129,17 @@ def test_compress_photo_for_echo_shapes():
     assert out[:3] == b"\xff\xd8\xff"  # decodable image -> recompressed JPEG
 
     junk_small = b"\xff\xd8\xff" + b"not really an image"
-    assert telegram_bot._compress_photo_for_echo(junk_small) == junk_small  # sent as-is
+    assert telegram_bot._compress_photo_for_echo(junk_small) == junk_small  # JPEG magic: as-is
 
     junk_huge = b"\xff\xd8\xff" + bytes(9_500_000)
-    assert telegram_bot._compress_photo_for_echo(junk_huge) is None  # undecodable + oversize
+    assert telegram_bot._compress_photo_for_echo(junk_huge) is None  # oversize
+
+    # Telegram only accepts JPEG/PNG/WebP: undecodable bytes in any other
+    # format must NOT be passed through to a guaranteed-futile upload.
+    tiff_junk = b"II*\x00" + b"telegram would reject this"
+    assert telegram_bot._compress_photo_for_echo(tiff_junk) is None
+    png_junk = b"\x89PNG\r\n\x1a\n" + b"truncated png"
+    assert telegram_bot._compress_photo_for_echo(png_junk) == png_junk
 
 
 def test_echo_meal_photo_caption_vs_split_vs_fallback(monkeypatch):
@@ -3226,24 +3237,64 @@ def test_poison_update_ledger_prunes_to_newest_twenty(monkeypatch, tmp_path):
     assert "1029" in attempts and "1000" not in attempts
 
 
-def test_rapid_restart_alert_fires_on_third_boot(monkeypatch, tmp_path):
+def test_rapid_restart_alert_fires_on_third_crash_boot_and_latches(monkeypatch, tmp_path):
     _poison_setup(monkeypatch, tmp_path)
     bot = FakeBot()
     telegram_bot._record_boot_and_maybe_alert(bot)
     telegram_bot._record_boot_and_maybe_alert(bot)
     assert bot.sent == []
     telegram_bot._record_boot_and_maybe_alert(bot)
-    assert "restarted 3 times in the last 10 minutes" in bot.sent[-1]["text"]
+    assert "crash-restarted 3 times in the last 10 minutes" in bot.sent[-1]["text"]
+    # Latched: a live crash loop must not also spam the chat every boot.
+    telegram_bot._record_boot_and_maybe_alert(bot)
+    assert len(bot.sent) == 1
+
+
+def test_rapid_restart_alert_ignores_clean_restarts(monkeypatch, tmp_path):
+    """systemctl restart / deploy bursts stamp a clean shutdown and never
+    count as crashes — the exact false alarm the review flagged."""
+    _poison_setup(monkeypatch, tmp_path)
+    bot = FakeBot()
+    for _ in range(4):
+        telegram_bot._record_clean_shutdown()
+        telegram_bot._record_boot_and_maybe_alert(bot)
+    assert bot.sent == []
 
 
 def test_rapid_restart_alert_ignores_old_boots(monkeypatch, tmp_path):
     _poison_setup(monkeypatch, tmp_path)
     health = tmp_path / "health.json"
     stale = (datetime.now() - timedelta(minutes=30)).isoformat(timespec="seconds")
-    service_health.save({"recent_boots": [stale, stale, "not-a-timestamp"]}, health)
+    service_health.save({"recent_crash_boots": [stale, stale, "not-a-timestamp"]}, health)
     bot = FakeBot()
     telegram_bot._record_boot_and_maybe_alert(bot)
-    assert bot.sent == []  # stale + junk entries pruned; this is boot #1
+    assert bot.sent == []  # stale + junk entries pruned; this is crash-boot #1
+
+
+def test_poison_clear_protects_healthy_batch_mates(monkeypatch, tmp_path):
+    """A healthy update re-delivered alongside a poison one is cleared after
+    every survived pass, so it can never be falsely declared poison."""
+    _poison_setup(monkeypatch, tmp_path)
+    bot = FakeBot()
+    for _ in range(telegram_bot.POISON_UPDATE_MAX_ATTEMPTS + 3):
+        assert telegram_bot._poison_update_should_skip(bot, 555) is False  # healthy A
+        telegram_bot._poison_update_clear(555)                             # loop survived A
+        telegram_bot._poison_update_should_skip(bot, 556)                  # poison B, never cleared
+    assert bot.sent[-1:] == [] or "crashed me repeatedly" in bot.sent[-1]["text"]
+    # B crossed the threshold; A never did.
+    attempts = service_health.load(tmp_path / "health.json")["update_attempts"]
+    assert "555" not in attempts
+    assert attempts["556"] > telegram_bot.POISON_UPDATE_MAX_ATTEMPTS
+
+
+def test_service_health_load_tolerates_non_dict_json(tmp_path):
+    """Valid-JSON-but-not-an-object must fail open like invalid JSON: a
+    crash here at boot would be an unrecoverable startup loop."""
+    health = tmp_path / "health.json"
+    health.write_text("[1, 2, 3]")
+    assert service_health.load(health) == {}
+    telegram_bot.service_health.update(lambda d: d.setdefault("k", 1), health)
+    assert service_health.load(health) == {"k": 1}
 
 
 def test_process_update_rejects_unauthorized_chat(monkeypatch, tmp_path):
