@@ -1318,7 +1318,7 @@ def test_get_file_wraps_connection_error_without_token(monkeypatch):
     bot = telegram_bot.TelegramBot("123:SECRETTOKEN")
     monkeypatch.setattr(bot, "_call", lambda method, **kwargs: {"file_path": "photos/file_1.jpg"})
 
-    def fake_get(url, timeout=None):
+    def fake_get(url, timeout=None, stream=False):
         raise requests.exceptions.ConnectTimeout(f"timed out connecting to {url}")
 
     monkeypatch.setattr(bot.session, "get", fake_get)

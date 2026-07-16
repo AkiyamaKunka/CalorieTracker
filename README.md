@@ -190,10 +190,17 @@ Restart=always
 RestartSec=5
 # Type=notify requires the bot's READY=1 (sent before the boot sweep, so a
 # slow sweep cannot trip the start timeout); WatchdogSec restarts a hung —
-# not just dead — bot: the poll loop pets WATCHDOG=1 every iteration and
-# slices its long backoff sleeps, so silence for 120s means a real hang.
+# not just dead — bot. A dedicated heartbeat thread pets WATCHDOG=1 every
+# ~30s for as long as the bot's shared progress clock is fresh (stamped by
+# the poll loop, long retries/downloads, and backoff sleeps), so slow-but-
+# healthy work is never killed and only a true multi-minute hang starves
+# the pets.
 Type=notify
 WatchdogSec=120
+# Boot can legitimately send Telegram messages before the first poll
+# (crash-loop alert, stranded-upload sweep summary); give READY=1 headroom
+# beyond the default 90s.
+TimeoutStartSec=180
 # Graceful stops join in-flight photo analyses (up to the analyzer's 120s
 # timeout); outlast that before systemd escalates to SIGKILL.
 TimeoutStopSec=180

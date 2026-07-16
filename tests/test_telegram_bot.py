@@ -3774,6 +3774,10 @@ def test_crash_boot_tripwire_sees_boot_sweep_crashes(monkeypatch, tmp_path):
     monkeypatch.setattr(telegram_bot, "TelegramBot", lambda token: FakeBot())
     monkeypatch.setattr(telegram_bot, "genai", SimpleNamespace(Client=lambda api_key: object()))
     monkeypatch.setattr(telegram_bot.signal, "signal", lambda *a, **k: None)
+    # main() starts a heartbeat thread it (rightly) never stops — one per
+    # process in prod, but three main() calls here would leak three threads
+    # into the rest of the suite.
+    monkeypatch.setattr(telegram_bot, "_start_watchdog_heartbeat", lambda: None)
 
     def _sweep_crash(bot):
         raise RuntimeError("boot sweep crash")
@@ -4802,7 +4806,7 @@ def test_get_updates_persistent_conflict_backs_off_with_a_cap(monkeypatch):
     slept = []
     monkeypatch.setattr(telegram_bot.time, "sleep", lambda s: slept.append(s))
 
-    # Sleeps arrive in <=30s watchdog-pet slices; the TOTAL per failure is
+    # Sleeps arrive in <=30s progress-stamp slices; the TOTAL per failure is
     # the backoff contract, so aggregate the slices of each get_updates call.
     totals = []
     for _ in range(12):
@@ -4815,7 +4819,7 @@ def test_get_updates_persistent_conflict_backs_off_with_a_cap(monkeypatch):
     assert max(totals) >= 60, f"12 consecutive failures never escalated: {totals}"
     assert max(totals) <= 300, "backoff must stay capped (~5 min) so recovery is quick"
     assert all(s <= 30 for s in slept), \
-        "every sleep slice must stay under WatchdogSec so backoff keeps petting"
+        "every sleep slice must stay short so backoff keeps stamping progress"
 
 
 def test_gemini_retry_loop_is_bounded_with_clamped_sleeps(monkeypatch, tmp_path):
@@ -5092,33 +5096,310 @@ def test_sd_notify_swallows_oserror(monkeypatch, tmp_path):
     telegram_bot._sd_notify("WATCHDOG=1")
 
 
-def test_long_backoff_sleep_is_sliced_with_watchdog_pets(notify_socket, monkeypatch):
+def test_long_backoff_sleep_is_sliced_with_progress_stamps(notify_socket, monkeypatch):
     slept = []
+    stamps = []
     monkeypatch.setattr(telegram_bot.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(telegram_bot, "_stamp_progress", lambda: stamps.append(len(slept)))
 
-    telegram_bot._sleep_with_watchdog_pets(300)
+    telegram_bot._sleep_with_progress_stamps(300)
 
     assert sum(slept) == 300, "slicing must preserve the total backoff exactly"
-    assert all(s <= 30 for s in slept), "every slice must stay under WatchdogSec"
-    pets = _drain_datagrams(notify_socket)
-    assert pets == [b"WATCHDOG=1"] * (len(slept) - 1), \
-        "a pet must land between every pair of consecutive slices"
+    assert all(s <= 30 for s in slept), "every slice must stay short"
+    assert stamps == list(range(1, len(slept))), \
+        "a progress stamp must land between every pair of consecutive slices"
+    assert _drain_datagrams(notify_socket) == [], \
+        "the heartbeat thread is the ONLY petter; sleeps only stamp progress"
 
 
-def test_short_backoff_sleep_is_a_single_slice_with_no_pet(notify_socket, monkeypatch):
+def test_short_backoff_sleep_is_a_single_slice_with_no_stamp(monkeypatch):
     slept = []
+    stamps = []
     monkeypatch.setattr(telegram_bot.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(telegram_bot, "_stamp_progress", lambda: stamps.append(1))
 
-    telegram_bot._sleep_with_watchdog_pets(5)
+    telegram_bot._sleep_with_progress_stamps(5)
 
     assert slept == [5]
+    assert stamps == []
+
+
+class _FakeStopEvent:
+    """stop_event.wait(interval) → False for `ticks` heartbeats, then True."""
+
+    def __init__(self, ticks):
+        self.remaining = ticks
+        self.waits = []
+
+    def wait(self, interval):
+        self.waits.append(interval)
+        if self.remaining <= 0:
+            return True
+        self.remaining -= 1
+        return False
+
+
+def test_heartbeat_pets_while_progress_is_fresh(notify_socket):
+    telegram_bot._stamp_progress()
+    assert telegram_bot._watchdog_heartbeat_once() is True
+    assert _drain_datagrams(notify_socket) == [b"WATCHDOG=1"]
+
+
+def test_heartbeat_withholds_pet_when_progress_is_stale(notify_socket, monkeypatch):
+    monkeypatch.setattr(
+        telegram_bot, "_last_progress_monotonic",
+        telegram_bot.time.monotonic() - (telegram_bot.WATCHDOG_HANG_THRESHOLD_SECONDS + 1))
+    assert telegram_bot._watchdog_heartbeat_once() is False
+    assert _drain_datagrams(notify_socket) == [], \
+        "a stale progress clock must starve the watchdog so systemd restarts us"
+
+
+def test_stamp_progress_resets_the_clock(monkeypatch):
+    monkeypatch.setattr(
+        telegram_bot, "_last_progress_monotonic",
+        telegram_bot.time.monotonic() - 10_000)
+    assert telegram_bot._progress_age_seconds() > 9_000
+    telegram_bot._stamp_progress()
+    assert telegram_bot._progress_age_seconds() < 60
+
+
+def test_heartbeat_loop_pets_every_interval_while_fresh(notify_socket):
+    telegram_bot._stamp_progress()
+    stop_event = _FakeStopEvent(3)
+
+    telegram_bot._watchdog_heartbeat_loop(stop_event)
+
+    assert _drain_datagrams(notify_socket) == [b"WATCHDOG=1"] * 3
+    assert all(w == telegram_bot._WATCHDOG_HEARTBEAT_INTERVAL_SECONDS
+               for w in stop_event.waits), \
+        "each heartbeat waits one interval so pets stay well inside WatchdogSec"
+
+
+def test_heartbeat_loop_logs_a_stall_once_not_every_tick(notify_socket, monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setattr(
+        telegram_bot, "_last_progress_monotonic",
+        telegram_bot.time.monotonic() - (telegram_bot.WATCHDOG_HANG_THRESHOLD_SECONDS + 100))
+
+    with caplog.at_level(logging.ERROR, logger="calorie_bot"):
+        telegram_bot._watchdog_heartbeat_loop(_FakeStopEvent(5))
+
     assert _drain_datagrams(notify_socket) == []
+    stall_logs = [r for r in caplog.records if "Watchdog pets withheld" in r.getMessage()]
+    assert len(stall_logs) == 1, \
+        "the imminent watchdog kill must be journaled exactly once, not every 30s"
 
 
-def test_poll_outage_alert_fires_in_chat_and_wechat_once(monkeypatch):
+def test_heartbeat_thread_is_daemon_and_stoppable():
+    import threading as threading_mod
+
+    # Diff against pre-existing threads: another test may legitimately have
+    # started (and by prod semantics never stopped) its own heartbeat.
+    before = set(threading_mod.enumerate())
+    stop_event = telegram_bot._start_watchdog_heartbeat()
+    thread = next(t for t in threading_mod.enumerate()
+                  if t.name == "watchdog-heartbeat" and t not in before)
+    try:
+        assert thread.daemon, \
+            "daemon so interpreter-shutdown joins of upload threads keep being petted"
+    finally:
+        stop_event.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+def test_retry_all_failed_stamps_progress_before_each_photo(monkeypatch):
+    from pathlib import Path as PathMod
+
+    calls = []
+    paths = [PathMod(f"/failed/photo_{i}.jpg") for i in range(3)]
+    monkeypatch.setattr(telegram_bot, "_failed_upload_items", lambda: paths)
+    monkeypatch.setattr(telegram_bot, "_gemini_quota_pause_summary", lambda: "")
+    monkeypatch.setattr(telegram_bot, "_gemini_failure_context", lambda: "context")
+    monkeypatch.setattr(telegram_bot, "_stamp_progress", lambda: calls.append("stamp"))
+
+    def fake_retry(client, path):
+        calls.append("analyze")
+        return {"status": "analysis_failed", "name": path.name, "message": "kept"}
+
+    monkeypatch.setattr(telegram_bot, "_retry_failed_upload_path", fake_retry)
+
+    telegram_bot.retry_all_failed_uploads(None, limit=3)
+
+    assert calls == ["stamp", "analyze"] * 3, \
+        "every photo gets a fresh watchdog budget BEFORE its slow synchronous analysis"
+
+
+def test_get_file_streams_the_download_and_stamps_progress_per_chunk(monkeypatch):
+    bot = telegram_bot.TelegramBot("tok")
+    monkeypatch.setattr(bot, "_call", lambda method, **kw: {"file_path": "photos/f.jpg"})
+
+    chunks = [b"a" * 10, b"b" * 10, b"c" * 3]
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, chunk_size):
+            assert chunk_size > 0
+            yield from chunks
+
+    captured = {}
+
+    def fake_get(url, timeout=None, stream=False):
+        captured["stream"] = stream
+        return FakeResp()
+
+    stamps = []
+    monkeypatch.setattr(telegram_bot, "_stamp_progress", lambda: stamps.append(1))
+    monkeypatch.setattr(bot.session, "get", fake_get)
+
+    assert bot.get_file("file-id") == b"".join(chunks)
+    assert captured["stream"] is True, "the download must stream, not buffer in requests"
+    assert len(stamps) == len(chunks), \
+        "each streamed chunk is progress: a slow 20MB download must keep the clock fresh"
+
+
+def _poll_fail(bot, times):
+    # quiet=True: streak and alert mechanics run, penalty sleep is skipped.
+    for _ in range(times):
+        bot._note_poll_failure("Telegram network-error calling getUpdates", quiet=True)
+
+
+def test_poll_outage_alert_latch_survives_a_restart(monkeypatch, tmp_path):
+    """A restart mid-outage (crash, watchdog kill — both plausible exactly
+    while Telegram is unreachable) must NOT re-alert: the latch persists in
+    service_health and the next process honors it."""
+    health = tmp_path / "health.json"
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", health)
+
+    alerts = []
+    monkeypatch.setattr(telegram_bot, "push_wechat",
+                        lambda title, content: alerts.append("wechat"))
+
+    bot = telegram_bot.TelegramBot("tok")
+    monkeypatch.setattr(bot, "send_message",
+                        lambda chat_id, text, **kw: alerts.append("telegram"))
+    _poll_fail(bot, telegram_bot.TelegramBot.POLL_ALERT_STREAK)
+    assert alerts == ["wechat", "telegram"], "first streak alerts both channels once"
+    assert service_health.load(health)["telegram"]["poll_alert_latched_at"]
+
+    bot2 = telegram_bot.TelegramBot("tok")  # the outage now restarts the bot
+    monkeypatch.setattr(bot2, "send_message",
+                        lambda chat_id, text, **kw: alerts.append("telegram"))
+    _poll_fail(bot2, telegram_bot.TelegramBot.POLL_ALERT_STREAK + 3)
+    assert alerts == ["wechat", "telegram"], \
+        "the persisted latch suppresses the re-alert after a mid-outage restart"
+
+
+def test_poll_alert_latch_clears_on_success_and_rearms_for_next_outage(monkeypatch, tmp_path):
+    health = tmp_path / "health.json"
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", health)
+    alerts = []
+    monkeypatch.setattr(telegram_bot, "push_wechat",
+                        lambda title, content: alerts.append("wechat"))
+
+    bot = telegram_bot.TelegramBot("tok")
+    monkeypatch.setattr(bot, "send_message",
+                        lambda chat_id, text, **kw: alerts.append("telegram"))
+    _poll_fail(bot, telegram_bot.TelegramBot.POLL_ALERT_STREAK)
+    assert len(alerts) == 2
+
+    monkeypatch.setattr(bot, "_call", lambda method, **kw: [])
+    assert bot.get_updates() == []  # recovery: streak reset, latch cleared
+    assert "poll_alert_latched_at" not in service_health.load(health)["telegram"]
+
+    fresh = telegram_bot.TelegramBot("tok")  # a later boot hits a new outage
+    monkeypatch.setattr(fresh, "send_message",
+                        lambda chat_id, text, **kw: alerts.append("telegram"))
+    _poll_fail(fresh, telegram_bot.TelegramBot.POLL_ALERT_STREAK)
+    assert len(alerts) == 4, "a recovered outage re-arms the alert for the next one"
+
+
+def test_stale_persisted_latch_is_swept_on_first_successful_poll(monkeypatch, tmp_path):
+    """Latch on disk but the outage ended while the bot was down: the first
+    successful poll of the boot must clear it, or the NEXT outage's alert
+    would be silently swallowed."""
+    health = tmp_path / "health.json"
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", health)
+    service_health.update(
+        lambda data: data.setdefault("telegram", {}).update(
+            {"poll_alert_latched_at": "2026-01-01T00:00:00"}),
+        health)
+
+    alerts = []
+    monkeypatch.setattr(telegram_bot, "push_wechat",
+                        lambda title, content: alerts.append("wechat"))
+    bot = telegram_bot.TelegramBot("tok")
+    monkeypatch.setattr(bot, "send_message",
+                        lambda chat_id, text, **kw: alerts.append("telegram"))
+    monkeypatch.setattr(bot, "_call", lambda method, **kw: [])
+
+    assert bot.get_updates() == []  # this boot's first poll succeeds
+    assert "poll_alert_latched_at" not in service_health.load(health)["telegram"]
+
+    _poll_fail(bot, telegram_bot.TelegramBot.POLL_ALERT_STREAK)
+    assert len(alerts) == 2, "the swept latch must not swallow the next outage's alert"
+
+
+def test_main_boot_order_heartbeat_ready_alert_and_stopping(monkeypatch):
+    """Boot contract for Type=notify: the heartbeat petter runs BEFORE
+    READY=1 (WatchdogSec enforcement starts at READY), and READY=1 precedes
+    everything that can send Telegram messages (crash-loop alert, sweep) so
+    a slow boot is not killed by TimeoutStartSec. Shutdown sends STOPPING=1
+    and stamps the clean-shutdown marker."""
+    order = []
+
+    class BootBot:
+        def __init__(self, token):
+            order.append("bot")
+
+        def get_updates(self, timeout=30):
+            raise KeyboardInterrupt  # first poll drives the shutdown path
+
+    monkeypatch.setattr(telegram_bot, "TelegramBot", BootBot)
+    monkeypatch.setattr(telegram_bot, "BOT_TOKEN", "tok")
+    monkeypatch.setattr(telegram_bot, "GEMINI_API_KEY", "key")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 1)
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "android")
+    monkeypatch.setattr(telegram_bot.genai, "Client",
+                        lambda api_key: SimpleNamespace())
+    monkeypatch.setattr(telegram_bot, "_start_watchdog_heartbeat",
+                        lambda: order.append("heartbeat-start"))
+    monkeypatch.setattr(telegram_bot, "_sd_notify",
+                        lambda state: order.append(state))
+    monkeypatch.setattr(telegram_bot, "_record_boot_and_maybe_alert",
+                        lambda bot: order.append("boot-alert"))
+    monkeypatch.setattr(telegram_bot, "_sweep_stranded_pending_uploads",
+                        lambda bot: order.append("sweep"))
+    monkeypatch.setattr(telegram_bot, "_build_api_app",
+                        lambda bot, client: SimpleNamespace(run=lambda **kw: None))
+    monkeypatch.setattr(telegram_bot, "_record_clean_shutdown",
+                        lambda: order.append("clean-shutdown"))
+
+    telegram_bot.main()
+
+    assert order.index("heartbeat-start") < order.index("READY=1"), \
+        "WatchdogSec enforcement starts at READY=1; the petter must already be running"
+    assert order.index("READY=1") < order.index("boot-alert"), \
+        "the crash-loop alert can send slowly; it must never delay READY=1"
+    assert order.index("boot-alert") < order.index("sweep"), \
+        "the tripwire must record the boot before the sweep can crash it"
+    assert order[-2:] == ["STOPPING=1", "clean-shutdown"]
+
+
+def test_poll_outage_alert_fires_wechat_first_then_chat_once(monkeypatch):
     """The streak-6 outage alert goes to BOTH channels exactly once per
-    streak: in-chat (works during 409/network flaps) and WeChat via PushPlus
-    (works when Telegram itself is unreachable — the in-chat blind spot)."""
+    streak — and WeChat via PushPlus goes FIRST: it is the channel that
+    still works when Telegram itself is unreachable, so it must not wait
+    behind (or die with) a black-holed in-chat send."""
     import requests as requests_mod
     import utils
 
@@ -5130,14 +5411,12 @@ def test_poll_outage_alert_fires_in_chat_and_wechat_once(monkeypatch):
     monkeypatch.setattr(bot.session, "post", raise_err)
     monkeypatch.setattr(telegram_bot.time, "sleep", lambda s: None)
 
-    sent = []
+    events = []
     monkeypatch.setattr(bot, "send_message",
-                        lambda chat_id, text, **kwargs: sent.append(text))
-
-    pushed = []
+                        lambda chat_id, text, **kwargs: events.append(("telegram", text)))
 
     def fake_push_post(url, json, timeout):
-        pushed.append(json)
+        events.append(("wechat", json))
         return SimpleNamespace(raise_for_status=lambda: None,
                                json=lambda: {"code": 200})
 
@@ -5147,13 +5426,14 @@ def test_poll_outage_alert_fires_in_chat_and_wechat_once(monkeypatch):
     for _ in range(telegram_bot.TelegramBot.POLL_ALERT_STREAK + 4):
         assert bot.get_updates(timeout=1) == []
 
-    assert len(sent) == 1, "in-chat alert must latch: once per streak"
-    assert "can't fetch Telegram updates" in sent[0]
-    assert len(pushed) == 1, "WeChat alert must ride the same one-shot latch"
-    assert pushed[0]["title"] == "CalorieBot cannot reach Telegram"
-    assert pushed[0]["template"] == "txt"
+    assert [channel for channel, _ in events] == ["wechat", "telegram"], \
+        "both channels exactly once per streak, WeChat strictly first"
+    pushed = events[0][1]
+    assert pushed["title"] == "CalorieBot cannot reach Telegram"
+    assert pushed["template"] == "txt"
     # _call wraps the ConnectionError as "Telegram network-error calling …"
-    assert "Telegram network-error" in pushed[0]["content"]
+    assert "Telegram network-error" in pushed["content"]
+    assert "can't fetch Telegram updates" in events[1][1]
 
 
 def test_processed_ring_survives_update_id_reset(monkeypatch, tmp_path):

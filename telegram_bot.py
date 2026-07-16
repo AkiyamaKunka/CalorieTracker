@@ -405,8 +405,12 @@ class TelegramBot:
         self.session = requests.Session()
         # Consecutive getUpdates failures drive the poll backoff; the alert
         # latch sends the outage notice once per streak, re-armed on success.
+        # The latch also persists in service_health across restarts; the
+        # swept flag makes the first successful poll of each boot clear any
+        # stale persisted latch exactly once.
         self._poll_failure_streak = 0
         self._poll_alert_sent = False
+        self._poll_latch_swept = False
 
     def _redact(self, value) -> str:
         """Strip the bot token from text destined for logs or user messages.
@@ -453,6 +457,11 @@ class TelegramBot:
         poll normally returns 200-empty, so timing out is real trouble — but
         skips the ERROR log and the penalty sleep.
         """
+        # A noted failure IS the loop making progress (alive, containing
+        # trouble). Stamping here also hands the streak-6 alert sends below
+        # a fresh watchdog budget: black-holed sendMessage retries can
+        # stack past 120s and must not get the bot killed mid-alert.
+        _stamp_progress()
         self._poll_failure_streak += 1
         streak = self._poll_failure_streak
         if "Telegram 401" in summary:
@@ -462,6 +471,9 @@ class TelegramBot:
         elif not quiet:
             log.error(f"Error getting updates (streak {streak}): {summary}")
 
+        alerting = streak >= self.POLL_ALERT_STREAK and not self._poll_alert_sent
+        latch_state = {}
+
         def mutate(data):
             telegram = data.get("telegram")
             if not isinstance(telegram, dict):
@@ -469,31 +481,46 @@ class TelegramBot:
             telegram["poll_failure_streak"] = streak
             telegram["last_poll_error"] = summary[:300]
             telegram["last_poll_error_at"] = service_health.timestamp()
+            if alerting:
+                # The alert latch persists here so a restart mid-outage
+                # (crash, watchdog kill — both plausible WHILE Telegram is
+                # unreachable) does not re-alert on every boot. Cleared on
+                # the next successful poll.
+                latch_state["already_on_disk"] = bool(telegram.get("poll_alert_latched_at"))
+                telegram["poll_alert_latched_at"] = service_health.timestamp()
             data["telegram"] = telegram
 
         service_health.update(mutate, SERVICE_HEALTH_PATH, warn=log.warning)
 
-        if streak >= self.POLL_ALERT_STREAK and not self._poll_alert_sent:
+        if alerting:
             self._poll_alert_sent = True  # latched until the next successful poll
-            try:
-                self.send_message(
-                    ALLOWED_CHAT_ID,
-                    "⚠️ <b>I can't fetch Telegram updates right now.</b>\n\n"
-                    f"{streak} getUpdates polls in a row have failed "
-                    f"(last error: <code>{_html(summary[:200])}</code>).\n\n"
-                    "Messages you send me may not be processed until this recovers.",
+            if latch_state.get("already_on_disk"):
+                log.warning(
+                    "getUpdates outage alert suppressed: already sent before a "
+                    "restart during this outage (persisted latch)."
                 )
-            except Exception:
-                log.error("Could not send the getUpdates outage alert.")
-            # WeChat rides the same one-shot latch: it is the channel that
-            # still reaches the user when Telegram itself is down — the
-            # exact blind spot of the in-chat alert above. Never raises.
-            push_wechat(
-                "CalorieBot cannot reach Telegram",
-                f"{streak} consecutive getUpdates poll failures.\n"
-                f"Last error: {summary[:200]}\n"
-                "Messages sent to the bot may not be processed until this recovers.",
-            )
+            else:
+                # WeChat FIRST: it is the channel that still reaches the user
+                # when Telegram itself is down — the exact blind spot of the
+                # in-chat alert — and the in-chat send below can black-hole
+                # for 120s+ (or die with the process) before it gives up.
+                # Never raises.
+                push_wechat(
+                    "CalorieBot cannot reach Telegram",
+                    f"{streak} consecutive getUpdates poll failures.\n"
+                    f"Last error: {summary[:200]}\n"
+                    "Messages sent to the bot may not be processed until this recovers.",
+                )
+                try:
+                    self.send_message(
+                        ALLOWED_CHAT_ID,
+                        "⚠️ <b>I can't fetch Telegram updates right now.</b>\n\n"
+                        f"{streak} getUpdates polls in a row have failed "
+                        f"(last error: <code>{_html(summary[:200])}</code>).\n\n"
+                        "Messages you send me may not be processed until this recovers.",
+                    )
+                except Exception:
+                    log.error("Could not send the getUpdates outage alert.")
 
         if quiet:
             return
@@ -505,9 +532,9 @@ class TelegramBot:
             delay = 300
         elif streak > 1:
             delay *= random.uniform(0.8, 1.2)
-        # Sliced so the 300s cap keeps petting the systemd watchdog: a
+        # Sliced so the 300s cap keeps the progress clock fresh: a
         # deliberate backoff must not look like a hang (total sleep identical).
-        _sleep_with_watchdog_pets(delay)
+        _sleep_with_progress_stamps(delay)
 
     def get_updates(self, timeout: int = 30) -> list:
         """Long-poll for new messages."""
@@ -525,14 +552,22 @@ class TelegramBot:
             # failed batch is re-polled rather than silently skipped.
             self._note_poll_failure(self._redact(e))
             return []
-        if self._poll_failure_streak:
+        # The first successful poll of a boot sweeps too (not just streak
+        # recoveries): a latch persisted by a previous process during an
+        # outage that ended while the bot was down would otherwise linger
+        # and silently swallow the NEXT outage's alert.
+        if self._poll_failure_streak or not self._poll_latch_swept:
             self._poll_failure_streak = 0
             self._poll_alert_sent = False
+            self._poll_latch_swept = True
 
             def mutate(data):
                 telegram = data.get("telegram")
                 if isinstance(telegram, dict):
                     telegram["poll_failure_streak"] = 0
+                    # A successful poll ends the outage: re-arm the one-shot
+                    # alert for the next streak.
+                    telegram.pop("poll_alert_latched_at", None)
                     data["telegram"] = telegram
 
             service_health.update(mutate, SERVICE_HEALTH_PATH, warn=log.warning)
@@ -633,14 +668,22 @@ class TelegramBot:
             raise RuntimeError("Could not get file_path from telegram.")
         url = f"https://api.telegram.org/file/bot{self.token}/{file_path}"
         try:
-            resp = self.session.get(url, timeout=30)
-            resp.raise_for_status()
+            # Streamed so a slow multi-MB download (this runs on the poll
+            # thread for chat photos) reads as progress while bytes are
+            # actually flowing: each chunk stamps the watchdog progress
+            # clock. A stalled socket still trips the 30s read timeout.
+            with self.session.get(url, timeout=30, stream=True) as resp:
+                resp.raise_for_status()
+                chunks = []
+                for chunk in resp.iter_content(chunk_size=64 * 1024):
+                    _stamp_progress()
+                    chunks.append(chunk)
         except requests.RequestException as e:
             # Network errors (ConnectionError/ConnectTimeout) embed the token URL too.
             resp = getattr(e, "response", None)
             status = resp.status_code if resp is not None else "network-error"
             raise RuntimeError(f"Telegram {status} calling getFile") from None
-        return resp.content
+        return b"".join(chunks)
 
 
 # ─── Meals Data Access ─────────────────────────────────────────────
@@ -1038,6 +1081,11 @@ def analyze_food_photo_with_retries(
     The Claude hop is best-effort — unconfigured, rate-windowed, or failing,
     it returns None and the original Gemini retry path below runs unchanged.
     """
+    # Entry stamp bounds the watchdog-visible gap across the Claude leg:
+    # a _CLI_LOCK wait behind two 120s runs plus its own 120s run is the
+    # longest legitimate stretch of silence in the whole bot (~360s), still
+    # well inside the hang threshold when measured from here.
+    _stamp_progress()
     if claude_analyzer.is_configured():
         result = claude_analyzer.analyze_food_photo(image_bytes)
         if result is not None:
@@ -1056,6 +1104,10 @@ def analyze_food_photo_with_retries(
     start = time.time()
 
     for attempt in range(1, max_attempts + 1):
+        # Per-attempt stamp: each Gemini try is bounded (90s deadline
+        # wrapper + <=60s clamped retry sleep), so a healthy multi-attempt
+        # run never looks like a hang.
+        _stamp_progress()
         try:
             result = _analyze_food_photo_once(client, image_bytes)
             _record_gemini_health(True, latency_seconds=time.time() - start)
@@ -1923,7 +1975,14 @@ def retry_all_failed_uploads(gemini_client, limit: int = 3) -> str:
 
     limit = _parse_positive_int(str(limit), 3, 1, RETRY_ALL_FAILED_MAX)
     selected = failed[:limit]
-    results = [_retry_failed_upload_path(gemini_client, path) for path in selected]
+    results = []
+    for path in selected:
+        # Stamp between photos: this batch runs synchronously on the poll
+        # thread and can legitimately take minutes (~390s observed for a
+        # full batch) — each file is a fresh bounded unit of work, not a
+        # hang, so the watchdog clock must be reset per file.
+        _stamp_progress()
+        results.append(_retry_failed_upload_path(gemini_client, path))
 
     counts = {}
     for result in results:
@@ -4777,26 +4836,107 @@ def _sd_notify(state: str):
         log.debug(f"sd_notify({state!r}) failed: {e}")
 
 
-# Watchdog-pet sleep slice: must stay well under any sane WatchdogSec
-# (README ships 120s) so a long intentional sleep never reads as a hang.
-_WATCHDOG_SLEEP_SLICE_SECONDS = 30
+# ─── Progress-gated watchdog heartbeat ───────────────────────────────
+# WatchdogSec must catch TRUE hangs (process alive, nothing moving) without
+# killing healthy-but-slow work: /retry_all_failed runs minutes of
+# synchronous analysis on the poll thread, a 20MB getFile can trickle, and
+# black-holed sendMessage retries stack. In-loop pets cannot tell those
+# apart from a hang, so a dedicated daemon thread pets every ~30s for as
+# long as the shared last-progress stamp is fresher than the hang
+# threshold. Slow work stamps progress at bounded checkpoints; a real hang
+# stops stamping, the pets stop with it, and systemd restarts the bot.
+
+_WATCHDOG_HEARTBEAT_INTERVAL_SECONDS = 30
+# Generous multiple of the longest legitimate gap between progress stamps
+# (Claude CLI lock wait + 120s run ≈ 360s is the worst bounded segment;
+# every other checkpoint is far shorter), so only a genuine hang starves
+# the heartbeat.
+WATCHDOG_HANG_THRESHOLD_SECONDS = 600
+
+_progress_lock = threading.Lock()
+_last_progress_monotonic = time.monotonic()
 
 
-def _sleep_with_watchdog_pets(seconds):
-    """time.sleep(seconds) in <=30s slices, petting the watchdog in between.
+def _stamp_progress():
+    """Record that the process just completed a bounded unit of work.
 
-    The getUpdates backoff sleeps up to 300s — longer than WatchdogSec — so
-    a deliberate backoff must keep sending WATCHDOG=1 or systemd would
-    restart a healthy (just backing-off) bot. The total time slept is
-    exactly `seconds`, preserving the pinned backoff schedule.
+    Called from the poll loop, long synchronous operations, and background
+    workers alike: the watchdog's question is "is this PROCESS alive and
+    moving", and any thread's bounded progress answers it.
+    """
+    global _last_progress_monotonic
+    with _progress_lock:
+        _last_progress_monotonic = time.monotonic()
+
+
+def _progress_age_seconds() -> float:
+    with _progress_lock:
+        return time.monotonic() - _last_progress_monotonic
+
+
+def _watchdog_heartbeat_once() -> bool:
+    """Send one pet iff progress is fresh; returns whether it was sent."""
+    if _progress_age_seconds() > WATCHDOG_HANG_THRESHOLD_SECONDS:
+        return False
+    _sd_notify("WATCHDOG=1")
+    return True
+
+
+def _watchdog_heartbeat_loop(stop_event):
+    stall_logged = False
+    while not stop_event.wait(_WATCHDOG_HEARTBEAT_INTERVAL_SECONDS):
+        if _watchdog_heartbeat_once():
+            stall_logged = False
+        elif not stall_logged:
+            # Once per stall: the upcoming watchdog kill must be
+            # explainable from the journal.
+            stall_logged = True
+            log.error(
+                f"Watchdog pets withheld: no progress for {int(_progress_age_seconds())}s "
+                f"(threshold {WATCHDOG_HANG_THRESHOLD_SECONDS}s) — letting systemd's "
+                "WatchdogSec restart the bot."
+            )
+
+
+def _start_watchdog_heartbeat():
+    """Start the heartbeat thread; returns an Event that stops it.
+
+    Daemon on purpose: Python joins only non-daemon threads at interpreter
+    shutdown, so the heartbeat keeps petting while in-flight upload threads
+    finish — a slow-but-legal stop is TimeoutStopSec's business, not the
+    watchdog's.
+    """
+    _stamp_progress()
+    stop_event = threading.Event()
+    threading.Thread(
+        target=_watchdog_heartbeat_loop,
+        args=(stop_event,),
+        name="watchdog-heartbeat",
+        daemon=True,
+    ).start()
+    return stop_event
+
+
+# Progress-stamp sleep slice: keeps a deliberate long sleep visibly alive
+# to the heartbeat thread, far inside the hang threshold.
+_PROGRESS_SLEEP_SLICE_SECONDS = 30
+
+
+def _sleep_with_progress_stamps(seconds):
+    """time.sleep(seconds) in <=30s slices, stamping progress in between.
+
+    The getUpdates backoff sleeps up to 300s. A deliberate backoff is
+    healthy waiting, not a hang, so each slice refreshes the progress clock
+    and the heartbeat thread keeps petting through it. The total time slept
+    is exactly `seconds`, preserving the pinned backoff schedule.
     """
     remaining = seconds
     while remaining > 0:
-        chunk = min(remaining, _WATCHDOG_SLEEP_SLICE_SECONDS)
+        chunk = min(remaining, _PROGRESS_SLEEP_SLICE_SECONDS)
         time.sleep(chunk)
         remaining -= chunk
         if remaining > 0:
-            _sd_notify("WATCHDOG=1")
+            _stamp_progress()
 
 
 def _sweep_stranded_pending_uploads(bot: TelegramBot):
@@ -4808,6 +4948,9 @@ def _sweep_stranded_pending_uploads(bot: TelegramBot):
     moved = []
     still_pending = []
     for path in _pending_upload_items():
+        # The sweep runs after READY=1 (watchdog armed): stamp per file so
+        # a boot recovering a large backlog never reads as a boot-time hang.
+        _stamp_progress()
         try:
             # Bytes are read lazily, only when the ledger has no entry.
             img_hash = _upload_file_ledger_hash(path)
@@ -5317,16 +5460,20 @@ def main():
 
     # Initialize
     bot = TelegramBot(BOT_TOKEN)
-    # Tripwire FIRST: a boot that crashes inside the sweep/app build below
+    # Heartbeat BEFORE READY=1: the READY datagram is the moment systemd
+    # starts enforcing WatchdogSec, so the petter must already be running.
+    _start_watchdog_heartbeat()
+    # READY before ANY Telegram send: under Type=notify systemd holds the
+    # unit in "activating" and enforces TimeoutStartSec until READY=1
+    # arrives, and everything below can send messages — the crash-loop
+    # alert's sendMessage retries can stack past 120s, the stranded-upload
+    # sweep touches many files and sends a summary (60s HTTP timeout each).
+    # A slow boot must not be killed as a failed start.
+    _sd_notify("READY=1")
+    # Tripwire next: a boot that crashes inside the sweep/app build below
     # must still count as a crash boot, or a boot-time crash loop restarts
     # forever without ever feeding the alert.
     _record_boot_and_maybe_alert(bot)
-    # Type=notify: systemd holds the unit in "activating" until READY=1 and
-    # enforces its start timeout (default 90s). Send it here — before the
-    # stranded-upload sweep and Flask build below — because the sweep can
-    # touch many files and send Telegram messages (60s HTTP timeout each),
-    # so a slow boot must not be killed as a failed start.
-    _sd_notify("READY=1")
     gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
     # systemd stop sends SIGTERM; raising KeyboardInterrupt on the main thread
@@ -5348,12 +5495,13 @@ def main():
     try:
         while True:
             updates = bot.get_updates(timeout=30)
-            # Watchdog pet once per poll iteration: WatchdogSec catches the
-            # hang class Restart=always cannot see (process alive, loop
-            # stuck — e.g. the old no-deadline Gemini hang). get_updates
-            # itself is bounded (60s HTTP timeout; backoff sleeps are
-            # sliced with their own pets), so pets keep flowing.
-            _sd_notify("WATCHDOG=1")
+            # Progress stamp once per poll iteration: the heartbeat thread
+            # turns fresh stamps into WATCHDOG=1 pets, catching the hang
+            # class Restart=always cannot see (process alive, loop stuck —
+            # e.g. the old no-deadline Gemini hang). get_updates itself is
+            # bounded (60s HTTP timeout; backoff sleeps are sliced with
+            # their own stamps), so the clock stays fresh while healthy.
+            _stamp_progress()
             maybe_warn_stale_android_heartbeat(bot)
 
             for update in updates:
@@ -5372,14 +5520,18 @@ def main():
                 # so healthy batch-mates of a poison update never accumulate.
                 # A skipped poison update `continue`s past this on purpose.
                 _poison_update_clear(update_id)
-                # Pet per processed update too: a big redelivered batch of
-                # slow updates could otherwise outlast WatchdogSec even
-                # though each one is making healthy progress.
-                _sd_notify("WATCHDOG=1")
+                # Stamp per processed update too: a big redelivered batch of
+                # slow updates could otherwise outlast the hang threshold
+                # even though each one is making healthy progress.
+                _stamp_progress()
 
     except KeyboardInterrupt:
         # SIGTERM is routed here too, so systemctl stop/restart and deploys
         # stamp a clean shutdown — the crash-loop tripwire ignores them.
+        # Fresh progress stamp first: the interpreter still joins non-daemon
+        # upload threads (bounded by TimeoutStopSec=180), and the daemon
+        # heartbeat keeps petting through that join on this stamp's budget.
+        _stamp_progress()
         _sd_notify("STOPPING=1")
         _record_clean_shutdown()
         log.info("\n👋 Bot stopped.")
