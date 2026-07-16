@@ -2,6 +2,8 @@
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 import config
 import daily_report
 import database
@@ -406,3 +408,75 @@ def test_service_health_update_survives_disk_full(tmp_path, monkeypatch):
     assert data == {"keep": 1, "x": 2}  # mutation applied in memory
     assert warnings                     # failure surfaced, not raised
     assert service_health.load(path) == {"keep": 1}  # old file undamaged
+
+
+# ─── utils.push_wechat: the shared PushPlus helper ────────────────────
+
+
+def test_push_wechat_is_shared_between_bot_and_report():
+    assert telegram_bot.push_wechat is utils.push_wechat
+    assert daily_report.push_wechat is utils.push_wechat
+
+
+def test_push_wechat_noop_without_token(monkeypatch):
+    # Autouse fixture already nulls the token; make it explicit here anyway.
+    monkeypatch.setattr(utils, "PUSHPLUS_TOKEN", None)
+    monkeypatch.setattr(
+        utils.requests, "post",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no token, no request")))
+    assert utils.push_wechat("t", "c") is False
+
+
+def test_push_wechat_posts_txt_payload_and_reports_success(monkeypatch):
+    from types import SimpleNamespace
+
+    captured = {}
+
+    def fake_post(url, json, timeout):
+        captured["url"] = url
+        captured["payload"] = json
+        captured["timeout"] = timeout
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"code": 200})
+
+    monkeypatch.setattr(utils, "PUSHPLUS_TOKEN", "tok")
+    monkeypatch.setattr(utils.requests, "post", fake_post)
+
+    assert utils.push_wechat("Title", "Body text") is True
+    assert captured["url"] == "https://www.pushplus.plus/send"
+    assert captured["timeout"] == 10
+    assert captured["payload"] == {
+        "token": "tok", "title": "Title", "content": "Body text", "template": "txt",
+    }
+    assert "topic" not in captured["payload"]  # only sent when a topic is given
+
+
+def test_push_wechat_passes_topic_through(monkeypatch):
+    from types import SimpleNamespace
+
+    captured = {}
+
+    def fake_post(url, json, timeout):
+        captured["payload"] = json
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"code": 200})
+
+    monkeypatch.setattr(utils, "PUSHPLUS_TOKEN", "tok")
+    monkeypatch.setattr(utils.requests, "post", fake_post)
+
+    assert utils.push_wechat("Title", "Body", topic="coach") is True
+    assert captured["payload"]["topic"] == "coach"
+
+
+@pytest.mark.parametrize("failure", ["raise", "api-error"])
+def test_push_wechat_never_raises_and_returns_false_on_failure(monkeypatch, failure):
+    from types import SimpleNamespace
+
+    def fake_post(url, json, timeout):
+        if failure == "raise":
+            raise OSError("network unreachable")
+        return SimpleNamespace(raise_for_status=lambda: None,
+                               json=lambda: {"code": 500, "msg": "bad token"})
+
+    monkeypatch.setattr(utils, "PUSHPLUS_TOKEN", "tok")
+    monkeypatch.setattr(utils.requests, "post", fake_post)
+
+    assert utils.push_wechat("Title", "Body") is False

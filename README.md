@@ -188,6 +188,12 @@ Environment="PATH=/home/ubuntu/CalorieTracker/venv/bin"
 ExecStart=/home/ubuntu/CalorieTracker/venv/bin/python3 telegram_bot.py
 Restart=always
 RestartSec=5
+# Type=notify requires the bot's READY=1 (sent before the boot sweep, so a
+# slow sweep cannot trip the start timeout); WatchdogSec restarts a hung —
+# not just dead — bot: the poll loop pets WATCHDOG=1 every iteration and
+# slices its long backoff sleeps, so silence for 120s means a real hang.
+Type=notify
+WatchdogSec=120
 # Graceful stops join in-flight photo analyses (up to the analyzer's 120s
 # timeout); outlast that before systemd escalates to SIGKILL.
 TimeoutStopSec=180

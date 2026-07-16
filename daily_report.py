@@ -35,6 +35,7 @@ from config import (
 from utils import (
     meal_calorie_mismatch,
     parse_boolish,
+    push_wechat,
     safe_food_items,
     safe_number,
     telegram_message_chunks as _telegram_chunks,
@@ -99,27 +100,19 @@ def send_wechat(text, target_date):
         print("[INFO] PUSHPLUS_TOKEN not set. Skipping WeChat notification.")
         return
 
-    url = "https://www.pushplus.plus/send"
-    payload = {
-        "token": PUSHPLUS_TOKEN,
-        "title": f"📊 Daily Calorie Report ({target_date})",
-        "content": _html_to_plain(text),
-        # "txt" renders the content literally. _html_to_plain unescapes
-        # entities, so user-typed markup (e.g. <script>) survives into the
-        # payload — under "markdown" PushPlus would render it as HTML.
-        "template": "txt",
-        "topic": PUSHPLUS_TOPIC,
-    }
-    try:
-        response = requests.post(url, json=payload, timeout=10)
-        response.raise_for_status()
-        result = response.json()
-        if result.get("code") == 200:
-            print("[INFO] WeChat report sent via PushPlus successfully!")
-        else:
-            print(f"[ERROR] PushPlus API error: {result}")
-    except Exception as e:
-        print(f"[ERROR] Failed to send WeChat message: {e}")
+    # push_wechat's "txt" template renders the content literally.
+    # _html_to_plain unescapes entities, so user-typed markup (e.g.
+    # <script>) survives into the payload — under "markdown" PushPlus
+    # would render it as HTML. push_wechat never raises.
+    ok = push_wechat(
+        f"📊 Daily Calorie Report ({target_date})",
+        _html_to_plain(text),
+        topic=PUSHPLUS_TOPIC,
+    )
+    if ok:
+        print("[INFO] WeChat report sent via PushPlus successfully!")
+    else:
+        print("[ERROR] Failed to send WeChat report via PushPlus.")
 
 
 def _net_use_total() -> bool:

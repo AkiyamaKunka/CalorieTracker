@@ -3881,7 +3881,7 @@ def test_get_updates_contains_network_errors_without_advancing_offset(monkeypatc
 
     assert bot.get_updates() == []
     assert bot.offset == 41
-    assert slept == [5]  # fixed 5s today — no exponential backoff (see hunter 6 proposal)
+    assert slept == [5]  # first failure is pinned at exactly 5s: one un-sliced sleep
 
 
 # ─── Telegram update-shape fuzzing: _process_update / handle_callback_query (hunter 3) ───
@@ -3982,13 +3982,20 @@ def test_process_update_silently_ignores_non_text_non_image_messages(monkeypatch
     assert bot.sent == [] and text_calls == []
 
 
-def test_photo_caption_is_silently_dropped_design_pin(mock_db, monkeypatch, tmp_path):
-    """DESIGN NOTE (pin): a photo's caption is ignored end-to-end. Users
-    naturally caption food photos ("half portion, no rice"); today the photo
-    is analyzed WITHOUT that context, the caption never reaches the NL text
-    handler, and nothing echoes it back. If captions ever get wired in,
-    this pin should be updated deliberately."""
+def test_photo_caption_becomes_one_nl_correction_after_save(mock_db, monkeypatch, tmp_path):
+    """Successor to the old silently-dropped pin, updated deliberately: a
+    caption on a FOOD photo now runs as exactly one NL correction ("half
+    portion, no rice") AFTER the meal is saved, so it applies against the
+    just-logged meal at its natural snapshot index."""
     text_calls = _shape_setup(monkeypatch, tmp_path)
+    meals_at_nl_time = []
+    monkeypatch.setattr(
+        telegram_bot, "handle_text_message_safe",
+        lambda gemini_client, bot, chat_id, text: (
+            meals_at_nl_time.append(len(_wide_recent_meals(12345))),
+            text_calls.append((chat_id, text)),
+        ),
+    )
     bot = ShapeBot()
     telegram_bot._process_update(object(), bot, {
         "update_id": 16,
@@ -3996,15 +4003,47 @@ def test_photo_caption_is_silently_dropped_design_pin(mock_db, monkeypatch, tmp_
                     "photo": [{"file_id": "cap-1"}],
                     "caption": "half portion, no rice"},
     })
-    assert len(_wide_recent_meals(12345)) == 1   # the photo itself was processed
-    assert text_calls == []                       # caption never reached the NL handler
-    assert all("half portion" not in m["text"] for m in bot.sent)
+    assert len(_wide_recent_meals(12345)) == 1            # the photo itself was processed
+    assert text_calls == [(12345, "half portion, no rice")]  # exactly one NL call
+    assert meals_at_nl_time == [1], "the caption must run AFTER the meal is saved"
+
+
+def test_photo_caption_on_not_food_photo_does_nothing(mock_db, monkeypatch, tmp_path):
+    text_calls = _shape_setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo",
+                        lambda client, image_bytes: {"is_food": False})
+    bot = ShapeBot()
+    telegram_bot._process_update(object(), bot, {
+        "update_id": 17,
+        "message": {"chat": {"id": 12345}, "from": {"first_name": "U"},
+                    "photo": [{"file_id": "cap-nf"}],
+                    "caption": "half portion, no rice"},
+    })
+    assert _wide_recent_meals(12345) == []  # nothing saved
+    assert text_calls == []                 # no meal, no correction to apply
+
+
+@pytest.mark.parametrize("caption", ["", "   ", None, 42],
+                         ids=["empty", "whitespace", "none", "non-string"])
+def test_photo_empty_or_malformed_caption_changes_nothing(mock_db, monkeypatch, tmp_path, caption):
+    text_calls = _shape_setup(monkeypatch, tmp_path)
+    bot = ShapeBot()
+    telegram_bot._process_update(object(), bot, {
+        "update_id": 18,
+        "message": {"chat": {"id": 12345}, "from": {"first_name": "U"},
+                    "photo": [{"file_id": "cap-empty"}],
+                    "caption": caption},
+    })
+    assert len(_wide_recent_meals(12345)) == 1
+    assert text_calls == []
+    assert all("caption ignored" not in m["text"] for m in bot.sent)
 
 
 def test_photo_caption_cannot_execute_commands(mock_db, monkeypatch, tmp_path):
-    """Security-relevant corollary of the caption drop: a caption that LOOKS
-    like a command ("/clear_failed latest confirm") is not dispatched as one —
-    the message is handled purely as a photo."""
+    """SECURITY PIN (kept through the caption feature): a caption that LOOKS
+    like a command ("/clear_failed latest confirm") is never dispatched as
+    one and never reaches the NL handler either — the meal card instead
+    carries an explicit '(caption ignored…)' note."""
     text_calls = _shape_setup(monkeypatch, tmp_path)
     monkeypatch.setattr(telegram_bot, "clear_failed_uploads",
                         lambda *a, **k: pytest.fail("caption must not reach command dispatch"))
@@ -4017,6 +4056,8 @@ def test_photo_caption_cannot_execute_commands(mock_db, monkeypatch, tmp_path):
     })
     assert len(_wide_recent_meals(12345)) == 1
     assert text_calls == []
+    assert any("caption ignored: commands in captions are not executed" in m["text"]
+               for m in bot.sent)
 
 
 def test_photo_wins_over_text_when_both_present(mock_db, monkeypatch, tmp_path):
@@ -4754,13 +4795,20 @@ def test_get_updates_persistent_conflict_backs_off_with_a_cap(monkeypatch):
     slept = []
     monkeypatch.setattr(telegram_bot.time, "sleep", lambda s: slept.append(s))
 
+    # Sleeps arrive in <=30s watchdog-pet slices; the TOTAL per failure is
+    # the backoff contract, so aggregate the slices of each get_updates call.
+    totals = []
     for _ in range(12):
+        before = len(slept)
         assert bot.get_updates(timeout=1) == []  # containment must stay
+        totals.append(sum(slept[before:]))
 
-    assert len(slept) == 12
-    assert slept == sorted(slept), "backoff must grow monotonically to its cap"
-    assert max(slept) >= 60, f"12 consecutive failures never escalated: {slept}"
-    assert max(slept) <= 300, "backoff must stay capped (~5 min) so recovery is quick"
+    assert len(totals) == 12
+    assert totals == sorted(totals), "backoff must grow monotonically to its cap"
+    assert max(totals) >= 60, f"12 consecutive failures never escalated: {totals}"
+    assert max(totals) <= 300, "backoff must stay capped (~5 min) so recovery is quick"
+    assert all(s <= 30 for s in slept), \
+        "every sleep slice must stay under WatchdogSec so backoff keeps petting"
 
 
 def test_gemini_retry_loop_is_bounded_with_clamped_sleeps(monkeypatch, tmp_path):
@@ -4949,3 +4997,153 @@ def test_nl_unhashable_intent_with_actions_must_not_raise(
     # (Design intent: an unrecognized wrapper intent defers to its actions,
     # so ideally the chat action's "compound ok" is what gets sent.)
     assert bot.sent, "the user must receive a reply, not a contained crash"
+
+
+# ─── systemd watchdog (sd_notify) and outage visibility ──────────────
+
+
+@pytest.fixture
+def notify_socket(monkeypatch):
+    """A REAL AF_UNIX datagram socket standing in for systemd's NOTIFY_SOCKET.
+
+    Bound in a short tempfile.mkdtemp dir rather than tmp_path: sun_path is
+    capped (~104 bytes on macOS) and pytest tmp_path routinely exceeds it.
+    """
+    import shutil
+    import socket as socket_mod
+    import tempfile
+
+    tmp_dir = tempfile.mkdtemp(prefix="sdnotify-")
+    sock_path = os.path.join(tmp_dir, "notify.sock")
+    sock = socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_DGRAM)
+    sock.bind(sock_path)
+    sock.setblocking(False)
+    monkeypatch.setenv("NOTIFY_SOCKET", sock_path)
+    yield sock
+    sock.close()
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _drain_datagrams(sock):
+    out = []
+    while True:
+        try:
+            out.append(sock.recv(4096))
+        except (BlockingIOError, OSError):
+            break
+    return out
+
+
+def test_sd_notify_sends_ready_watchdog_and_stopping(notify_socket):
+    telegram_bot._sd_notify("READY=1")
+    telegram_bot._sd_notify("WATCHDOG=1")
+    telegram_bot._sd_notify("STOPPING=1")
+    assert _drain_datagrams(notify_socket) == [b"READY=1", b"WATCHDOG=1", b"STOPPING=1"]
+
+
+def test_sd_notify_is_a_noop_without_notify_socket(monkeypatch):
+    monkeypatch.delenv("NOTIFY_SOCKET", raising=False)
+    monkeypatch.setattr(
+        telegram_bot.socket, "socket",
+        lambda *a, **k: pytest.fail("no NOTIFY_SOCKET means no socket at all"))
+    telegram_bot._sd_notify("READY=1")  # must return silently
+
+
+def test_sd_notify_translates_abstract_namespace_at(monkeypatch):
+    """systemd commonly hands out '@...' (abstract namespace) addresses;
+    sd_notify semantics replace the '@' with a NUL byte."""
+    captured = {}
+
+    class FakeSock:
+        def __init__(self, family, kind):
+            captured["family_kind"] = (family, kind)
+
+        def connect(self, addr):
+            captured["addr"] = addr
+
+        def send(self, data):
+            captured["data"] = data
+
+        def close(self):
+            captured["closed"] = True
+
+    monkeypatch.setenv("NOTIFY_SOCKET", "@caloriebot-notify")
+    monkeypatch.setattr(telegram_bot.socket, "socket", FakeSock)
+
+    telegram_bot._sd_notify("WATCHDOG=1")
+
+    assert captured["addr"] == "\0caloriebot-notify"
+    assert captured["data"] == b"WATCHDOG=1"
+    assert captured.get("closed") is True
+    assert captured["family_kind"] == (
+        telegram_bot.socket.AF_UNIX, telegram_bot.socket.SOCK_DGRAM)
+
+
+def test_sd_notify_swallows_oserror(monkeypatch, tmp_path):
+    # Dead socket path (nothing bound): connect raises; _sd_notify must not.
+    monkeypatch.setenv("NOTIFY_SOCKET", str(tmp_path / "gone.sock"))
+    telegram_bot._sd_notify("WATCHDOG=1")
+
+
+def test_long_backoff_sleep_is_sliced_with_watchdog_pets(notify_socket, monkeypatch):
+    slept = []
+    monkeypatch.setattr(telegram_bot.time, "sleep", lambda s: slept.append(s))
+
+    telegram_bot._sleep_with_watchdog_pets(300)
+
+    assert sum(slept) == 300, "slicing must preserve the total backoff exactly"
+    assert all(s <= 30 for s in slept), "every slice must stay under WatchdogSec"
+    pets = _drain_datagrams(notify_socket)
+    assert pets == [b"WATCHDOG=1"] * (len(slept) - 1), \
+        "a pet must land between every pair of consecutive slices"
+
+
+def test_short_backoff_sleep_is_a_single_slice_with_no_pet(notify_socket, monkeypatch):
+    slept = []
+    monkeypatch.setattr(telegram_bot.time, "sleep", lambda s: slept.append(s))
+
+    telegram_bot._sleep_with_watchdog_pets(5)
+
+    assert slept == [5]
+    assert _drain_datagrams(notify_socket) == []
+
+
+def test_poll_outage_alert_fires_in_chat_and_wechat_once(monkeypatch):
+    """The streak-6 outage alert goes to BOTH channels exactly once per
+    streak: in-chat (works during 409/network flaps) and WeChat via PushPlus
+    (works when Telegram itself is unreachable — the in-chat blind spot)."""
+    import requests as requests_mod
+    import utils
+
+    bot = telegram_bot.TelegramBot("test-token")
+
+    def raise_err(*args, **kwargs):
+        raise requests_mod.exceptions.ConnectionError("network down")
+
+    monkeypatch.setattr(bot.session, "post", raise_err)
+    monkeypatch.setattr(telegram_bot.time, "sleep", lambda s: None)
+
+    sent = []
+    monkeypatch.setattr(bot, "send_message",
+                        lambda chat_id, text, **kwargs: sent.append(text))
+
+    pushed = []
+
+    def fake_push_post(url, json, timeout):
+        pushed.append(json)
+        return SimpleNamespace(raise_for_status=lambda: None,
+                               json=lambda: {"code": 200})
+
+    monkeypatch.setattr(utils, "PUSHPLUS_TOKEN", "push-token")
+    monkeypatch.setattr(utils.requests, "post", fake_push_post)
+
+    for _ in range(telegram_bot.TelegramBot.POLL_ALERT_STREAK + 4):
+        assert bot.get_updates(timeout=1) == []
+
+    assert len(sent) == 1, "in-chat alert must latch: once per streak"
+    assert "can't fetch Telegram updates" in sent[0]
+    assert len(pushed) == 1, "WeChat alert must ride the same one-shot latch"
+    assert pushed[0]["title"] == "CalorieBot cannot reach Telegram"
+    assert pushed[0]["template"] == "txt"
+    # _call wraps the ConnectionError as "Telegram network-error calling …"
+    assert "Telegram network-error" in pushed[0]["content"]

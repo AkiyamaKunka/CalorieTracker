@@ -3,8 +3,13 @@ Shared utilities for CalorieTracker.
 """
 
 import json
+import logging
 import re
 from typing import List, Optional
+
+import requests
+
+from config import PUSHPLUS_TOKEN
 
 
 def parse_ai_json(text: str) -> dict:
@@ -103,6 +108,40 @@ def parse_boolish(value) -> Optional[bool]:
     if normalized in {"0", "false", "no", "n", "off"}:
         return False
     return None
+
+
+def push_wechat(title: str, content: str, topic: Optional[str] = None) -> bool:
+    """Send a plain-text WeChat notification via PushPlus. Never raises.
+
+    Shared by the daily report and the bot's Telegram-outage alert — WeChat
+    is the channel that still reaches the user when Telegram itself is down.
+    Template "txt" renders `content` literally, so callers may pass user
+    text without HTML-escaping it for PushPlus. Returns False (no-op)
+    without PUSHPLUS_TOKEN, True only on a confirmed code-200 delivery.
+    """
+    if not PUSHPLUS_TOKEN:
+        return False
+    payload = {
+        "token": PUSHPLUS_TOKEN,
+        "title": title,
+        "content": content,
+        "template": "txt",
+    }
+    if topic is not None:
+        payload["topic"] = topic
+    try:
+        response = requests.post("https://www.pushplus.plus/send", json=payload, timeout=10)
+        response.raise_for_status()
+        result = response.json()
+        if result.get("code") == 200:
+            return True
+        logging.getLogger("calorie_bot").warning(f"PushPlus API error: {result}")
+        return False
+    except Exception as e:
+        # Alert paths call this while already handling an outage; a push
+        # failure must degrade to False, never become a second crash.
+        logging.getLogger("calorie_bot").warning(f"PushPlus send failed: {e}")
+        return False
 
 
 def utf16_len(text: str) -> int:

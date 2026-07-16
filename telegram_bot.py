@@ -26,6 +26,7 @@ import os
 import random
 import re
 import signal
+import socket
 import statistics
 import subprocess
 import sys
@@ -70,6 +71,7 @@ from utils import (
     meal_calorie_mismatch,
     parse_ai_json,
     parse_boolish,
+    push_wechat,
     safe_food_items,
     safe_number,
     telegram_message_chunks,
@@ -222,6 +224,7 @@ food photos directly here in the chat!
 
 <b>Photo:</b>
 📸 Send a food photo for instant calorie analysis
+Add a caption like “half portion” and I'll apply it to the logged meal.
 
 <b>Corrections:</b>
 Just type a correction in natural language! I remember your meals from the last 7 days.
@@ -478,6 +481,15 @@ class TelegramBot:
                 )
             except Exception:
                 log.error("Could not send the getUpdates outage alert.")
+            # WeChat rides the same one-shot latch: it is the channel that
+            # still reaches the user when Telegram itself is down — the
+            # exact blind spot of the in-chat alert above. Never raises.
+            push_wechat(
+                "CalorieBot cannot reach Telegram",
+                f"{streak} consecutive getUpdates poll failures.\n"
+                f"Last error: {summary[:200]}\n"
+                "Messages sent to the bot may not be processed until this recovers.",
+            )
 
         if quiet:
             return
@@ -489,7 +501,9 @@ class TelegramBot:
             delay = 300
         elif streak > 1:
             delay *= random.uniform(0.8, 1.2)
-        time.sleep(delay)
+        # Sliced so the 300s cap keeps petting the systemd watchdog: a
+        # deliberate backoff must not look like a hang (total sleep identical).
+        _sleep_with_watchdog_pets(delay)
 
     def get_updates(self, timeout: int = 30) -> list:
         """Long-poll for new messages."""
@@ -2103,9 +2117,25 @@ def format_operational_status() -> str:
     ok_24h, fail_24h = _gemini_recent_counts(24)
     gemini = health.get("gemini", {})
 
+    # getUpdates outage visibility: the streak is written by _note_poll_failure
+    # and zeroed by the next successful poll, so a nonzero value here means
+    # the poll loop is failing RIGHT NOW (or died mid-streak).
+    telegram_health = health.get("telegram")
+    if not isinstance(telegram_health, dict):
+        telegram_health = {}
+    poll_streak = telegram_health.get("poll_failure_streak")
+    if isinstance(poll_streak, int) and poll_streak > 0:
+        polling_line = (
+            f"Telegram polling: ⚠️ {poll_streak} consecutive poll failures, "
+            f"last error {_format_age(telegram_health.get('last_poll_error_at'))}"
+        )
+    else:
+        polling_line = "Telegram polling: OK"
+
     lines = [
         "🧭 <b>CalorieTracker Status</b>",
         android_line,
+        polling_line,
         f"Gemini: {_gemini_health_label_from(gemini)}",
         f"Gemini 24h: {ok_24h} success(es), {fail_24h} failure(s)",
         f"Last Gemini probe: {_format_age(gemini.get('last_probe_at'))}",
@@ -4134,8 +4164,14 @@ def _analyze_telegram_photo_background(
     img_hash: str,
     staged_path: Optional[Path] = None,
     analysis_slot: Optional[dict] = None,
+    caption: str = "",
 ):
     """Analyze a Telegram photo off the long-poll thread and report the result.
+
+    A user caption ("half portion, no rice") is applied AFTER the meal is
+    saved, as an ordinary NL correction against the just-saved meal — it is
+    never dispatched as a command (pinned security property), and a caption
+    on a not-food photo does nothing.
 
     Owns the hash reservation made by handle_photo_message: every exit path
     must mark it saved/skipped/failed or release it. Also owns the staged
@@ -4196,7 +4232,21 @@ def _analyze_telegram_photo_background(
                 f"(~{analysis.get('total_calories')} kcal)"
             )
             result_text = format_food_result(chat_id, analysis)
+            caption_text = caption.strip() if isinstance(caption, str) else ""
+            if caption_text.startswith("/"):
+                # Pinned property: captions NEVER enter command dispatch.
+                # Say so on the meal card instead of silently dropping it.
+                result_text += (
+                    "\n\n<i>(caption ignored: commands in captions are not executed)</i>"
+                )
             bot.send_message(chat_id, result_text)
+            if caption_text and not caption_text.startswith("/"):
+                # The saved meal appears at its natural index in the meals
+                # snapshot, so the caption works as an immediate NL
+                # correction against it. handle_text_message_safe contains
+                # its own failures — a bad caption cannot kill this thread's
+                # cleanup path.
+                handle_text_message_safe(gemini_client, bot, chat_id, caption_text)
         else:
             database.mark_photo_hash_status(chat_id, img_hash, "skipped", source="telegram")
             reserved_photo = False
@@ -4249,6 +4299,13 @@ def handle_photo_message(
 
     if not file_id:
         return False
+
+    # Caption rides along as post-save NL context ("half portion, no rice");
+    # non-string shapes degrade to no caption. Telegram-chat photos only —
+    # the /upload path stays caption-free.
+    caption = message.get("caption")
+    if not isinstance(caption, str):
+        caption = ""
 
     log.info(f"[{user}] Received photo, analyzing...")
     img_hash = ""
@@ -4327,7 +4384,7 @@ def handle_photo_message(
         worker = threading.Thread(
             target=_analyze_telegram_photo_background,
             args=(gemini_client, bot, chat_id, image_bytes, file_id, img_hash, staged_path,
-                  analysis_slot),
+                  analysis_slot, caption),
         )
         worker.start()
         # Slot ownership passed to the worker's finally. A thread double that
@@ -4634,6 +4691,52 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
 
 def _raise_keyboard_interrupt(signum, frame):
     raise KeyboardInterrupt
+
+
+def _sd_notify(state: str):
+    """Best-effort sd_notify(3): send one datagram to systemd's NOTIFY_SOCKET.
+
+    Silent no-op when NOTIFY_SOCKET is unset (dev runs, tests, non-systemd).
+    A leading '@' means the Linux abstract socket namespace and translates
+    to a leading NUL byte. All OSErrors are swallowed: watchdog petting is
+    defense in depth against hangs and must never become a crash source.
+    """
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr:
+        return
+    if addr.startswith("@"):
+        addr = "\0" + addr[1:]
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            sock.connect(addr)
+            sock.send(state.encode())
+        finally:
+            sock.close()
+    except OSError as e:
+        log.debug(f"sd_notify({state!r}) failed: {e}")
+
+
+# Watchdog-pet sleep slice: must stay well under any sane WatchdogSec
+# (README ships 120s) so a long intentional sleep never reads as a hang.
+_WATCHDOG_SLEEP_SLICE_SECONDS = 30
+
+
+def _sleep_with_watchdog_pets(seconds):
+    """time.sleep(seconds) in <=30s slices, petting the watchdog in between.
+
+    The getUpdates backoff sleeps up to 300s — longer than WatchdogSec — so
+    a deliberate backoff must keep sending WATCHDOG=1 or systemd would
+    restart a healthy (just backing-off) bot. The total time slept is
+    exactly `seconds`, preserving the pinned backoff schedule.
+    """
+    remaining = seconds
+    while remaining > 0:
+        chunk = min(remaining, _WATCHDOG_SLEEP_SLICE_SECONDS)
+        time.sleep(chunk)
+        remaining -= chunk
+        if remaining > 0:
+            _sd_notify("WATCHDOG=1")
 
 
 def _sweep_stranded_pending_uploads(bot: TelegramBot):
@@ -5154,6 +5257,12 @@ def main():
     # must still count as a crash boot, or a boot-time crash loop restarts
     # forever without ever feeding the alert.
     _record_boot_and_maybe_alert(bot)
+    # Type=notify: systemd holds the unit in "activating" until READY=1 and
+    # enforces its start timeout (default 90s). Send it here — before the
+    # stranded-upload sweep and Flask build below — because the sweep can
+    # touch many files and send Telegram messages (60s HTTP timeout each),
+    # so a slow boot must not be killed as a failed start.
+    _sd_notify("READY=1")
     gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
     # systemd stop sends SIGTERM; raising KeyboardInterrupt on the main thread
@@ -5175,6 +5284,12 @@ def main():
     try:
         while True:
             updates = bot.get_updates(timeout=30)
+            # Watchdog pet once per poll iteration: WatchdogSec catches the
+            # hang class Restart=always cannot see (process alive, loop
+            # stuck — e.g. the old no-deadline Gemini hang). get_updates
+            # itself is bounded (60s HTTP timeout; backoff sleeps are
+            # sliced with their own pets), so pets keep flowing.
+            _sd_notify("WATCHDOG=1")
             maybe_warn_stale_android_heartbeat(bot)
 
             for update in updates:
@@ -5193,10 +5308,15 @@ def main():
                 # so healthy batch-mates of a poison update never accumulate.
                 # A skipped poison update `continue`s past this on purpose.
                 _poison_update_clear(update_id)
+                # Pet per processed update too: a big redelivered batch of
+                # slow updates could otherwise outlast WatchdogSec even
+                # though each one is making healthy progress.
+                _sd_notify("WATCHDOG=1")
 
     except KeyboardInterrupt:
         # SIGTERM is routed here too, so systemctl stop/restart and deploys
         # stamp a clean shutdown — the crash-loop tripwire ignores them.
+        _sd_notify("STOPPING=1")
         _record_clean_shutdown()
         log.info("\n👋 Bot stopped.")
 

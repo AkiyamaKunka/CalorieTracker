@@ -400,6 +400,10 @@ def test_save_report_file_strips_telegram_html(monkeypatch, tmp_path):
 
 
 def test_send_wechat_uses_https_and_plain_text(monkeypatch):
+    # send_wechat delegates the HTTP POST to the shared utils.push_wechat,
+    # so the token and requests doubles live on utils.
+    import utils
+
     captured = {}
 
     def fake_post(url, json, timeout):
@@ -408,13 +412,15 @@ def test_send_wechat_uses_https_and_plain_text(monkeypatch):
         return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"code": 200})
 
     monkeypatch.setattr(daily_report, "PUSHPLUS_TOKEN", "token")
-    monkeypatch.setattr(daily_report.requests, "post", fake_post)
+    monkeypatch.setattr(utils, "PUSHPLUS_TOKEN", "token")
+    monkeypatch.setattr(utils.requests, "post", fake_post)
 
     daily_report.send_wechat("<b>Report</b> &amp; more", "2026-06-25")
 
     assert captured["url"].startswith("https://")
     assert captured["payload"]["content"] == "Report & more"
     assert captured["payload"]["template"] == "txt"
+    assert "Daily Calorie Report (2026-06-25)" in captured["payload"]["title"]
 
 
 def test_send_wechat_user_markup_is_sent_as_literal_text(monkeypatch):
@@ -422,6 +428,8 @@ def test_send_wechat_user_markup_is_sent_as_literal_text(monkeypatch):
     # unescapes it again, so user-typed markup like <script> reaches the
     # PushPlus payload verbatim. Template "txt" makes PushPlus render it
     # literally instead of as HTML/markdown.
+    import utils
+
     captured = {}
 
     def fake_post(url, json, timeout):
@@ -429,7 +437,8 @@ def test_send_wechat_user_markup_is_sent_as_literal_text(monkeypatch):
         return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"code": 200})
 
     monkeypatch.setattr(daily_report, "PUSHPLUS_TOKEN", "token")
-    monkeypatch.setattr(daily_report.requests, "post", fake_post)
+    monkeypatch.setattr(utils, "PUSHPLUS_TOKEN", "token")
+    monkeypatch.setattr(utils.requests, "post", fake_post)
 
     daily_report.send_wechat(
         "<b>1. Meal</b> — &lt;script&gt;alert(1)&lt;/script&gt;", "2026-06-25"

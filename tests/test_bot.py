@@ -2007,6 +2007,52 @@ def test_format_operational_status_with_no_state(monkeypatch, tmp_path):
     assert "no heartbeat yet" in status
     assert "0 pending, 0 failed" in status
     assert "Daily report:" not in status
+    # No telegram health key at all reads as a healthy poll loop.
+    assert "Telegram polling: OK" in status
+
+
+def test_format_operational_status_warns_on_poll_failure_streak(monkeypatch, tmp_path):
+    import json as _json
+
+    health_path = tmp_path / "health.json"
+    health_path.write_text(_json.dumps({
+        "telegram": {
+            "poll_failure_streak": 5,
+            "last_poll_error": "Telegram 409 calling getUpdates",
+            "last_poll_error_at": datetime.now().isoformat(timespec="seconds"),
+        },
+    }))
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", health_path)
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "no-pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "no-failed")
+    monkeypatch.setattr(telegram_bot.database, "get_last_android_heartbeat", lambda: None)
+
+    status = telegram_bot.format_operational_status()
+
+    assert "⚠️ 5 consecutive poll failures" in status
+    assert "Telegram polling: OK" not in status
+    # _format_age style: a just-written timestamp renders as seconds-ago.
+    assert "last error" in status
+
+
+def test_format_operational_status_streak_zero_reads_ok(monkeypatch, tmp_path):
+    import json as _json
+
+    health_path = tmp_path / "health.json"
+    # The successful-poll reset writes streak 0 (key present): still OK.
+    health_path.write_text(_json.dumps({
+        "telegram": {"poll_failure_streak": 0,
+                     "last_poll_error": "Telegram 409 calling getUpdates"},
+    }))
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", health_path)
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "no-pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "no-failed")
+    monkeypatch.setattr(telegram_bot.database, "get_last_android_heartbeat", lambda: None)
+
+    status = telegram_bot.format_operational_status()
+
+    assert "Telegram polling: OK" in status
+    assert "consecutive poll failures" not in status
 
 
 def test_format_operational_status_with_full_state(monkeypatch, tmp_path):
