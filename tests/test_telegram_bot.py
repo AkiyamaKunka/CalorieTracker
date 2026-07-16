@@ -2,6 +2,7 @@ import sys
 import os
 import hashlib
 import io
+import service_health
 import json
 import pytest
 from datetime import datetime, timedelta, timezone
@@ -32,6 +33,13 @@ class FakeBot:
 
     def send_message(self, chat_id, text, parse_mode="HTML", reply_markup=None):
         self.sent.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
+        return {"message_id": len(self.sent)}
+
+    def send_photo(self, chat_id, photo_bytes, caption="", parse_mode="HTML"):
+        # Caption text is recorded as the message text so assertions see the
+        # same words the user would, caption or plain message alike.
+        self.sent.append({"chat_id": chat_id, "text": caption, "reply_markup": None,
+                          "photo_bytes": photo_bytes})
         return {"message_id": len(self.sent)}
 
     def answer_callback_query(self, callback_query_id, text=""):
@@ -3059,3 +3067,190 @@ def test_redact_is_total_for_unprintable_values():
     assert telegram_bot.TelegramBot._redact(bot, BadStr()) == "<unprintable BadStr>"
     # Normal-path behavior unchanged: the raw token is still scrubbed.
     assert telegram_bot.TelegramBot._redact(bot, "plain 123:abc text") == "plain <token> text"
+
+
+# ---- Photo echo for API uploads --------------------------------------
+
+def _real_jpeg_bytes(px=64):
+    from PIL import Image as PILImage
+    buf = io.BytesIO()
+    PILImage.new("RGB", (px, px), (200, 120, 40)).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+class _FakeSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def post(self, url, **kwargs):
+        self.calls.append({"url": url, **kwargs})
+        action = self.responses.pop(0)
+        if isinstance(action, Exception):
+            raise action
+        resp = SimpleNamespace(json=lambda: action)
+        resp.raise_for_status = lambda: None
+        return resp
+
+
+def test_send_photo_multipart_shape_and_caption():
+    bot = telegram_bot.TelegramBot("123:abc")
+    bot.session = _FakeSession([{"ok": True, "result": {"message_id": 7}}])
+
+    result = bot.send_photo(12345, b"jpegbytes", caption="<b>Meal</b>")
+
+    assert result == {"message_id": 7}
+    call = bot.session.calls[0]
+    assert call["url"].endswith("/sendPhoto")
+    assert call["files"]["photo"][1] == b"jpegbytes"
+    assert call["data"]["caption"] == "<b>Meal</b>"
+    assert call["data"]["parse_mode"] == "HTML"
+
+
+def test_send_photo_retries_captionless_then_gives_up():
+    bot = telegram_bot.TelegramBot("123:abc")
+    bot.session = _FakeSession([OSError("network"), {"ok": True, "result": {"message_id": 9}}])
+    assert bot.send_photo(12345, b"x", caption="cap") == {"message_id": 9}
+    assert "caption" not in bot.session.calls[1]["data"]
+
+    bot.session = _FakeSession([OSError("network"), OSError("network")])
+    assert bot.send_photo(12345, b"x", caption="cap") is None
+
+    bot.session = _FakeSession([{"ok": False, "description": "bad"}])
+    assert bot.send_photo(12345, b"x") is None
+
+
+def test_compress_photo_for_echo_shapes():
+    out = telegram_bot._compress_photo_for_echo(_real_jpeg_bytes())
+    assert out[:3] == b"\xff\xd8\xff"  # decodable image -> recompressed JPEG
+
+    junk_small = b"\xff\xd8\xff" + b"not really an image"
+    assert telegram_bot._compress_photo_for_echo(junk_small) == junk_small  # sent as-is
+
+    junk_huge = b"\xff\xd8\xff" + bytes(9_500_000)
+    assert telegram_bot._compress_photo_for_echo(junk_huge) is None  # undecodable + oversize
+
+
+def test_echo_meal_photo_caption_vs_split_vs_fallback(monkeypatch):
+    photo_ok = {"message_id": 1}
+
+    class EchoBot(FakeBot):
+        def __init__(self, photo_results):
+            super().__init__()
+            self.photo_results = list(photo_results)
+            self.photo_calls = []
+
+        def send_photo(self, chat_id, photo_bytes, caption="", parse_mode="HTML"):
+            self.photo_calls.append({"caption": caption})
+            return self.photo_results.pop(0)
+
+    jpeg = _real_jpeg_bytes()
+
+    # Short caption -> ONE photo message carrying the card as caption.
+    bot = EchoBot([photo_ok])
+    telegram_bot._echo_meal_photo(bot, 12345, jpeg, "short card")
+    assert bot.photo_calls == [{"caption": "short card"}]
+    assert bot.sent == []
+
+    # Long caption (>1024 UTF-16 units) -> captionless photo + text message.
+    long_card = "🍜" * 600  # astral: 2 units each = 1200 units
+    bot = EchoBot([photo_ok])
+    telegram_bot._echo_meal_photo(bot, 12345, jpeg, long_card)
+    assert bot.photo_calls == [{"caption": ""}]
+    assert bot.sent[-1]["text"] == long_card
+
+    # send_photo failing -> plain text card still arrives.
+    bot = EchoBot([None])
+    telegram_bot._echo_meal_photo(bot, 12345, jpeg, "short card")
+    assert bot.sent[-1]["text"] == "short card"
+
+    # Feature toggled off -> text only, no photo attempt.
+    monkeypatch.setattr(telegram_bot, "ECHO_UPLOAD_PHOTOS", False)
+    bot = EchoBot([])
+    telegram_bot._echo_meal_photo(bot, 12345, jpeg, "short card")
+    assert bot.photo_calls == [] and bot.sent[-1]["text"] == "short card"
+
+
+def test_upload_food_result_arrives_as_photo_caption(mock_db, monkeypatch, tmp_path):
+    """End-to-end: a phone upload's meal card now rides on the echoed photo."""
+    app, bot = _upload_app(monkeypatch, tmp_path, analysis="food")
+    resp = app.test_client().post("/upload", headers={"X-API-Key": "test-upload-key"},
+                                  data=JPEG_MAGIC + b"\xe0food-photo-bytes",
+                                  content_type="image/jpeg")
+    assert resp.status_code == 200
+    echoed = [m for m in bot.sent if m.get("photo_bytes")]
+    assert len(echoed) == 1
+    assert "Auto-Logged" in echoed[0]["text"]
+
+
+# ---- Anti-infinite-loop: poison-update ledger + restart tripwire -----
+
+def _poison_setup(monkeypatch, tmp_path):
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+
+
+def test_poison_update_skips_after_max_attempts(monkeypatch, tmp_path):
+    _poison_setup(monkeypatch, tmp_path)
+    bot = FakeBot()
+
+    # Three sightings (= three fatal attempts) still process.
+    for _ in range(telegram_bot.POISON_UPDATE_MAX_ATTEMPTS):
+        assert telegram_bot._poison_update_should_skip(bot, 777) is False
+    assert bot.sent == []
+
+    # Fourth sighting: skipped, user notified once.
+    assert telegram_bot._poison_update_should_skip(bot, 777) is True
+    assert "skipped a message that crashed me repeatedly" in bot.sent[-1]["text"]
+
+    # Fifth sighting: still skipped, but no second notice.
+    assert telegram_bot._poison_update_should_skip(bot, 777) is True
+    assert len(bot.sent) == 1
+
+
+def test_poison_update_counts_are_per_update_id(monkeypatch, tmp_path):
+    _poison_setup(monkeypatch, tmp_path)
+    bot = FakeBot()
+    for update_id in range(100, 100 + telegram_bot.POISON_UPDATE_MAX_ATTEMPTS + 2):
+        assert telegram_bot._poison_update_should_skip(bot, update_id) is False
+    assert telegram_bot._poison_update_should_skip(bot, None) is False
+
+
+def test_poison_update_ledger_prunes_to_newest_twenty(monkeypatch, tmp_path):
+    _poison_setup(monkeypatch, tmp_path)
+    bot = FakeBot()
+    for update_id in range(1000, 1030):
+        telegram_bot._poison_update_should_skip(bot, update_id)
+    attempts = service_health.load(tmp_path / "health.json")["update_attempts"]
+    assert len(attempts) == 20
+    assert "1029" in attempts and "1000" not in attempts
+
+
+def test_rapid_restart_alert_fires_on_third_boot(monkeypatch, tmp_path):
+    _poison_setup(monkeypatch, tmp_path)
+    bot = FakeBot()
+    telegram_bot._record_boot_and_maybe_alert(bot)
+    telegram_bot._record_boot_and_maybe_alert(bot)
+    assert bot.sent == []
+    telegram_bot._record_boot_and_maybe_alert(bot)
+    assert "restarted 3 times in the last 10 minutes" in bot.sent[-1]["text"]
+
+
+def test_rapid_restart_alert_ignores_old_boots(monkeypatch, tmp_path):
+    _poison_setup(monkeypatch, tmp_path)
+    health = tmp_path / "health.json"
+    stale = (datetime.now() - timedelta(minutes=30)).isoformat(timespec="seconds")
+    service_health.save({"recent_boots": [stale, stale, "not-a-timestamp"]}, health)
+    bot = FakeBot()
+    telegram_bot._record_boot_and_maybe_alert(bot)
+    assert bot.sent == []  # stale + junk entries pruned; this is boot #1
+
+
+def test_process_update_rejects_unauthorized_chat(monkeypatch, tmp_path):
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    bot = FakeBot()
+    telegram_bot._process_update(object(), bot, {
+        "update_id": 1,
+        "message": {"chat": {"id": 99999}, "from": {"first_name": "Stranger"}, "text": "hi"},
+    })
+    assert "not authorized" in bot.sent[-1]["text"]

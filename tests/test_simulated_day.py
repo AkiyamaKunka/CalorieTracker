@@ -31,6 +31,14 @@ class FakeBot:
         self.sent.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
         return {"message_id": len(self.sent)}
 
+    def send_photo(self, chat_id, photo_bytes, caption="", parse_mode="HTML"):
+        # The caption is what the user reads, so record it as the message
+        # text — every "in m['text']" assertion sees the same words the
+        # user would, whether the card arrived as a caption or plain text.
+        self.sent.append({"chat_id": chat_id, "text": caption, "reply_markup": None,
+                          "photo_bytes": photo_bytes})
+        return {"message_id": len(self.sent)}
+
     def answer_callback_query(self, callback_query_id, text=""):
         self.answered.append((callback_query_id, text))
 

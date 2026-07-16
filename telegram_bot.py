@@ -127,6 +127,10 @@ GEMINI_JSON_CONFIG = types.GenerateContentConfig(response_mime_type="application
 API_UPLOAD_PENDING_DIR = Path.home() / "CalorieTracker" / "logs" / "pending_uploads"
 API_UPLOAD_FAILED_DIR = Path.home() / "CalorieTracker" / "logs" / "failed_uploads"
 SERVICE_HEALTH_PATH = service_health.DEFAULT_PATH
+
+# Echo phone-uploaded photos back into the chat as the meal card's image
+# (chat-sent photos are already visible). Default on; set 0/false to disable.
+ECHO_UPLOAD_PHOTOS = parse_boolish(os.environ.get("ECHO_UPLOAD_PHOTOS")) is not False
 BOT_SERVICE_NAME = os.environ.get("CALORIE_BOT_SERVICE_NAME", "caloriebot.service")
 RETRY_ALL_FAILED_MAX = _env_int("RETRY_ALL_FAILED_MAX", 10, 1, 50)
 MAX_API_UPLOAD_BYTES = _env_int("MAX_API_UPLOAD_BYTES", 25 * 1024 * 1024, 1024, 100 * 1024 * 1024)
@@ -352,6 +356,44 @@ class TelegramBot:
                 return self._call("sendMessage", **fallback)
             except Exception:
                 return None
+
+    def send_photo(self, chat_id: int, photo_bytes: bytes, caption: str = "", parse_mode: str = "HTML"):
+        """Send a photo with an optional caption. Returns the Message dict or None.
+
+        Telegram caps captions at 1024 UTF-16 units — callers must keep
+        captions within that or send the text as a separate message.
+        """
+
+        def _post(data):
+            resp = self.session.post(
+                f"{self.base_url}/sendPhoto",
+                data=data,
+                files={"photo": ("meal.jpg", photo_bytes, "image/jpeg")},
+                timeout=60,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            if payload.get("ok"):
+                return payload.get("result")
+            log.error(f"sendPhoto rejected: {self._redact(payload.get('description', 'unknown'))}")
+            return None
+
+        data = {"chat_id": chat_id}
+        if caption:
+            data["caption"] = caption
+            data["parse_mode"] = parse_mode
+        try:
+            return _post(data)
+        except Exception as e:
+            log.error(f"Failed to send photo: {self._redact(e)}")
+            if caption:
+                # Mirror send_message: retry without formatting/caption so a
+                # caption problem cannot lose the image itself.
+                try:
+                    return _post({"chat_id": chat_id})
+                except Exception:
+                    return None
+            return None
 
     def answer_callback_query(self, callback_query_id: str, text: str = ""):
         """Acknowledge an inline-button callback."""
@@ -701,6 +743,50 @@ def _prepare_image_for_gemini(image_bytes: bytes) -> Image.Image:
     except Exception as e:
         log.warning(f"Could not downscale image for Gemini; sending original: {e}")
         return Image.open(io.BytesIO(image_bytes))
+
+
+def _compress_photo_for_echo(image_bytes: bytes) -> Optional[bytes]:
+    """JPEG-compress a photo for echoing back to the chat.
+
+    Phone originals can be 25MB; the echo only needs to be recognizable.
+    Returns None when the bytes can't be made sendable (caller falls back
+    to a text-only meal card).
+    """
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img = ImageOps.exif_transpose(img)
+        img.thumbnail((1280, 1280))
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=82)
+        return buf.getvalue()
+    except Exception as e:
+        log.warning(f"Could not compress photo for echo: {e}")
+        # Telegram's sendPhoto cap is 10MB; small originals can go as-is.
+        return image_bytes if len(image_bytes) <= 9_000_000 else None
+
+
+def _echo_meal_photo(bot: TelegramBot, chat_id: int, image_bytes: bytes, result_text: str):
+    """Send the analyzed photo with the meal card, falling back to text.
+
+    Chat-sent photos are already visible in the conversation, but API
+    uploads (Android watcher / iOS Shortcut) used to produce text-only meal
+    cards — the user never saw WHICH photo a meal came from. Best-effort:
+    any failure still delivers the plain text card.
+    """
+    if not ECHO_UPLOAD_PHOTOS:
+        bot.send_message(chat_id, result_text)
+        return
+    compressed = _compress_photo_for_echo(image_bytes)
+    if compressed is None:
+        bot.send_message(chat_id, result_text)
+        return
+    if utf16_len(result_text) <= 1024:
+        if bot.send_photo(chat_id, compressed, caption=result_text):
+            return
+    elif bot.send_photo(chat_id, compressed):
+        bot.send_message(chat_id, result_text)
+        return
+    bot.send_message(chat_id, result_text)
 
 
 def _analyze_food_photo_once(client: genai.Client, image_bytes: bytes) -> Dict:
@@ -4193,7 +4279,10 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
                     database.mark_photo_hash_status(ALLOWED_CHAT_ID, hsh, "saved", meal_id, source="api_auto")
                     log.info(f"  ✅ API Food: {analysis.get('meal_description')} (~{analysis.get('total_calories')} kcal)")
                     result_text = format_food_result(ALLOWED_CHAT_ID, analysis)
-                    bot.send_message(ALLOWED_CHAT_ID, f"📲 <b>Auto-Logged from {device_display}:</b>\n\n" + result_text)
+                    _echo_meal_photo(
+                        bot, ALLOWED_CHAT_ID, bytes_data,
+                        f"📲 <b>Auto-Logged from {device_display}:</b>\n\n" + result_text,
+                    )
                     _discard_api_upload(staged_path)
                 else:
                     log.info("  ⏭️ API Upload: Not food")
@@ -4293,6 +4382,314 @@ def _sweep_stranded_pending_uploads(bot: TelegramBot):
 
 
 # ─── Main Bot Loop ────────────────────────────────────────────────
+# An update that has killed the process this many times gets skipped, not
+# retried forever. Three real attempts, then the ledger declares it poison.
+POISON_UPDATE_MAX_ATTEMPTS = 3
+
+
+def _poison_update_should_skip(bot: TelegramBot, update_id) -> bool:
+    """Durable bounded retry for updates that kill the process outright.
+
+    The per-update try/except in main() contains ordinary exceptions, but it
+    cannot survive OOM/SIGKILL mid-update. This ledger can: every update's
+    attempt count is persisted BEFORE processing, so an update that keeps
+    dying arrives back (offset unconfirmed -> Telegram re-delivers) with a
+    growing count and is eventually skipped instead of crash-looping the
+    service forever (the 2026-07-16 failure mode, then only stopped by an
+    in-code bug fix). Counts live in service_health.json, pruned to the 20
+    newest update_ids — a clean pass simply ages out.
+    """
+    if update_id is None:
+        return False
+    key = str(update_id)
+    seen = {}
+
+    def mutate(data):
+        attempts = data.get("update_attempts")
+        attempts = dict(attempts) if isinstance(attempts, dict) else {}
+        seen["n"] = attempts.get(key, 0) + 1 if isinstance(attempts.get(key), int) else 1
+        attempts[key] = seen["n"]
+        if len(attempts) > 20:
+            # update_ids are monotonically increasing; keep the newest.
+            for old in sorted(attempts, key=lambda k: int(k) if k.isdigit() else 0)[:-20]:
+                attempts.pop(old, None)
+        data["update_attempts"] = attempts
+
+    service_health.update(mutate, SERVICE_HEALTH_PATH, warn=log.warning)
+    n = seen.get("n", 1)
+    if n <= POISON_UPDATE_MAX_ATTEMPTS:
+        return False
+    log.error(f"☠️ Skipping poison update {update_id} after {n - 1} fatal attempts.")
+    if n == POISON_UPDATE_MAX_ATTEMPTS + 1:  # notify once, not on every re-sight
+        try:
+            bot.send_message(
+                ALLOWED_CHAT_ID,
+                "⚠️ <b>I skipped a message that crashed me repeatedly.</b>\n\n"
+                f"It failed {n - 1} times in a row, so I gave up on it to stay alive. "
+                "Please rephrase it or split it into smaller requests.",
+            )
+        except Exception:
+            log.error("Could not send the poison-update notice.")
+    return True
+
+
+def _record_boot_and_maybe_alert(bot: TelegramBot):
+    """Crash-loop tripwire: 3+ boots inside 10 minutes is never normal."""
+    now = datetime.now()
+    counted = {}
+
+    def mutate(data):
+        boots = []
+        for ts in data.get("recent_boots") or []:
+            try:
+                if (now - datetime.fromisoformat(ts)).total_seconds() <= 600:
+                    boots.append(ts)
+            except (ValueError, TypeError):
+                pass
+        boots.append(now.isoformat(timespec="seconds"))
+        data["recent_boots"] = boots[-10:]
+        counted["n"] = len(boots)
+
+    service_health.update(mutate, SERVICE_HEALTH_PATH, warn=log.warning)
+    n = counted.get("n", 1)
+    if n >= 3:
+        log.warning(f"⚠️ {n} boots within 10 minutes — possible crash loop.")
+        try:
+            bot.send_message(
+                ALLOWED_CHAT_ID,
+                f"⚠️ <b>I have restarted {n} times in the last 10 minutes.</b>\n\n"
+                "Something may be crashing me repeatedly. "
+                "Check recent errors with <code>/logs 20</code>.",
+            )
+        except Exception:
+            log.error("Could not send the rapid-restart alert.")
+
+
+def _process_update(gemini_client, bot: TelegramBot, update: Dict):
+    """Handle one Telegram update: callbacks, commands, photos, free text.
+
+    Extracted from main() so the poll loop can wrap each update in the
+    poison-update guard and a catch-all: before this existed, one update
+    that raised took the process down BEFORE the offset was confirmed,
+    and systemd restarted straight into a re-delivery crash loop
+    (observed live 2026-07-16)."""
+    callback_query = update.get("callback_query")
+    if callback_query:
+        handle_callback_query(gemini_client, bot, callback_query)
+        return
+
+    message = update.get("message")
+    if not message:
+        return
+
+    chat_id = message["chat"]["id"]
+    user = message.get("from", {}).get("first_name", "User")
+
+    # ─── Security Check ──────────────────────────────
+    if chat_id != ALLOWED_CHAT_ID:
+        log.warning(f"Unauthorized access attempt from chat_id: {chat_id} (User: {user})")
+        bot.send_message(
+            chat_id,
+            "🚫 You are not authorized to use this bot. This is a private instance.",
+        )
+        return
+
+    text = message.get("text", "").strip()
+    command = text.split()[0].lower().split("@")[0] if text.startswith("/") else ""
+    args = text.split()[1:] if text.startswith("/") else []
+
+    # ─── Commands ────────────────────────────────────
+    if command in {"/start", "/help"}:
+        log.info(f"[{user}] /help")
+        bot.send_message(chat_id, HELP_TEXT)
+        return
+
+    if command == "/commands":
+        log.info(f"[{user}] /commands")
+        bot.send_message(chat_id, COMMAND_MENU_TEXT)
+        return
+
+    if command == "/today":
+        log.info(f"[{user}] /today")
+        bot.send_message(chat_id, format_today_summary(chat_id))
+        return
+
+    if command == "/meals":
+        log.info(f"[{user}] /meals")
+        bot.send_message(chat_id, format_meals_list(chat_id))
+        return
+
+    if command == "/recent":
+        limit = _parse_positive_int(args[0], 10, 1, 25) if args else 10
+        log.info(f"[{user}] /recent {limit}")
+        bot.send_message(chat_id, format_recent_meals(chat_id, limit=limit))
+        return
+                    
+    if command == "/history":
+        days = _parse_positive_int(args[0], 7, 1, 60) if args else 7
+        log.info(f"[{user}] /history {days}")
+        bot.send_message(chat_id, format_history(chat_id, days=days))
+        return
+
+    if command == "/ping_android":
+        # Silent heartbeat ping
+        # legacy — no known clients; watcher heartbeats via HTTP /ping
+        database.update_android_heartbeat()
+        return
+
+    if command == "/status":
+        log.info(f"[{user}] /status")
+        bot.send_message(chat_id, format_operational_status())
+        return
+
+    if command == "/doctor":
+        log.info(f"[{user}] /doctor")
+        bot.send_message(chat_id, "🩺 Running self-check...")
+        bot.send_message(chat_id, run_doctor(gemini_client))
+        return
+
+    if command == "/gemini":
+        log.info(f"[{user}] /gemini")
+        bot.send_message(chat_id, "🔎 Running Gemini probe...")
+        bot.send_message(chat_id, run_gemini_probe(gemini_client))
+        return
+
+    if command == "/android":
+        log.info(f"[{user}] /android")
+        bot.send_message(chat_id, format_android_status())
+        return
+
+    if command == "/queue":
+        limit = _parse_positive_int(args[0], 8, 1, 25) if args else 8
+        log.info(f"[{user}] /queue {limit}")
+        bot.send_message(chat_id, format_queue_status(limit))
+        return
+
+    if command == "/failed":
+        log.info(f"[{user}] /failed")
+        bot.send_message(chat_id, format_failed_uploads())
+        return
+
+    if command == "/retry_failed":
+        selector = text.split(maxsplit=1)[1] if len(text.split(maxsplit=1)) > 1 else "latest"
+        log.info(f"[{user}] /retry_failed {selector}")
+        bot.send_message(chat_id, f"🔁 Retrying failed upload: <code>{escape(selector)}</code>")
+        bot.send_message(chat_id, retry_failed_upload(gemini_client, selector))
+        return
+
+    if command == "/retry_all_failed":
+        limit = _parse_positive_int(args[0], 3, 1, RETRY_ALL_FAILED_MAX) if args else 3
+        log.info(f"[{user}] /retry_all_failed {limit}")
+        bot.send_message(chat_id, f"🔁 Retrying up to {limit} failed saved upload(s)...")
+        bot.send_message(chat_id, retry_all_failed_uploads(gemini_client, limit))
+        return
+
+    if command == "/clear_failed":
+        confirmed = bool(args) and args[-1].lower() == "confirm"
+        selector_parts = args[:-1] if confirmed else args
+        selector = " ".join(selector_parts) or "latest"
+        log.info(f"[{user}] /clear_failed {selector} confirmed={confirmed}")
+        bot.send_message(chat_id, clear_failed_uploads(selector, confirmed=confirmed))
+        return
+
+    if command == "/vpn":
+        log.info(f"[{user}] /vpn")
+        bot.send_message(chat_id, format_vpn_status())
+        return
+
+    if command == "/report":
+        selector = args[0] if args else "today"
+        log.info(f"[{user}] /report {selector}")
+        bot.send_message(chat_id, f"📊 Generating report for <code>{escape(selector)}</code>...")
+        send_long_message(bot, chat_id, generate_report_for_command(selector))
+        return
+
+    if command == "/report_status":
+        log.info(f"[{user}] /report_status")
+        bot.send_message(chat_id, format_report_status())
+        return
+
+    if command == "/reports":
+        limit = _parse_positive_int(args[0], 8, 1, 25) if args else 8
+        log.info(f"[{user}] /reports {limit}")
+        bot.send_message(chat_id, format_saved_reports(limit))
+        return
+
+    if command == "/logs":
+        line_count = _parse_positive_int(args[0], 30, 1, 80) if args else 30
+        log.info(f"[{user}] /logs {line_count}")
+        send_long_message(bot, chat_id, format_recent_logs(line_count))
+        return
+
+    if command == "/config":
+        log.info(f"[{user}] /config")
+        bot.send_message(chat_id, format_safe_config())
+        return
+
+    if command == "/stats":
+        log.info(f"[{user}] /stats")
+        bot.send_message(chat_id, format_database_stats(chat_id))
+        return
+
+    # ─── Fitness & diet (pure DB + arithmetic, no Gemini) ──
+    if command == "/weight":
+        log.info(f"[{user}] /weight {' '.join(args)}".rstrip())
+        _cmd_weight(bot, chat_id, args)
+        return
+
+    if command == "/diet":
+        log.info(f"[{user}] /diet {' '.join(args)}".rstrip())
+        _cmd_diet(bot, chat_id, args)
+        return
+
+    if command == "/macros":
+        log.info(f"[{user}] /macros {' '.join(args)}".rstrip())
+        _cmd_macros(bot, chat_id, args)
+        return
+
+    if command == "/workout":
+        log.info(f"[{user}] /workout {' '.join(args)}".rstrip())
+        _cmd_workout(bot, chat_id, args)
+        return
+
+    if command == "/train":
+        log.info(f"[{user}] /train")
+        bot.send_message(chat_id, format_train_recommendation(chat_id))
+        return
+
+    if command == "/activity":
+        log.info(f"[{user}] /activity {' '.join(args)}".rstrip())
+        _cmd_activity(bot, chat_id, args)
+        return
+
+    if command == "/train_run":
+        log.info(f"[{user}] /train_run {' '.join(args)}".rstrip())
+        _cmd_train_run(bot, chat_id, args)
+        return
+
+    if command == "/plan":
+        log.info(f"[{user}] /plan")
+        bot.send_message(chat_id, format_week_plan(chat_id))
+        return
+
+    if command == "/profile":
+        log.info(f"[{user}] /profile")
+        bot.send_message(chat_id, format_fitness_profile(chat_id))
+        return
+
+    # ─── Handle photos ────────────────────────────────
+    if handle_photo_message(gemini_client, bot, chat_id, message, user):
+        return
+
+    # ─── Ignore non-text messages ─────────────────────
+    if not text or text.startswith("/"):
+        return
+
+    # ─── Smart Text Handler ───────────────────────
+    log.info(f"[{user}] Text: {text}")
+    handle_text_message_safe(gemini_client, bot, chat_id, text)
+
+
 def main():
     log.info("=" * 50)
     log.info("🤖 CalorieTracker Bot (Corrections Mode)")
@@ -4345,6 +4742,7 @@ def main():
     log.info("🚀 Flask REST API started on port 5000")
     
     log.info("Bot is running! Listening for corrections and commands.")
+    _record_boot_and_maybe_alert(bot)
     log.info("Press Ctrl+C to stop.\n")
 
     try:
@@ -4353,221 +4751,17 @@ def main():
             maybe_warn_stale_android_heartbeat(bot)
 
             for update in updates:
-                callback_query = update.get("callback_query")
-                if callback_query:
-                    handle_callback_query(gemini_client, bot, callback_query)
+                update_id = update.get("update_id")
+                if _poison_update_should_skip(bot, update_id):
                     continue
-
-                message = update.get("message")
-                if not message:
-                    continue
-
-                chat_id = message["chat"]["id"]
-                user = message.get("from", {}).get("first_name", "User")
-
-                # ─── Security Check ──────────────────────────────
-                if chat_id != ALLOWED_CHAT_ID:
-                    log.warning(f"Unauthorized access attempt from chat_id: {chat_id} (User: {user})")
-                    bot.send_message(
-                        chat_id,
-                        "🚫 You are not authorized to use this bot. This is a private instance.",
-                    )
-                    continue
-
-                text = message.get("text", "").strip()
-                command = text.split()[0].lower().split("@")[0] if text.startswith("/") else ""
-                args = text.split()[1:] if text.startswith("/") else []
-
-                # ─── Commands ────────────────────────────────────
-                if command in {"/start", "/help"}:
-                    log.info(f"[{user}] /help")
-                    bot.send_message(chat_id, HELP_TEXT)
-                    continue
-
-                if command == "/commands":
-                    log.info(f"[{user}] /commands")
-                    bot.send_message(chat_id, COMMAND_MENU_TEXT)
-                    continue
-
-                if command == "/today":
-                    log.info(f"[{user}] /today")
-                    bot.send_message(chat_id, format_today_summary(chat_id))
-                    continue
-
-                if command == "/meals":
-                    log.info(f"[{user}] /meals")
-                    bot.send_message(chat_id, format_meals_list(chat_id))
-                    continue
-
-                if command == "/recent":
-                    limit = _parse_positive_int(args[0], 10, 1, 25) if args else 10
-                    log.info(f"[{user}] /recent {limit}")
-                    bot.send_message(chat_id, format_recent_meals(chat_id, limit=limit))
-                    continue
-                    
-                if command == "/history":
-                    days = _parse_positive_int(args[0], 7, 1, 60) if args else 7
-                    log.info(f"[{user}] /history {days}")
-                    bot.send_message(chat_id, format_history(chat_id, days=days))
-                    continue
-
-                if command == "/ping_android":
-                    # Silent heartbeat ping
-                    # legacy — no known clients; watcher heartbeats via HTTP /ping
-                    database.update_android_heartbeat()
-                    continue
-
-                if command == "/status":
-                    log.info(f"[{user}] /status")
-                    bot.send_message(chat_id, format_operational_status())
-                    continue
-
-                if command == "/doctor":
-                    log.info(f"[{user}] /doctor")
-                    bot.send_message(chat_id, "🩺 Running self-check...")
-                    bot.send_message(chat_id, run_doctor(gemini_client))
-                    continue
-
-                if command == "/gemini":
-                    log.info(f"[{user}] /gemini")
-                    bot.send_message(chat_id, "🔎 Running Gemini probe...")
-                    bot.send_message(chat_id, run_gemini_probe(gemini_client))
-                    continue
-
-                if command == "/android":
-                    log.info(f"[{user}] /android")
-                    bot.send_message(chat_id, format_android_status())
-                    continue
-
-                if command == "/queue":
-                    limit = _parse_positive_int(args[0], 8, 1, 25) if args else 8
-                    log.info(f"[{user}] /queue {limit}")
-                    bot.send_message(chat_id, format_queue_status(limit))
-                    continue
-
-                if command == "/failed":
-                    log.info(f"[{user}] /failed")
-                    bot.send_message(chat_id, format_failed_uploads())
-                    continue
-
-                if command == "/retry_failed":
-                    selector = text.split(maxsplit=1)[1] if len(text.split(maxsplit=1)) > 1 else "latest"
-                    log.info(f"[{user}] /retry_failed {selector}")
-                    bot.send_message(chat_id, f"🔁 Retrying failed upload: <code>{escape(selector)}</code>")
-                    bot.send_message(chat_id, retry_failed_upload(gemini_client, selector))
-                    continue
-
-                if command == "/retry_all_failed":
-                    limit = _parse_positive_int(args[0], 3, 1, RETRY_ALL_FAILED_MAX) if args else 3
-                    log.info(f"[{user}] /retry_all_failed {limit}")
-                    bot.send_message(chat_id, f"🔁 Retrying up to {limit} failed saved upload(s)...")
-                    bot.send_message(chat_id, retry_all_failed_uploads(gemini_client, limit))
-                    continue
-
-                if command == "/clear_failed":
-                    confirmed = bool(args) and args[-1].lower() == "confirm"
-                    selector_parts = args[:-1] if confirmed else args
-                    selector = " ".join(selector_parts) or "latest"
-                    log.info(f"[{user}] /clear_failed {selector} confirmed={confirmed}")
-                    bot.send_message(chat_id, clear_failed_uploads(selector, confirmed=confirmed))
-                    continue
-
-                if command == "/vpn":
-                    log.info(f"[{user}] /vpn")
-                    bot.send_message(chat_id, format_vpn_status())
-                    continue
-
-                if command == "/report":
-                    selector = args[0] if args else "today"
-                    log.info(f"[{user}] /report {selector}")
-                    bot.send_message(chat_id, f"📊 Generating report for <code>{escape(selector)}</code>...")
-                    send_long_message(bot, chat_id, generate_report_for_command(selector))
-                    continue
-
-                if command == "/report_status":
-                    log.info(f"[{user}] /report_status")
-                    bot.send_message(chat_id, format_report_status())
-                    continue
-
-                if command == "/reports":
-                    limit = _parse_positive_int(args[0], 8, 1, 25) if args else 8
-                    log.info(f"[{user}] /reports {limit}")
-                    bot.send_message(chat_id, format_saved_reports(limit))
-                    continue
-
-                if command == "/logs":
-                    line_count = _parse_positive_int(args[0], 30, 1, 80) if args else 30
-                    log.info(f"[{user}] /logs {line_count}")
-                    send_long_message(bot, chat_id, format_recent_logs(line_count))
-                    continue
-
-                if command == "/config":
-                    log.info(f"[{user}] /config")
-                    bot.send_message(chat_id, format_safe_config())
-                    continue
-
-                if command == "/stats":
-                    log.info(f"[{user}] /stats")
-                    bot.send_message(chat_id, format_database_stats(chat_id))
-                    continue
-
-                # ─── Fitness & diet (pure DB + arithmetic, no Gemini) ──
-                if command == "/weight":
-                    log.info(f"[{user}] /weight {' '.join(args)}".rstrip())
-                    _cmd_weight(bot, chat_id, args)
-                    continue
-
-                if command == "/diet":
-                    log.info(f"[{user}] /diet {' '.join(args)}".rstrip())
-                    _cmd_diet(bot, chat_id, args)
-                    continue
-
-                if command == "/macros":
-                    log.info(f"[{user}] /macros {' '.join(args)}".rstrip())
-                    _cmd_macros(bot, chat_id, args)
-                    continue
-
-                if command == "/workout":
-                    log.info(f"[{user}] /workout {' '.join(args)}".rstrip())
-                    _cmd_workout(bot, chat_id, args)
-                    continue
-
-                if command == "/train":
-                    log.info(f"[{user}] /train")
-                    bot.send_message(chat_id, format_train_recommendation(chat_id))
-                    continue
-
-                if command == "/activity":
-                    log.info(f"[{user}] /activity {' '.join(args)}".rstrip())
-                    _cmd_activity(bot, chat_id, args)
-                    continue
-
-                if command == "/train_run":
-                    log.info(f"[{user}] /train_run {' '.join(args)}".rstrip())
-                    _cmd_train_run(bot, chat_id, args)
-                    continue
-
-                if command == "/plan":
-                    log.info(f"[{user}] /plan")
-                    bot.send_message(chat_id, format_week_plan(chat_id))
-                    continue
-
-                if command == "/profile":
-                    log.info(f"[{user}] /profile")
-                    bot.send_message(chat_id, format_fitness_profile(chat_id))
-                    continue
-
-                # ─── Handle photos ────────────────────────────────
-                if handle_photo_message(gemini_client, bot, chat_id, message, user):
-                    continue
-
-                # ─── Ignore non-text messages ─────────────────────
-                if not text or text.startswith("/"):
-                    continue
-
-                # ─── Smart Text Handler ───────────────────────
-                log.info(f"[{user}] Text: {text}")
-                handle_text_message_safe(gemini_client, bot, chat_id, text)
+                try:
+                    _process_update(gemini_client, bot, update)
+                except Exception as e:
+                    # Contain per-update failures: an escape here would kill
+                    # the process pre-offset-confirm and crash-loop on the
+                    # re-delivered update. The durable attempt ledger above
+                    # backstops even hard kills (OOM/SIGKILL) this cannot see.
+                    log.error(f"Unhandled error processing update {update_id}: {bot._redact(e)}")
 
     except KeyboardInterrupt:
         log.info("\n👋 Bot stopped.")
