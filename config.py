@@ -139,8 +139,26 @@ Respond with JSON ONLY in this exact format:
   "reply": "Friendly response to the user"
 }}
 
+COMPOUND REQUESTS: if the user's single message contains MULTIPLE distinct requests
+(e.g. "correct meal 2 to roast duck rice AND delete meal 3"), respond with ONE
+JSON OBJECT (never a bare JSON array) in this shape instead:
+{{
+  "intent": "multi",
+  "actions": [
+    {{ ...first request, same fields as a single response... }},
+    {{ ...second request... }}
+  ],
+  "reply": "Brief summary of what you are doing"
+}}
+Each entry in "actions" uses exactly the same schema as a single response above.
+All "meal_index"/"meal_indices" values in every action refer to the ORIGINAL
+meals_list shown above (indices never shift between actions). Combine ALL
+deletions into ONE "delete" action listing every index in "meal_indices".
+List actions in the order the user stated them. Use at most 5 actions.
+
 Rules:
 - Respond ONLY with valid JSON, no other text.
+- Respond with a single JSON OBJECT at the top level — NEVER a bare JSON array. Multiple requests go inside "actions" of a "multi" object.
 - For "new_meal", estimate calories based on standard portion sizes and return it in "analysis".
 - For "correction", accurately identify the "meal_index" (the exact 0-based index from the provided `meals_list` array), apply the correction, and return the FULL updated "analysis".
 - For "delete", accurately identify all targeted meals from `meals_list` and return their 0-based indices as a list in "meal_indices". Provide a brief "reason".

@@ -3515,6 +3515,38 @@ _NL_INTENT_HANDLERS = {
     "log_activity": _nl_log_activity,
 }
 
+# A compound message ("correct meal 2 AND delete meal 3") expands into this
+# many actions at most; anything longer is almost certainly model runaway.
+NL_MAX_ACTIONS = 5
+
+
+def _normalize_nl_actions(result) -> List[Dict]:
+    """Coerce any parsed model response into an ordered list of action dicts.
+
+    Gemini's JSON mode guarantees syntax, not schema. Despite the prompt
+    demanding a single object, compound requests have produced a bare JSON
+    ARRAY of intent objects (which crash-looped the bot on 2026-07-16), and
+    the designed compound shape is {"intent": "multi", "actions": [...]}.
+    Every shape funnels through here; unusable input yields [] rather than
+    an exception.
+    """
+    if isinstance(result, dict):
+        actions = result.get("actions")
+        items = actions if isinstance(actions, list) and actions else [result]
+    elif isinstance(result, list):
+        items = result
+    else:
+        return []
+
+    usable = [a for a in items if isinstance(a, dict)]
+    dropped = len(items) - len(usable)
+    if dropped:
+        log.warning(f"  Dropped {dropped} non-dict NL action(s) from model response.")
+    if len(usable) > NL_MAX_ACTIONS:
+        log.warning(f"  Capping NL actions at {NL_MAX_ACTIONS} (model returned {len(usable)}).")
+        usable = usable[:NL_MAX_ACTIONS]
+    return usable
+
 
 def handle_text_message(
     gemini_client: genai.Client,
@@ -3584,13 +3616,61 @@ def handle_text_message(
         bot.send_message(chat_id, "❌ Error contacting AI. Please try again.")
         return
 
-    # Gemini runs in JSON mode without a response_schema, so "intent" can be
-    # any JSON type. An unhashable value (list/dict) would make dict.get raise
-    # TypeError and kill the polling loop; non-string intents fall through to
-    # the chat reply, exactly like the pre-refactor if/elif == chain did.
-    intent = result.get("intent")
-    handler = _NL_INTENT_HANDLERS.get(intent, _nl_chat) if isinstance(intent, str) else _nl_chat
-    handler(bot, chat_id, text, meals, result)
+    # Gemini runs in JSON mode without a response_schema, so the response can
+    # be any JSON type and "intent" any value. Normalize everything (single
+    # object, {"intent": "multi", "actions": [...]}, or a bare array) into a
+    # list of actions; non-string intents fall through to the chat reply,
+    # exactly like the pre-refactor if/elif == chain did. All indices in a
+    # compound refer to the same `meals` snapshot the prompt showed, and the
+    # handlers resolve them to DB ids immediately, so earlier actions cannot
+    # shift a later action's target.
+    actions = _normalize_nl_actions(result)
+    if not actions:
+        log.warning(f"  NL response had no usable actions (top-level {type(result).__name__}).")
+        bot.send_message(
+            chat_id,
+            "❌ I couldn't work out what to do with that. "
+            "Try one request at a time, e.g. “change meal 2 to roast duck rice”.",
+        )
+        return
+
+    failures = 0
+    for action in actions:
+        intent = action.get("intent")
+        handler = _NL_INTENT_HANDLERS.get(intent, _nl_chat) if isinstance(intent, str) else _nl_chat
+        try:
+            handler(bot, chat_id, text, meals, action)
+        except Exception as e:
+            # One malformed action must not abort its siblings (or the bot).
+            failures += 1
+            log.error(f"  NL action {intent!r} failed: {bot._redact(e)}")
+    if failures:
+        note = (
+            "❌ That request failed. Please try again."
+            if failures == len(actions) == 1
+            else f"⚠️ {failures} of {len(actions)} requested action(s) failed — the rest were applied."
+        )
+        bot.send_message(chat_id, note)
+
+
+def handle_text_message_safe(gemini_client, bot: TelegramBot, chat_id: int, text: str):
+    """handle_text_message that can never take down the polling loop.
+
+    An exception escaping into main() kills the process BEFORE the update's
+    offset is confirmed to Telegram, so systemd restarts into a re-delivery
+    of the same poisoned message — an unbounded crash loop that also burns a
+    Gemini call per cycle (observed live on 2026-07-16 with a compound
+    correction+delete message). Contain everything here.
+    """
+    try:
+        handle_text_message(gemini_client, bot, chat_id, text)
+    except Exception as e:
+        # Defense in depth: network errors can embed the token URL.
+        log.error(f"Unhandled error in text handler: {bot._redact(e)}")
+        try:
+            bot.send_message(chat_id, "❌ Something went wrong handling that message. Please try again.")
+        except Exception:
+            log.error("Could not send the text-handler failure notice.")
 
 
 def handle_callback_query(gemini_client, bot: TelegramBot, callback_query: Dict) -> bool:
@@ -4441,7 +4521,7 @@ def main():
 
                 # ─── Smart Text Handler ───────────────────────
                 log.info(f"[{user}] Text: {text}")
-                handle_text_message(gemini_client, bot, chat_id, text)
+                handle_text_message_safe(gemini_client, bot, chat_id, text)
 
     except KeyboardInterrupt:
         log.info("\n👋 Bot stopped.")

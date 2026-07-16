@@ -2782,3 +2782,181 @@ def test_run_doctor_reports_claude_analyzer_state(monkeypatch, tmp_path, label, 
     result = telegram_bot.run_doctor(object())
 
     assert expected in result
+
+
+# ---- Compound NL instructions (2026-07-16 crash-loop regression) -----
+
+def _seed_three_meals():
+    """Breakfast/lunch/dinner rows; returns the snapshot the prompt would show."""
+    today = database.user_local_now().date().isoformat()
+    now_iso = datetime.now().isoformat()
+    for time_str, image_hash, file_id, desc, cal in [
+        ("08:00", "hash-b", "file-b", "白粥", 150),
+        ("12:30", "hash-l", "file-l", "面条", 550),
+        ("19:00", "hash-d", "file-d", "米饭", 400),
+    ]:
+        database.save_meal(12345, today, time_str, now_iso, "test", image_hash, file_id,
+                           {"is_food": True, "meal_description": desc, "total_calories": cal})
+    return _wide_recent_meals(12345)
+
+
+ROAST_DUCK_ANALYSIS = {
+    "is_food": True,
+    "meal_description": "烧鸭饭",
+    "total_calories": 780,
+    "total_protein_g": 35,
+    "total_carbs_g": 90,
+    "total_fat_g": 28,
+    "food_items": [{"name": "烧鸭饭", "estimated_calories": 780,
+                    "protein_g": 35, "carbs_g": 90, "fat_g": 28}],
+}
+
+
+def _compound_nl_setup(monkeypatch, tmp_path):
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(database, "get_android_timezone", lambda *args, **kwargs: "+0800")
+    monkeypatch.setattr(telegram_bot, "get_recent_meals", _wide_recent_meals)
+    telegram_bot._pending_nl_deletes.clear()
+
+
+def _assert_correct_lunch_delete_dinner(bot, snapshot):
+    """Shared outcome checks: lunch corrected in-place, dinner pending confirm."""
+    lunch = next(m for m in snapshot if m["analysis"]["meal_description"] == "面条")
+    dinner = next(m for m in snapshot if m["analysis"]["meal_description"] == "米饭")
+
+    after = {m["id"]: m for m in _wide_recent_meals(12345)}
+    assert len(after) == 3, "nothing may be deleted before the user confirms"
+    assert after[lunch["id"]]["analysis"]["meal_description"] == "烧鸭饭"
+    assert after[lunch["id"]]["analysis"]["total_calories"] == 780
+
+    pending = telegram_bot._pending_nl_deletes[12345]
+    assert pending["ids"] == [dinner["id"]]
+
+    texts = [m["text"] for m in bot.sent]
+    assert any("烧鸭饭" in t and "✏️" in t for t in texts), "correction reply missing"
+    markup = bot.sent[-1]["reply_markup"]
+    datas = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+    assert f"nl_delete_confirm:{pending['token']}" in datas
+
+
+def test_nl_compound_bare_array_crash_regression(mock_db, monkeypatch, tmp_path):
+    """The exact 2026-07-16 production failure: a compound Chinese instruction
+    made Gemini return a bare JSON ARRAY of intent objects; result.get()
+    raised AttributeError, killing the process before the offset was
+    confirmed — systemd then crash-looped on the re-delivered message.
+    The array shape must now execute all actions."""
+    _compound_nl_setup(monkeypatch, tmp_path)
+    snapshot = _seed_three_meals()
+    lunch_idx = next(i for i, m in enumerate(snapshot)
+                     if m["analysis"]["meal_description"] == "面条")
+    dinner_idx = next(i for i, m in enumerate(snapshot)
+                      if m["analysis"]["meal_description"] == "米饭")
+
+    payload = [
+        {"intent": "correction", "meal_index": lunch_idx,
+         "reason": "第二顿饭改为烧鸭饭", "analysis": ROAST_DUCK_ANALYSIS},
+        {"intent": "delete", "meal_indices": [dinner_idx], "reason": "用户要求删除第三顿饭"},
+    ]
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(
+        _intent_client(payload), bot, 12345,
+        "我是说第二顿饭是烧鸭饭 你重新准确算一下第二顿饭 删除第三顿饭")
+
+    _assert_correct_lunch_delete_dinner(bot, snapshot)
+
+
+def test_nl_compound_multi_object_shape(mock_db, monkeypatch, tmp_path):
+    """The designed compound shape: {"intent": "multi", "actions": [...]}."""
+    _compound_nl_setup(monkeypatch, tmp_path)
+    snapshot = _seed_three_meals()
+    lunch_idx = next(i for i, m in enumerate(snapshot)
+                     if m["analysis"]["meal_description"] == "面条")
+    dinner_idx = next(i for i, m in enumerate(snapshot)
+                      if m["analysis"]["meal_description"] == "米饭")
+
+    payload = {
+        "intent": "multi",
+        "actions": [
+            {"intent": "correction", "meal_index": lunch_idx,
+             "reason": "改为烧鸭饭", "analysis": ROAST_DUCK_ANALYSIS},
+            {"intent": "delete", "meal_indices": [dinner_idx], "reason": "删除第三顿"},
+        ],
+        "reply": "正在更正第二顿并删除第三顿",
+    }
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(payload), bot, 12345,
+                                     "第二顿是烧鸭饭，删除第三顿")
+
+    _assert_correct_lunch_delete_dinner(bot, snapshot)
+
+
+def test_nl_compound_caps_at_max_actions(mock_db, monkeypatch, tmp_path):
+    """Model runaway (dozens of actions) is capped at NL_MAX_ACTIONS."""
+    _compound_nl_setup(monkeypatch, tmp_path)
+    payload = {"intent": "multi",
+               "actions": [{"intent": "chat", "reply": f"reply {i}"} for i in range(8)]}
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(payload), bot, 12345, "hello hello")
+
+    replies = [m["text"] for m in bot.sent if m["text"].startswith("reply ")]
+    assert replies == [f"reply {i}" for i in range(telegram_bot.NL_MAX_ACTIONS)]
+
+
+def test_nl_compound_partial_failure_continues(mock_db, monkeypatch, tmp_path):
+    """One crashing action must not abort its siblings or the process."""
+    _compound_nl_setup(monkeypatch, tmp_path)
+
+    def exploding_correction(bot, chat_id, text, meals, result):
+        raise RuntimeError("boom")
+
+    monkeypatch.setitem(telegram_bot._NL_INTENT_HANDLERS, "correction", exploding_correction)
+    payload = {"intent": "multi", "actions": [
+        {"intent": "correction", "meal_index": 0, "analysis": {}},
+        {"intent": "chat", "reply": "still here"},
+    ]}
+
+    bot = PhotoBot()  # the executor's failure path redacts via bot._redact
+    telegram_bot.handle_text_message(_intent_client(payload), bot, 12345, "fix and chat")
+
+    texts = [m["text"] for m in bot.sent]
+    assert "still here" in texts
+    assert any("1 of 2" in t for t in texts)
+
+
+@pytest.mark.parametrize("payload", ["just a string", 42, [], ["a", 3], None])
+def test_nl_unusable_response_shapes_reply_gracefully(mock_db, monkeypatch, tmp_path, payload):
+    """Any non-actionable JSON type gets a friendly reply, never a crash."""
+    _compound_nl_setup(monkeypatch, tmp_path)
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(payload), bot, 12345, "gibberish request")
+    assert "couldn't work out what to do" in bot.sent[-1]["text"]
+
+
+def test_handle_text_message_safe_contains_any_crash(monkeypatch):
+    """The safe dispatcher is the last line of defense: an exception escaping
+    handle_text_message previously killed the process pre-offset-confirm and
+    crash-looped under systemd. It must be contained, redacted, and reported."""
+    bot = PhotoBot()
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("boom https://api.telegram.org/botSECRET/sendMessage")
+
+    monkeypatch.setattr(telegram_bot, "handle_text_message", explode)
+    telegram_bot.handle_text_message_safe(object(), bot, 12345, "anything")
+
+    assert bot.redacted, "the token-bearing error must pass through bot._redact"
+    assert "Something went wrong" in bot.sent[-1]["text"]
+
+
+def test_handle_text_message_safe_survives_notify_failure(monkeypatch):
+    """Even the failure notice failing must not raise into the poll loop."""
+    bot = PhotoBot()
+    monkeypatch.setattr(telegram_bot, "handle_text_message",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(bot, "send_message",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("telegram down")))
+
+    telegram_bot.handle_text_message_safe(object(), bot, 12345, "anything")  # must not raise
