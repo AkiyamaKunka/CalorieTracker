@@ -699,9 +699,15 @@ class TelegramBot:
                 try:
                     return self._call("sendMessage", **payload)
                 except Exception as retry_error:
-                    log.warning(
+                    # Two connection-class failures rule out formatting as
+                    # the cause; the parse_mode-stripped fallback would only
+                    # add a third wire attempt (and a possible third
+                    # duplicate when Telegram processed a lost-response
+                    # send). Stop here.
+                    log.error(
                         f"sendMessage connection retry failed: {self._redact(retry_error)}"
                     )
+                    return None
             # Retry without parse_mode in case of formatting issues
             try:
                 fallback = {"chat_id": chat_id, "text": text}
@@ -750,9 +756,12 @@ class TelegramBot:
                 try:
                     return _post(data)
                 except Exception as retry_error:
-                    log.warning(
+                    # Two connection failures rule out caption formatting;
+                    # a third attempt only risks a third duplicate photo.
+                    log.error(
                         f"sendPhoto connection retry failed: {self._redact(retry_error)}"
                     )
+                    return None
             if caption:
                 # Mirror send_message exactly: the retry KEEPS the caption and
                 # drops only parse_mode — the meal card text is the payload
@@ -4698,10 +4707,22 @@ def handle_photo_message(
             database.mark_photo_hash_status(chat_id, img_hash, "failed", source="telegram")
             reserved_photo = False
             _park_photo_for_drain(parked_path)
+            # The drain-on-release hook can have already fired (and seen an
+            # empty queue) between our failed acquire and the park — kick one
+            # drain attempt now so a photo can't wait on all-free slots.
+            _drain_one_parked_photo(bot, gemini_client)
+            queued_note = ""
+            if isinstance(caption, str) and caption.strip() and not caption.strip().startswith("/"):
+                # The drain path has no caption plumbing: say so now rather
+                # than silently logging the uncorrected meal later.
+                queued_note = (
+                    "\n\nℹ️ Your caption will NOT be applied automatically — "
+                    "send it as a normal message once the meal is logged."
+                )
             bot.send_message(
                 chat_id,
                 "⏳ Queued — I'm analyzing several photos right now and will "
-                "analyze this one automatically when a slot frees.",
+                "analyze this one automatically when a slot frees." + queued_note,
             )
             return True
 
@@ -4733,6 +4754,8 @@ def handle_photo_message(
         if reserved_photo:
             database.release_photo_hash(chat_id, img_hash)
         _release_analysis_slot(analysis_slot)
+        # The freed slot may unblock a parked (slot-denied) photo.
+        _drain_one_parked_photo(bot, gemini_client)
         # Defense in depth: network errors can embed the token URL.
         log.error(f"Error processing photo: {bot._redact(e)}")
         bot.send_message(chat_id, "❌ Error processing your photo. Please try again.")
@@ -5057,6 +5080,7 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
             # stays stuck in the processing set.
             log.error(f"  ❌ /upload could not spawn analysis worker: {e}")
             _release_analysis_slot(analysis_slot)
+            _drain_one_parked_photo(bot, gemini_client)
             failed_path = _keep_failed_api_upload(upload_path, img_hash)
             database.mark_photo_hash_status(ALLOWED_CHAT_ID, img_hash, "failed", source="api_upload")
             _finish_api_upload_processing(img_hash)
@@ -5745,6 +5769,17 @@ def main():
     signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
 
     _sweep_stranded_pending_uploads(bot)
+    # Parked (slot-denied) photos survive a restart only as failed-dir files;
+    # the in-memory drain queue does not. One boot notice keeps the "queued —
+    # will analyze automatically" promise from becoming silent meal loss.
+    leftover_failed = len(_failed_upload_items())
+    if leftover_failed:
+        bot.send_message(
+            ALLOWED_CHAT_ID,
+            f"📂 <b>{leftover_failed} saved upload(s) on disk from before the restart</b> "
+            "(including any photos that were queued for auto-analysis).\n\n"
+            "Drain them with <code>/retry_all_failed 3</code>.",
+        )
 
     app = _build_api_app(bot, gemini_client)
 

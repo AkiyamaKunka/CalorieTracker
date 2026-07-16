@@ -3740,15 +3740,17 @@ def test_send_message_total_failure_returns_none_and_logs(caplog):
     import requests as requests_mod
     err = requests_mod.exceptions.ConnectionError("still down")
     bot = telegram_bot.TelegramBot("123:abc")
-    bot.session = _FakeSession([err, err, err])  # first + identical retry + fallback
+    bot.session = _FakeSession([err, err])  # first + one identical retry, then STOP
 
     with caplog.at_level(logging_mod.ERROR, logger="calorie_bot"):
         result = bot.send_message(12345, "hello")
 
     assert result is None
-    assert len(bot.session.calls) == 3
+    # Two connection failures rule out formatting: no parse_mode-stripped
+    # third attempt (each 'failure' may have been processed server-side).
+    assert len(bot.session.calls) == 2
     # No more silent None: the terminal failure is loud.
-    assert "failed after all fallbacks" in caplog.text
+    assert "connection retry failed" in caplog.text
 
 
 def test_send_photo_retries_identically_on_connection_error():
@@ -6038,3 +6040,47 @@ def test_format_age_tolerates_non_string_timestamps():
     assert telegram_bot._format_age(12345) == "12345"
     assert "dict" in telegram_bot._format_age({"bad": 1}) or telegram_bot._format_age({"bad": 1})
     assert telegram_bot._format_age(None) == "never"
+
+
+# ---- Iteration-4 pre-deploy review fixes ------------------------------
+
+def test_send_message_stops_after_two_connection_failures():
+    """Two connection-class failures rule out formatting: no third wire
+    attempt (each may have actually been processed — 3 duplicates max)."""
+    import requests as requests_mod
+    bot = telegram_bot.TelegramBot("123:abc")
+    calls = []
+
+    def post(url, **kwargs):
+        calls.append(url)
+        raise requests_mod.exceptions.ConnectionError("cold pool")
+
+    bot.session = SimpleNamespace(post=post)
+    assert bot.send_message(12345, "<b>card</b>") is None
+    assert len(calls) == 2  # original + one identical retry, NO parse_mode fallback
+
+
+def test_parked_photo_kicks_immediate_drain_and_notes_caption(mock_db, monkeypatch, tmp_path):
+    """Parking must (a) attempt one drain right away — the release hooks can
+    all have fired during the park window — and (b) say the caption won't
+    be auto-applied (the drain path has no caption plumbing)."""
+    drains = []
+    bot = PhotoBot()
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "failed")
+    monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: False)
+    monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *a, **k: True)
+    monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status", lambda *a, **k: None)
+    monkeypatch.setattr(telegram_bot, "_acquire_analysis_slot", lambda: None)  # slots exhausted
+    monkeypatch.setattr(telegram_bot, "_drain_one_parked_photo",
+                        lambda bot_, client: drains.append(True))
+
+    handled = telegram_bot.handle_photo_message(
+        object(), bot, 12345,
+        {"photo": [{"file_id": "f1"}], "caption": "only ate half"})
+
+    assert handled is True
+    assert drains == [True], "one drain attempt must follow the park immediately"
+    queued = bot.sent[-1]["text"]
+    assert "Queued" in queued
+    assert "caption will NOT be applied automatically" in queued

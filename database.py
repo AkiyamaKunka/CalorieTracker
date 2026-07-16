@@ -619,9 +619,12 @@ def update_android_heartbeat(device_name: str = "android_watcher", timezone: Opt
         """, (device_name, now_str, timezone, timezone))
         conn.commit()
     # Eager invalidation: a heartbeat may have just changed the stored
-    # offset — the TTL cache must never serve the pre-write value.
+    # offset — the TTL cache must never serve the pre-write value. The
+    # generation bump also blocks in-flight readers from caching the
+    # pre-write row they already fetched.
     with _tz_cache_lock:
         _tz_cache.pop(device_name, None)
+        _tz_cache_gen[device_name] = _tz_cache_gen.get(device_name, 0) + 1
 
 def get_last_android_heartbeat(device_name: str = "android_watcher") -> Optional[str]:
     """Get the last ping time for a specific device."""
@@ -641,6 +644,7 @@ def get_last_android_heartbeat(device_name: str = "android_watcher") -> Optional
 # is the reset hook for tests that hit the real DB.
 _TZ_CACHE_TTL_SECONDS = 30
 _tz_cache: Dict[str, tuple] = {}  # device_name -> (monotonic_stamp, value)
+_tz_cache_gen: Dict[str, int] = {}  # bumped on every invalidation
 _tz_cache_lock = threading.Lock()
 
 
@@ -648,25 +652,32 @@ def clear_android_timezone_cache():
     """Drop all cached timezone reads (test isolation / manual reset)."""
     with _tz_cache_lock:
         _tz_cache.clear()
+        _tz_cache_gen.clear()
 
 
 def get_android_timezone(device_name: str = "android_watcher") -> str:
     """Get the last reported timezone for a specific device. Defaults to +0800.
 
     Served from a 30s in-process cache; see _TZ_CACHE_TTL_SECONDS above.
+    The generation check closes the stale-refill race: a reader that
+    fetched the pre-write row must not cache it AFTER a concurrent
+    heartbeat's invalidation, or the old offset would be served for a
+    full TTL despite the eager pop.
     """
     now = time.monotonic()
     with _tz_cache_lock:
         cached = _tz_cache.get(device_name)
         if cached is not None and now - cached[0] < _TZ_CACHE_TTL_SECONDS:
             return cached[1]
+        gen_before = _tz_cache_gen.get(device_name, 0)
     with _connect() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT timezone FROM heartbeats WHERE device_name = ?", (device_name,))
         row = cursor.fetchone()
         value = row[0] if row and row[0] else "+0800"
     with _tz_cache_lock:
-        _tz_cache[device_name] = (now, value)
+        if _tz_cache_gen.get(device_name, 0) == gen_before:
+            _tz_cache[device_name] = (now, value)
     return value
 
 

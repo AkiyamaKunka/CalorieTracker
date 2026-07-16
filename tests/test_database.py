@@ -1162,3 +1162,30 @@ def test_get_meal_stats_pins_stats_semantics_by_hand(monkeypatch):
                           "ios_shortcut": 1},
         "avg_calories_per_active_day": 375,  # int(750.25 / 2)
     }
+
+
+def test_tz_cache_generation_blocks_stale_refill(mock_db_path, monkeypatch):
+    """A reader that fetched the pre-write row must not cache it after a
+    concurrent invalidation — the old offset would be served for a full
+    TTL despite update_android_heartbeat's eager pop."""
+    database.clear_android_timezone_cache()
+    database.update_android_heartbeat(timezone="+0800")
+    database.clear_android_timezone_cache()
+
+    real_connect = database._connect
+
+    def racing_connect():
+        # Simulate a heartbeat writer committing + invalidating INSIDE this
+        # reader's DB-read window (after the gen snapshot, before the store).
+        with database._tz_cache_lock:
+            database._tz_cache.pop("android_watcher", None)
+            database._tz_cache_gen["android_watcher"] = (
+                database._tz_cache_gen.get("android_watcher", 0) + 1)
+        return real_connect()
+
+    monkeypatch.setattr(database, "_connect", racing_connect)
+    assert database.get_android_timezone() == "+0800"  # momentary old value: fine
+    monkeypatch.setattr(database, "_connect", real_connect)
+    with database._tz_cache_lock:
+        assert "android_watcher" not in database._tz_cache, \
+            "stale value must NOT be cached after a concurrent invalidation"
