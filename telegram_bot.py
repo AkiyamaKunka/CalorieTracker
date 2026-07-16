@@ -144,6 +144,10 @@ MAX_API_UPLOAD_BYTES = _env_int("MAX_API_UPLOAD_BYTES", 25 * 1024 * 1024, 1024, 
 # reply, a denied /upload is kept as a failed upload for /retry_all_failed.
 MAX_CONCURRENT_ANALYSES = _env_int("MAX_CONCURRENT_ANALYSES", 3, 1, 16)
 _analysis_slots = threading.BoundedSemaphore(MAX_CONCURRENT_ANALYSES)
+# Throttle for the "uploads parked, slots busy" chat notice (once a minute —
+# an album burst must not turn into an album of notices).
+_busy_notice_lock = threading.Lock()
+_last_busy_notice_monotonic = float("-inf")
 # Gemini calls carry no client-side socket timeout in google-genai 0.3.0, so a
 # black-holed connection would hang its caller (the polling thread included)
 # forever. All generate_content calls run under this wall-clock deadline.
@@ -1575,6 +1579,10 @@ def _parse_captured_at(raw: str) -> Optional[datetime]:
 def _format_age(iso_value: Optional[str]) -> str:
     if not iso_value:
         return "never"
+    if not isinstance(iso_value, str):
+        # fromisoformat raises TypeError (not ValueError) for non-strings; a
+        # junk-typed stored timestamp must not take down /status.
+        return _html(str(iso_value)[:64])
     try:
         dt = datetime.fromisoformat(iso_value)
     except ValueError:
@@ -4180,6 +4188,16 @@ def _analyze_telegram_photo_background(
     upload and offers /retry_failed.
     """
     reserved_photo = True
+    # A caption only takes effect when the meal actually saves; every other
+    # exit must SAY the caption wasn't applied — silently dropping "only ate
+    # half" means the eventually-logged meal overstates what the user
+    # explicitly corrected for.
+    caption_note = ""
+    if isinstance(caption, str) and caption.strip() and not caption.strip().startswith("/"):
+        caption_note = (
+            "\n\nℹ️ Your caption was NOT applied (the photo wasn't logged as a meal"
+            " yet). Send it as a normal message once the meal is logged."
+        )
     try:
         processing_msg = bot.send_message(chat_id, "🔍 Processing image... one moment!")
         analysis = analyze_food_photo(gemini_client, image_bytes)
@@ -4202,6 +4220,8 @@ def _analyze_telegram_photo_background(
                         img_hash,
                         source_label="Telegram",
                     )
+                    if caption_note:
+                        bot.send_message(chat_id, caption_note.strip())
                 except OSError as e:
                     database.release_photo_hash(chat_id, img_hash)
                     reserved_photo = False
@@ -4209,7 +4229,7 @@ def _analyze_telegram_photo_background(
                     bot.send_message(
                         chat_id,
                         "❌ <b>I couldn't analyze that photo and could not save it for retry.</b>\n\n"
-                        f"{_gemini_failure_context()}",
+                        f"{_gemini_failure_context()}" + caption_note,
                     )
                 return
 
@@ -4219,7 +4239,7 @@ def _analyze_telegram_photo_background(
                 chat_id,
                 "❌ <b>I couldn't analyze that photo.</b>\n\n"
                 f"{_gemini_failure_context()}\n\n"
-                "Try <code>/gemini</code> to run a live check.",
+                "Try <code>/gemini</code> to run a live check." + caption_note,
             )
             return
 
@@ -4241,12 +4261,23 @@ def _analyze_telegram_photo_background(
                 )
             bot.send_message(chat_id, result_text)
             if caption_text and not caption_text.startswith("/"):
-                # The saved meal appears at its natural index in the meals
-                # snapshot, so the caption works as an immediate NL
-                # correction against it. handle_text_message_safe contains
-                # its own failures — a bad caption cannot kill this thread's
-                # cleanup path.
-                handle_text_message_safe(gemini_client, bot, chat_id, caption_text)
+                # Frame the caption before the NL call: unframed, a caption
+                # that NAMES the food ("beef noodle soup" — the most common
+                # caption) hits the prompt's food-is-always-new_meal rule and
+                # double-logs the meal that was just saved from this photo,
+                # and "half portion" gives the model no cue which meal it
+                # targets. handle_text_message_safe contains its own
+                # failures — a bad caption cannot kill this cleanup path.
+                desc = str(analysis.get("meal_description", "the photographed meal"))[:80]
+                framed = (
+                    "(This text was the caption on a food photo that was JUST "
+                    f'logged as the most recent meal in the list: "{desc}". '
+                    "If the caption describes, names, or adjusts that meal, "
+                    'treat it as a "correction" to that meal — do NOT log a '
+                    "new meal for it. If it is unrelated, handle it normally.) "
+                    f"Caption: {caption_text}"
+                )
+                handle_text_message_safe(gemini_client, bot, chat_id, framed)
         else:
             database.mark_photo_hash_status(chat_id, img_hash, "skipped", source="telegram")
             reserved_photo = False
@@ -4558,6 +4589,23 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
                 f"  ⏳ /upload denied an analysis slot (cap {MAX_CONCURRENT_ANALYSES}); "
                 f"kept for retry at {failed_path}"
             )
+            # Without a notice, a parked burst is SILENT meal loss: the phone
+            # saw HTTP 200 so it never re-offers, and /reconcile treats
+            # failed-dir hashes as present. Tell the user once per minute.
+            global _last_busy_notice_monotonic
+            with _busy_notice_lock:
+                now_mono = time.monotonic()
+                should_notify = now_mono - _last_busy_notice_monotonic > 60
+                if should_notify:
+                    _last_busy_notice_monotonic = now_mono
+            if should_notify:
+                bot.send_message(
+                    ALLOWED_CHAT_ID,
+                    "⏳ <b>Some phone uploads were parked — analysis slots are busy.</b>\n\n"
+                    "They are saved as failed uploads and nothing is lost. "
+                    "Drain them with <code>/retry_all_failed 3</code> once the "
+                    "current photos finish.",
+                )
             return jsonify({"status": "saved_for_retry_busy"})
 
         # Process the photo in a background thread to return 200 OK instantly to iOS
@@ -4677,8 +4725,20 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
                 _release_analysis_slot(analysis_slot)
                 _finish_api_upload_processing(hsh)
 
-        worker = threading.Thread(target=background_process, args=(str(upload_path), img_hash, device_name, captured_at))
-        worker.start()
+        try:
+            worker = threading.Thread(target=background_process, args=(str(upload_path), img_hash, device_name, captured_at))
+            worker.start()
+        except Exception as e:
+            # Thread spawn fails exactly under the memory pressure admission
+            # control exists for: without this, the slot leaks permanently
+            # (3 leaks = all photo analysis dead until restart) and the hash
+            # stays stuck in the processing set.
+            log.error(f"  ❌ /upload could not spawn analysis worker: {e}")
+            _release_analysis_slot(analysis_slot)
+            failed_path = _keep_failed_api_upload(upload_path, img_hash)
+            database.mark_photo_hash_status(ALLOWED_CHAT_ID, img_hash, "failed", source="api_upload")
+            _finish_api_upload_processing(img_hash)
+            return jsonify({"status": "saved_for_retry_busy"})
         # Slot ownership passed to the worker's finally; reclaim (idempotent)
         # if a thread double never ran the target — see handle_photo_message.
         if not (hasattr(worker, "is_alive") and worker.is_alive()):
@@ -4917,9 +4977,13 @@ def _poison_update_clear(update_id):
         if key not in ring:
             ring.append(key)
         if len(ring) > 256:
-            # update_ids are monotonically increasing between resets; keep
-            # the numerically newest.
-            ring = sorted(ring, key=lambda k: int(k) if k.isdigit() else 0)[-256:]
+            # Prune by insertion recency, NOT numeric value: after a Telegram
+            # update_id reset DOWNWARD, numeric pruning would evict every new
+            # small id on the call that added it (defeating at-most-once) and
+            # pin 256 stale big ids forever — the same reset bug the attempts
+            # ledger's recency pruning already guards against. Appends are
+            # chronological, so a tail slice IS recency.
+            ring = ring[-256:]
         data["processed_updates"] = ring
 
     service_health.update(mutate, SERVICE_HEALTH_PATH, warn=log.warning)

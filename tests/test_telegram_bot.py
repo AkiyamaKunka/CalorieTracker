@@ -4004,7 +4004,14 @@ def test_photo_caption_becomes_one_nl_correction_after_save(mock_db, monkeypatch
                     "caption": "half portion, no rice"},
     })
     assert len(_wide_recent_meals(12345)) == 1            # the photo itself was processed
-    assert text_calls == [(12345, "half portion, no rice")]  # exactly one NL call
+    # Exactly one NL call, carrying the caption INSIDE the anti-double-log
+    # framing: an unframed caption that names the food would hit the
+    # prompt's food-is-always-new_meal rule and re-log the same meal.
+    assert len(text_calls) == 1
+    assert text_calls[0][0] == 12345
+    assert "half portion, no rice" in text_calls[0][1]
+    assert "do NOT log a new meal" in text_calls[0][1]
+    assert "correction" in text_calls[0][1]
     assert meals_at_nl_time == [1], "the caption must run AFTER the meal is saved"
 
 
@@ -5147,3 +5154,27 @@ def test_poll_outage_alert_fires_in_chat_and_wechat_once(monkeypatch):
     assert pushed[0]["template"] == "txt"
     # _call wraps the ConnectionError as "Telegram network-error calling …"
     assert "Telegram network-error" in pushed[0]["content"]
+
+
+def test_processed_ring_survives_update_id_reset(monkeypatch, tmp_path):
+    """Ring pruning is by insertion recency: after Telegram resets update_ids
+    DOWNWARD, new small ids must survive pruning (numeric pruning would evict
+    each one on the call that added it, silently re-enabling duplicates)."""
+    _poison_setup(monkeypatch, tmp_path)
+    bot = FakeBot()
+    for update_id in range(10_000, 10_260):  # fill the ring with big ids
+        telegram_bot._poison_update_clear(update_id)
+    telegram_bot._poison_update_clear(7)     # post-reset small id
+    ring = service_health.load(tmp_path / "health.json")["processed_updates"]
+    assert "7" in ring, "recency pruning must keep the newest insertion"
+    assert len(ring) <= 256
+    # And the ring actually protects it: redelivery of 7 is skipped quietly.
+    assert telegram_bot._poison_update_should_skip(bot, 7) is True
+    assert bot.sent == []
+
+
+def test_format_age_tolerates_non_string_timestamps():
+    """fromisoformat raises TypeError for non-strings; /status must render."""
+    assert telegram_bot._format_age(12345) == "12345"
+    assert "dict" in telegram_bot._format_age({"bad": 1}) or telegram_bot._format_age({"bad": 1})
+    assert telegram_bot._format_age(None) == "never"
