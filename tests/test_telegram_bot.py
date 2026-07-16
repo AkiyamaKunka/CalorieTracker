@@ -42,10 +42,16 @@ class FakeBot:
         self.sent = []
         self.answered = []
         self.deleted = []
+        self.chat_actions = []
 
     def send_message(self, chat_id, text, parse_mode="HTML", reply_markup=None):
         self.sent.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
         return {"message_id": len(self.sent)}
+
+    def send_chat_action(self, chat_id, action):
+        # Fire-and-forget 'typing'/'upload_photo' bubble; recorded so tests
+        # can assert the user got pre-result feedback.
+        self.chat_actions.append({"chat_id": chat_id, "action": action})
 
     def send_photo(self, chat_id, photo_bytes, caption="", parse_mode="HTML"):
         # Caption text is recorded as the message text so assertions see the
@@ -128,7 +134,7 @@ def test_b1_upload_analysis_failure_moves_to_failed_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "service_health.json")
     monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
     monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
-    monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", lambda client, image_bytes: None)
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", lambda client, image_bytes, *a, **k: None)
     monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: True)
     monkeypatch.setattr(
         telegram_bot.database, "mark_photo_hash_status",
@@ -164,7 +170,7 @@ def test_b1b_upload_during_quota_pause_offers_keep_or_discard(monkeypatch, tmp_p
     monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "service_health.json")
     monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
     monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
-    monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", lambda client, image_bytes: None)
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", lambda client, image_bytes, *a, **k: None)
     monkeypatch.setattr(telegram_bot, "_gemini_quota_pause",
                         lambda: {"until": datetime.now(), "reason": "daily quota", "set_at": ""})
     monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: True)
@@ -212,7 +218,7 @@ def test_upload_uses_declared_original_hash(monkeypatch, tmp_path):
     monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "test-upload-key")
     monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
     monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries",
-                        lambda client, image_bytes: {"is_food": True, "total_calories": 500})
+                        lambda client, image_bytes, *a, **k: {"is_food": True, "total_calories": 500})
     monkeypatch.setattr(telegram_bot, "save_meal",
                         lambda chat_id, analysis, source, file_id, img_hash, **kwargs: saved.append(img_hash) or 77)
     monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash",
@@ -275,7 +281,7 @@ def test_upload_staged_read_failure_keeps_file_as_failed_under_declared_hash(mon
     monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
     monkeypatch.setattr(
         telegram_bot, "analyze_food_photo_with_retries",
-        lambda client, image_bytes: pytest.fail("must not analyze when the staged read fails"),
+        lambda client, image_bytes, *a, **k: pytest.fail("must not analyze when the staged read fails"),
     )
     monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: True)
     monkeypatch.setattr(
@@ -1956,7 +1962,7 @@ def test_upload_captured_at_dates_meal_on_capture_day(mock_db, monkeypatch, tmp_
     monkeypatch.setattr(database, "get_android_timezone", lambda *a, **k: "+0800")
     monkeypatch.setattr(
         telegram_bot, "analyze_food_photo_with_retries",
-        lambda client, image_bytes: {"is_food": True, "meal_description": "Backfill",
+        lambda client, image_bytes, *a, **k: {"is_food": True, "meal_description": "Backfill",
                                      "total_calories": 300, "food_items": []},
     )
     monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
@@ -1995,7 +2001,7 @@ def test_upload_accepts_raw_body_image(mock_db, monkeypatch, tmp_path):
     monkeypatch.setattr(database, "get_android_timezone", lambda *a, **k: "+0800")
     monkeypatch.setattr(
         telegram_bot, "analyze_food_photo_with_retries",
-        lambda client, image_bytes: {"is_food": True, "meal_description": "Raw upload",
+        lambda client, image_bytes, *a, **k: {"is_food": True, "meal_description": "Raw upload",
                                      "total_calories": 200, "food_items": []},
     )
     monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
@@ -2057,7 +2063,7 @@ def test_photo_analysis_falls_back_to_gemini_when_claude_fails(monkeypatch, tmp_
                         lambda image_bytes: None)   # window exhausted / CLI error
     monkeypatch.setattr(
         telegram_bot, "_analyze_food_photo_once",
-        lambda client, image_bytes: {"is_food": True, "meal_description": "From Gemini",
+        lambda client, image_bytes, *a, **k: {"is_food": True, "meal_description": "From Gemini",
                                      "total_calories": 400, "food_items": []},
     )
 
@@ -2077,7 +2083,7 @@ def test_photo_analysis_unconfigured_claude_is_invisible(monkeypatch, tmp_path):
     monkeypatch.setattr(telegram_bot.claude_analyzer, "analyze_food_photo", boom)
     monkeypatch.setattr(
         telegram_bot, "_analyze_food_photo_once",
-        lambda client, image_bytes: {"is_food": False},
+        lambda client, image_bytes, *a, **k: {"is_food": False},
     )
 
     assert telegram_bot.analyze_food_photo_with_retries(object(), b"img") == {"is_food": False}
@@ -2107,14 +2113,14 @@ def _upload_app(monkeypatch, tmp_path, analysis="skip"):
     monkeypatch.setattr(database, "get_android_timezone", lambda *a, **k: "+0800")
     monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
     if analysis == "forbidden":
-        def stub(client, image_bytes):
+        def stub(client, image_bytes, *a, **k):
             raise AssertionError("analysis must not run for this request")
     else:
         stub = {
-            "food": lambda client, image_bytes: {"is_food": True, "meal_description": "Pinned",
+            "food": lambda client, image_bytes, *a, **k: {"is_food": True, "meal_description": "Pinned",
                                                  "total_calories": 111, "food_items": []},
-            "skip": lambda client, image_bytes: {"is_food": False},
-            "fail": lambda client, image_bytes: None,
+            "skip": lambda client, image_bytes, *a, **k: {"is_food": False},
+            "fail": lambda client, image_bytes, *a, **k: None,
         }[analysis]
     monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", stub)
     bot = FakeBot()
@@ -2483,7 +2489,7 @@ def test_handle_photo_message_ignores_non_photo_messages(monkeypatch):
 
 
 def test_handle_photo_message_food_photo_saved_via_background_thread(mock_db, monkeypatch, tmp_path):
-    reserves, statuses, saved = [], [], []
+    reserves, statuses, saved, saved_kwargs = [], [], [], []
     bot = PhotoBot()
 
     monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
@@ -2493,12 +2499,12 @@ def test_handle_photo_message_food_photo_saved_via_background_thread(mock_db, mo
     monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status",
                         lambda *args, **kwargs: statuses.append((args, kwargs)))
     monkeypatch.setattr(telegram_bot, "analyze_food_photo",
-                        lambda client, image_bytes: {"is_food": True,
+                        lambda client, image_bytes, *a, **k: {"is_food": True,
                                                      "meal_description": "Noodles",
                                                      "total_calories": 480})
     monkeypatch.setattr(
         telegram_bot, "save_meal",
-        lambda chat_id, analysis, source, file_id, img_hash: saved.append((source, file_id, img_hash)) or 41,
+        lambda chat_id, analysis, source, file_id, img_hash, **kwargs: (saved.append((source, file_id, img_hash)), saved_kwargs.append(kwargs))[0] or 41,
     )
     monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
 
@@ -2511,9 +2517,15 @@ def test_handle_photo_message_food_photo_saved_via_background_thread(mock_db, mo
     assert reserves[0][0] == (12345, expected_hash, "telegram")
     assert reserves[0][1] == {"reclaim_statuses": {"failed", "skipped", "deleted"}}
     assert saved == [("telegram", "hi-res", expected_hash)]  # highest-res photo wins
-    assert statuses == [((12345, expected_hash, "saved", 41), {"source": "telegram"})]
-    # The processing placeholder was deleted and the result was sent.
-    assert bot.deleted == [(12345, 1)]
+    # The 'saved' ledger flip rides inside save_meal's atomic transaction
+    # now (pinned in tests/test_database.py) — no separate mark call.
+    assert statuses == []
+    assert saved_kwargs and saved_kwargs[0].get("mark_status") == "saved"
+    # Feedback invariant: the user saw an "uploading photo" indicator before
+    # the card (the old send+delete placeholder pair is gone — the chat
+    # action replaces it, so nothing needs deleting).
+    assert {"chat_id": 12345, "action": "upload_photo"} in bot.chat_actions
+    assert bot.deleted == []
     assert "Noodles" in bot.sent[-1]["text"]
     # The crash-recovery copy is removed once the meal is saved.
     assert list((tmp_path / "pending").iterdir()) == []
@@ -2595,7 +2607,7 @@ def test_handle_photo_message_analysis_failure_releases_and_notifies(monkeypatch
     monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: True)
     monkeypatch.setattr(telegram_bot.database, "release_photo_hash",
                         lambda chat_id, image_hash: released.append(image_hash))
-    monkeypatch.setattr(telegram_bot, "analyze_food_photo", lambda client, image_bytes: None)
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo", lambda client, image_bytes, *a, **k: None)
     monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
 
     handled = telegram_bot.handle_photo_message(
@@ -2612,7 +2624,7 @@ def test_handle_photo_message_background_crash_releases_and_redacts(monkeypatch,
     released = []
     bot = PhotoBot()
 
-    def explode(client, image_bytes):
+    def explode(client, image_bytes, *a, **k):
         raise RuntimeError("boom with https://api.telegram.org/botSECRET/getFile")
 
     monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
@@ -2662,7 +2674,7 @@ def test_handle_photo_message_staging_failure_still_analyzes(mock_db, monkeypatc
     monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *a, **k: True)
     monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status", lambda *a, **k: None)
     monkeypatch.setattr(telegram_bot, "analyze_food_photo",
-                        lambda client, image_bytes: {"is_food": True,
+                        lambda client, image_bytes, *a, **k: {"is_food": True,
                                                      "meal_description": "Toast",
                                                      "total_calories": 210})
     monkeypatch.setattr(telegram_bot, "save_meal", lambda *a, **k: saved.append(a) or 7)
@@ -2696,7 +2708,7 @@ def test_photo_background_quota_pause_moves_staged_copy_to_failed_dir(mock_db, m
     monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *a, **k: True)
     monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status",
                         lambda *args, **kwargs: statuses.append((args, kwargs)))
-    monkeypatch.setattr(telegram_bot, "analyze_food_photo", lambda client, image_bytes: None)
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo", lambda client, image_bytes, *a, **k: None)
     monkeypatch.setattr(telegram_bot, "_gemini_quota_pause", lambda: True)
     monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
 
@@ -2760,7 +2772,7 @@ def test_photo_analysis_gemini_success_logs_model_name(monkeypatch, tmp_path, ca
     monkeypatch.setattr(telegram_bot.claude_analyzer, "is_configured", lambda: False)
     monkeypatch.setattr(
         telegram_bot, "_analyze_food_photo_once",
-        lambda client, image_bytes: {"is_food": False},
+        lambda client, image_bytes, *a, **k: {"is_food": False},
     )
 
     with caplog.at_level("INFO", logger="calorie_bot"):
@@ -3204,6 +3216,573 @@ def test_upload_food_result_arrives_as_photo_caption(mock_db, monkeypatch, tmp_p
     echoed = [m for m in bot.sent if m.get("photo_bytes")]
     assert len(echoed) == 1
     assert "Auto-Logged" in echoed[0]["text"]
+
+
+# ---- Single-decode image pipeline (normalize once, reuse everywhere) --
+
+def test_normalize_photo_for_analysis_downscales_uprights_and_recompresses():
+    """Real bytes: a large EXIF-rotated JPEG comes back as an upright,
+    <=1568px, RGB JPEG — the one artifact every consumer reuses."""
+    src = telegram_bot.Image.new("RGB", (4000, 3000), (200, 120, 80))
+    exif = src.getexif()
+    exif[0x0112] = 6  # EXIF orientation 6: rotate 90° CW to display upright
+    buf = io.BytesIO()
+    src.save(buf, format="JPEG", exif=exif)
+
+    out = telegram_bot._normalize_photo_for_analysis(buf.getvalue())
+
+    assert out[:3] == b"\xff\xd8\xff"
+    img = telegram_bot.Image.open(io.BytesIO(out))
+    # Orientation applied: the landscape source displays as portrait.
+    assert img.size == (1176, 1568)
+    assert img.mode == "RGB"
+
+
+def test_normalize_photo_for_analysis_leaves_small_photos_unscaled():
+    small = _real_jpeg_bytes(px=64)
+    out = telegram_bot._normalize_photo_for_analysis(small)
+    img = telegram_bot.Image.open(io.BytesIO(out))
+    assert img.size == (64, 64)  # never upscaled
+
+
+def test_normalize_photo_for_analysis_returns_none_on_undecodable():
+    assert telegram_bot._normalize_photo_for_analysis(b"definitely not an image") is None
+    assert telegram_bot._normalize_photo_for_analysis(b"") is None
+
+
+def test_with_retries_hands_claude_the_normalized_bytes(monkeypatch, tmp_path):
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot.claude_analyzer, "is_configured", lambda: True)
+    seen = []
+    monkeypatch.setattr(
+        telegram_bot.claude_analyzer, "analyze_food_photo",
+        lambda image_bytes: seen.append(image_bytes) or {"is_food": False},
+    )
+
+    telegram_bot.analyze_food_photo_with_retries(
+        object(), b"ORIGINAL", normalized_bytes=b"NORMALIZED")
+    assert seen == [b"NORMALIZED"]
+
+    # Normalization failed (None): Claude falls back to the original bytes.
+    seen.clear()
+    telegram_bot.analyze_food_photo_with_retries(
+        object(), b"ORIGINAL", normalized_bytes=None)
+    assert seen == [b"ORIGINAL"]
+
+
+def _recording_gemini_client(fail_first=0):
+    """Gemini stub: fails the first N calls with a retryable 429, then
+    succeeds; records the image part of every contents list it received."""
+    state = {"calls": 0, "images": []}
+
+    class _Models:
+        def generate_content(self, **kwargs):
+            state["calls"] += 1
+            state["images"].append(kwargs["contents"][1])
+            if state["calls"] <= fail_first:
+                raise RuntimeError("429 RESOURCE_EXHAUSTED; retryDelay: '0s'")
+            return SimpleNamespace(text='{"is_food": false}')
+
+    return SimpleNamespace(models=_Models()), state
+
+
+def test_gemini_leg_sends_normalized_bytes_as_inline_blob(monkeypatch, tmp_path):
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot.claude_analyzer, "is_configured", lambda: False)
+    monkeypatch.setattr(
+        telegram_bot, "_prepare_image_for_gemini",
+        lambda image_bytes: pytest.fail("normalized bytes must skip the second decode"),
+    )
+    client, state = _recording_gemini_client()
+
+    result = telegram_bot.analyze_food_photo_with_retries(
+        client, b"ORIGINAL", normalized_bytes=b"\xff\xd8\xffnormalized")
+
+    assert result == {"is_food": False}
+    part = state["images"][0]
+    assert isinstance(part, telegram_bot.types.Part)
+    assert part.inline_data.data == b"\xff\xd8\xffnormalized"
+    assert part.inline_data.mime_type == "image/jpeg"
+
+
+def test_gemini_image_prep_is_hoisted_out_of_the_retry_loop(monkeypatch, tmp_path):
+    """Retries reuse the attempt-1 image part — normalized and fallback alike."""
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot.claude_analyzer, "is_configured", lambda: False)
+    monkeypatch.setattr(telegram_bot.time, "sleep", lambda s: None)
+
+    client, state = _recording_gemini_client(fail_first=1)
+    result = telegram_bot.analyze_food_photo_with_retries(
+        client, b"ORIGINAL", max_attempts=3, normalized_bytes=b"\xff\xd8\xffnorm")
+    assert result == {"is_food": False}
+    assert state["calls"] == 2
+    assert state["images"][0] is state["images"][1]  # the SAME prepared part
+
+    # Fallback path (no normalized bytes): _prepare_image_for_gemini runs
+    # exactly once for the whole retry loop.
+    prepared = object()
+    prep_calls = []
+    monkeypatch.setattr(telegram_bot, "_prepare_image_for_gemini",
+                        lambda image_bytes: prep_calls.append(1) or prepared)
+    client, state = _recording_gemini_client(fail_first=1)
+    result = telegram_bot.analyze_food_photo_with_retries(
+        client, b"ORIGINAL", max_attempts=3, normalized_bytes=None)
+    assert result == {"is_food": False}
+    assert prep_calls == [1]
+    assert state["images"] == [prepared, prepared]
+
+
+def test_echo_meal_photo_sends_normalized_bytes_as_is(monkeypatch):
+    class EchoBot(FakeBot):
+        def __init__(self):
+            super().__init__()
+            self.photo_payloads = []
+
+        def send_photo(self, chat_id, photo_bytes, caption="", parse_mode="HTML"):
+            self.photo_payloads.append(photo_bytes)
+            return {"message_id": 1}
+
+    monkeypatch.setattr(
+        telegram_bot, "_compress_photo_for_echo",
+        lambda image_bytes: pytest.fail("normalized bytes must skip recompression"),
+    )
+    bot = EchoBot()
+    normalized = b"\xff\xd8\xffnormalized-jpeg"
+    telegram_bot._echo_meal_photo(bot, 12345, b"huge original", "card",
+                                  normalized_bytes=normalized)
+    assert bot.photo_payloads == [normalized]  # pass-through, byte-identical
+
+
+def test_echo_meal_photo_without_normalized_bytes_recompresses(monkeypatch):
+    class EchoBot(FakeBot):
+        def __init__(self):
+            super().__init__()
+            self.photo_payloads = []
+
+        def send_photo(self, chat_id, photo_bytes, caption="", parse_mode="HTML"):
+            self.photo_payloads.append(photo_bytes)
+            return {"message_id": 1}
+
+    compressed = []
+    monkeypatch.setattr(telegram_bot, "_compress_photo_for_echo",
+                        lambda image_bytes: compressed.append(image_bytes) or b"compressed")
+    bot = EchoBot()
+    telegram_bot._echo_meal_photo(bot, 12345, b"original", "card")
+    assert compressed == [b"original"]
+    assert bot.photo_payloads == [b"compressed"]
+
+
+def test_upload_worker_normalizes_once_and_echo_reuses_it(mock_db, monkeypatch, tmp_path):
+    """End-to-end /upload: one normalization, its output handed BOTH to the
+    analyzer (normalized_bytes kwarg) and to the echoed photo."""
+    app, bot = _upload_app(monkeypatch, tmp_path, analysis="food")
+    normalize_calls = []
+    real_normalize = telegram_bot._normalize_photo_for_analysis
+
+    def counting_normalize(image_bytes):
+        normalize_calls.append(len(image_bytes))
+        return real_normalize(image_bytes)
+
+    monkeypatch.setattr(telegram_bot, "_normalize_photo_for_analysis", counting_normalize)
+    analyzer_kwargs = []
+
+    def capturing_stub(client, image_bytes, *a, **k):
+        analyzer_kwargs.append(k)
+        return {"is_food": True, "meal_description": "Pinned",
+                "total_calories": 111, "food_items": []}
+
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", capturing_stub)
+
+    body = _real_jpeg_bytes(px=48)
+    resp = app.test_client().post("/upload", headers={"X-API-Key": "test-upload-key"},
+                                  data=body, content_type="image/jpeg")
+    assert resp.status_code == 200
+    assert len(normalize_calls) == 1                     # exactly one decode
+    normalized = analyzer_kwargs[0]["normalized_bytes"]
+    assert normalized[:3] == b"\xff\xd8\xff"
+    echoed = [m for m in bot.sent if m.get("photo_bytes")]
+    assert len(echoed) == 1
+    assert echoed[0]["photo_bytes"] == normalized        # echo reuses the artifact
+
+
+def test_retry_failed_upload_path_passes_normalized_bytes(monkeypatch, tmp_path):
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "meals.db")
+    database.init_db()
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot, "_normalize_photo_for_analysis",
+                        lambda image_bytes: b"NORMALIZED-FOR-RETRY")
+    seen = []
+
+    def stub(client, image_bytes, *a, **k):
+        seen.append((image_bytes, k.get("normalized_bytes")))
+        return {"is_food": False}
+
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", stub)
+    failed_dir = tmp_path / "failed"
+    failed_dir.mkdir()
+    photo = failed_dir / "20260101T000000_abcdef123456.jpg"
+    photo.write_bytes(b"original-failed-bytes")
+
+    result = telegram_bot._retry_failed_upload_path(object(), photo)
+
+    assert result["status"] == "not_food"
+    # The analyzer got the ORIGINAL bytes plus the separate normalized copy.
+    assert seen == [(b"original-failed-bytes", b"NORMALIZED-FOR-RETRY")]
+
+
+# ---- Card-tail reordering: feedback before, cleanup after -----------
+
+def test_upload_processing_notice_deleted_after_the_meal_card(mock_db, monkeypatch, tmp_path):
+    """The 'Received photo, analyzing...' notice must be deleted AFTER the
+    meal card lands (deleting first spends an RTT that delays the card)."""
+    app, bot = _upload_app(monkeypatch, tmp_path, analysis="food")
+    delete_snapshots = []
+    original_delete = bot.delete_message
+
+    def recording_delete(chat_id, message_id):
+        delete_snapshots.append((message_id, [m["text"] for m in bot.sent]))
+        original_delete(chat_id, message_id)
+
+    bot.delete_message = recording_delete
+    resp = app.test_client().post("/upload", headers={"X-API-Key": "test-upload-key"},
+                                  data=JPEG_MAGIC + b"\xe0tail-order-bytes",
+                                  content_type="image/jpeg")
+    assert resp.status_code == 200
+
+    assert len(delete_snapshots) == 1
+    deleted_id, texts_at_delete = delete_snapshots[0]
+    # The deleted message is the notice…
+    assert "Received photo from" in bot.sent[deleted_id - 1]["text"]
+    # …and the meal card had ALREADY been sent when the delete happened.
+    assert any("Auto-Logged" in t for t in texts_at_delete)
+
+
+def test_upload_processing_notice_deleted_after_failure_notice_too(mock_db, monkeypatch, tmp_path):
+    app, bot = _upload_app(monkeypatch, tmp_path, analysis="fail")
+    delete_snapshots = []
+    original_delete = bot.delete_message
+
+    def recording_delete(chat_id, message_id):
+        delete_snapshots.append([m["text"] for m in bot.sent])
+        original_delete(chat_id, message_id)
+
+    bot.delete_message = recording_delete
+    resp = app.test_client().post("/upload", headers={"X-API-Key": "test-upload-key"},
+                                  data=JPEG_MAGIC + b"\xe0fail-order-bytes",
+                                  content_type="image/jpeg")
+    assert resp.status_code == 200
+    assert len(delete_snapshots) == 1
+    # The failure explanation was already delivered when the notice vanished.
+    assert any("could not be analyzed" in t for t in delete_snapshots[0])
+
+
+def test_telegram_photo_worker_chat_action_replaces_processing_message(mock_db, monkeypatch, tmp_path):
+    """The send+delete 'Processing image...' pair is gone: feedback arrives
+    as an upload_photo chat action BEFORE analysis, and nothing is deleted."""
+    bot = PhotoBot()
+    actions_at_analysis = []
+
+    def analyze(client, image_bytes, *a, **k):
+        actions_at_analysis.append(list(bot.chat_actions))
+        return {"is_food": True, "meal_description": "Soup", "total_calories": 200}
+
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: False)
+    monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *a, **k: True)
+    monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status", lambda *a, **k: None)
+    monkeypatch.setattr(telegram_bot, "save_meal", lambda *a, **k: 9)
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo", analyze)
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
+
+    telegram_bot.handle_photo_message(object(), bot, 12345, {"photo": [{"file_id": "f1"}]})
+
+    # The chat action had fired before the analyzer ran.
+    assert actions_at_analysis == [[{"chat_id": 12345, "action": "upload_photo"}]]
+    assert not any("Processing image" in m["text"] for m in bot.sent)
+    assert bot.deleted == []
+    assert "Soup" in bot.sent[-1]["text"]
+
+
+def test_handle_text_message_sends_typing_before_gemini(mock_db, monkeypatch):
+    _stable_tz(monkeypatch)
+    _no_pause(monkeypatch)
+    monkeypatch.setattr(telegram_bot, "get_recent_meals", lambda chat_id, days: [])
+    bot = FakeBot()
+    actions_at_generate = []
+
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            actions_at_generate.append(list(bot.chat_actions))
+            return SimpleNamespace(text=json.dumps({"intent": "chat", "reply": "hi"}))
+
+    telegram_bot.handle_text_message(SimpleNamespace(models=FakeModels()), bot, CHAT, "hello")
+
+    # 'typing' was already on the wire when the Gemini call started.
+    assert actions_at_generate == [[{"chat_id": CHAT, "action": "typing"}]]
+
+
+def test_fitness_fast_path_answers_without_chat_action(mock_db, monkeypatch):
+    """The zero-Gemini fast path returns before the typing ack is reached."""
+    _stable_tz(monkeypatch)
+    _no_pause(monkeypatch)
+    bot = FakeBot()
+    monkeypatch.setattr(telegram_bot, "_maybe_answer_fitness_query",
+                        lambda b, chat_id, text: b.send_message(chat_id, "plan!") or True)
+    telegram_bot.handle_text_message(object(), bot, CHAT, "today's run?")
+    assert bot.chat_actions == []
+    assert bot.sent[-1]["text"] == "plan!"
+
+
+# ---- Album park-and-drain (slot-denied Telegram photos) -------------
+
+@pytest.fixture
+def _empty_parked_queue():
+    telegram_bot._parked_photo_paths.clear()
+    yield
+    telegram_bot._parked_photo_paths.clear()
+
+
+def test_slot_denied_telegram_photo_parks_instead_of_demanding_resend(
+        mock_db, monkeypatch, tmp_path, _empty_parked_queue):
+    statuses = []
+    bot = PhotoBot()
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "failed")
+    monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: False)
+    monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *a, **k: True)
+    monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status",
+                        lambda *args, **kwargs: statuses.append((args, kwargs)))
+    monkeypatch.setattr(telegram_bot, "_acquire_analysis_slot", lambda: None)  # all busy
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo",
+                        lambda *a, **k: pytest.fail("denied slot must not analyze inline"))
+
+    handled = telegram_bot.handle_photo_message(
+        object(), bot, 12345, {"photo": [{"file_id": "f1"}]})
+
+    assert handled is True
+    expected_hash = hashlib.md5(bot.image_bytes).hexdigest()
+    # ORIGINAL bytes parked durably in the failed dir under the ledger hash.
+    failed = list((tmp_path / "failed").iterdir())
+    assert len(failed) == 1
+    assert expected_hash[:12] in failed[0].name
+    assert failed[0].read_bytes() == bot.image_bytes
+    assert statuses == [((12345, expected_hash, "failed"), {"source": "telegram"})]
+    # Queued for auto-drain, and the user was told so.
+    assert telegram_bot._parked_photo_paths == [failed[0]]
+    assert "Queued" in bot.sent[-1]["text"]
+    assert list((tmp_path / "pending").iterdir()) == []
+
+
+def test_slot_denied_parking_stage_failure_degrades_to_resend_ask(
+        mock_db, monkeypatch, tmp_path, _empty_parked_queue):
+    released = []
+    bot = PhotoBot()
+    monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: False)
+    monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *a, **k: True)
+    monkeypatch.setattr(telegram_bot.database, "release_photo_hash",
+                        lambda chat_id, image_hash: released.append(image_hash))
+    monkeypatch.setattr(telegram_bot, "_acquire_analysis_slot", lambda: None)
+    monkeypatch.setattr(telegram_bot, "_stage_api_upload",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("read-only fs")))
+
+    handled = telegram_bot.handle_photo_message(
+        object(), bot, 12345, {"photo": [{"file_id": "f1"}]})
+
+    assert handled is True
+    assert released == [hashlib.md5(bot.image_bytes).hexdigest()]
+    assert telegram_bot._parked_photo_paths == []
+    assert "please re-send" in bot.sent[-1]["text"]
+
+
+def test_drain_analyzes_one_parked_photo_when_a_slot_frees(
+        monkeypatch, tmp_path, _empty_parked_queue):
+    parked = tmp_path / "20260717T000000_abcdef123456.jpg"
+    parked.write_bytes(b"parked-bytes")
+    telegram_bot._parked_photo_paths.append(parked)
+    retried = []
+    bot = FakeBot()
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
+    monkeypatch.setattr(telegram_bot, "format_food_result",
+                        lambda chat_id, analysis: "the card")
+    monkeypatch.setattr(
+        telegram_bot, "_retry_failed_upload_path",
+        lambda client, path: retried.append(path) or
+        {"status": "logged", "name": path.name,
+         "analysis": {"is_food": True}, "message": "ok"},
+    )
+
+    telegram_bot._drain_one_parked_photo(bot, object())
+
+    assert retried == [parked]
+    assert telegram_bot._parked_photo_paths == []
+    assert "Queued photo analyzed" in bot.sent[-1]["text"]
+    assert "the card" in bot.sent[-1]["text"]
+
+
+def test_drain_failure_never_reparks_so_a_poison_photo_cannot_loop(
+        monkeypatch, tmp_path, _empty_parked_queue):
+    parked = tmp_path / "20260717T000001_abcdef123456.jpg"
+    parked.write_bytes(b"poison-bytes")
+    telegram_bot._parked_photo_paths.append(parked)
+    retried = []
+    bot = FakeBot()
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
+    monkeypatch.setattr(
+        telegram_bot, "_retry_failed_upload_path",
+        lambda client, path: retried.append(path) or
+        {"status": "analysis_failed", "name": path.name, "message": "nope"},
+    )
+
+    telegram_bot._drain_one_parked_photo(bot, object())
+    # A second release must find the queue empty: the failure was NOT re-parked.
+    telegram_bot._drain_one_parked_photo(bot, object())
+
+    assert retried == [parked]                       # exactly one attempt
+    assert telegram_bot._parked_photo_paths == []
+    assert "could not be analyzed" in bot.sent[-1]["text"]
+    assert "/retry_failed" in bot.sent[-1]["text"]
+
+
+def test_drain_reparks_at_front_when_no_slot_is_available(
+        monkeypatch, tmp_path, _empty_parked_queue):
+    parked = tmp_path / "20260717T000002_abcdef123456.jpg"
+    telegram_bot._parked_photo_paths.append(parked)
+    bot = FakeBot()
+    monkeypatch.setattr(telegram_bot, "_acquire_analysis_slot", lambda: None)
+    monkeypatch.setattr(
+        telegram_bot, "_retry_failed_upload_path",
+        lambda client, path: pytest.fail("no slot -> no retry"),
+    )
+
+    telegram_bot._drain_one_parked_photo(bot, object())
+
+    assert telegram_bot._parked_photo_paths == [parked]  # kept, in order
+    assert bot.sent == []
+
+
+def test_worker_finally_drains_parked_photo_end_to_end(
+        mock_db, monkeypatch, tmp_path, _empty_parked_queue):
+    """Full loop: a slot-freed Telegram analysis drains the parked photo
+    through the real retry machinery and logs a meal."""
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "failed")
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries",
+                        lambda client, image_bytes, *a, **k: {"is_food": True,
+                                                              "meal_description": "Drained",
+                                                              "total_calories": 321,
+                                                              "food_items": []})
+    (tmp_path / "failed").mkdir()
+    parked = tmp_path / "failed" / "20260717T000003_ddddeeeeffff.jpg"
+    parked.write_bytes(b"parked-drain-bytes")
+    telegram_bot._parked_photo_paths.append(parked)
+
+    bot = PhotoBot()
+    monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda chat_id, image_hash: False)
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo",
+                        lambda *a, **k: {"is_food": False})  # the live photo: not food
+
+    handled = telegram_bot.handle_photo_message(
+        object(), bot, 12345, {"photo": [{"file_id": "live"}]})
+
+    assert handled is True
+    assert telegram_bot._parked_photo_paths == []
+    assert not parked.exists()                        # drained file cleaned up
+    assert any("Queued photo analyzed" in m["text"] for m in bot.sent)
+    assert any("Drained" in m["text"] for m in bot.sent)
+
+
+# ---- Cold-connection send retry --------------------------------------
+
+def test_send_message_retries_identically_on_connection_error():
+    import requests as requests_mod
+    bot = telegram_bot.TelegramBot("123:abc")
+    bot.session = _FakeSession([
+        requests_mod.exceptions.ConnectionError("Remote end closed connection"),
+        {"ok": True, "result": {"message_id": 5}},
+    ])
+
+    result = bot.send_message(12345, "<b>card</b>")
+
+    assert result == {"message_id": 5}
+    calls = bot.session.calls
+    assert len(calls) == 2
+    # Identical retry: SAME text, SAME parse_mode — formatting never dropped
+    # for transport-level trouble.
+    assert calls[0]["json"] == calls[1]["json"]
+    assert calls[1]["json"]["parse_mode"] == "HTML"
+
+
+def test_send_message_http_error_keeps_the_formatting_fallback_only():
+    """HTTP-status failures (e.g. a 400 for bad HTML) must NOT get the
+    identical retry — same request, same 400 — and go straight to the
+    existing parse_mode-dropping fallback."""
+    import requests as requests_mod
+    bad = requests_mod.HTTPError(response=SimpleNamespace(status_code=400))
+    bot = telegram_bot.TelegramBot("123:abc")
+    bot.session = _FakeSession([bad, {"ok": True, "result": {"message_id": 2}}])
+
+    result = bot.send_message(12345, "<b>broken<i>html")
+
+    assert result == {"message_id": 2}
+    calls = bot.session.calls
+    assert len(calls) == 2
+    assert "parse_mode" not in calls[1]["json"]  # the formatting fallback
+
+
+def test_send_message_total_failure_returns_none_and_logs(caplog):
+    import logging as logging_mod
+    import requests as requests_mod
+    err = requests_mod.exceptions.ConnectionError("still down")
+    bot = telegram_bot.TelegramBot("123:abc")
+    bot.session = _FakeSession([err, err, err])  # first + identical retry + fallback
+
+    with caplog.at_level(logging_mod.ERROR, logger="calorie_bot"):
+        result = bot.send_message(12345, "hello")
+
+    assert result is None
+    assert len(bot.session.calls) == 3
+    # No more silent None: the terminal failure is loud.
+    assert "failed after all fallbacks" in caplog.text
+
+
+def test_send_photo_retries_identically_on_connection_error():
+    import requests as requests_mod
+    bot = telegram_bot.TelegramBot("123:abc")
+    bot.session = _FakeSession([
+        requests_mod.exceptions.ConnectionError("Remote end closed connection"),
+        {"ok": True, "result": {"message_id": 8}},
+    ])
+
+    result = bot.send_photo(12345, b"jpeg", caption="<b>Meal</b>")
+
+    assert result == {"message_id": 8}
+    calls = bot.session.calls
+    assert len(calls) == 2
+    # Identical retry keeps caption AND parse_mode.
+    assert calls[1]["data"] == calls[0]["data"]
+    assert calls[1]["data"]["parse_mode"] == "HTML"
+
+
+def test_send_photo_http_failure_still_drops_only_parse_mode():
+    """Non-connection failures keep the existing caption-preserving fallback."""
+    import requests as requests_mod
+    bad = requests_mod.HTTPError(response=SimpleNamespace(status_code=400))
+    bot = telegram_bot.TelegramBot("123:abc")
+    bot.session = _FakeSession([bad, {"ok": True, "result": {"message_id": 3}}])
+
+    result = bot.send_photo(12345, b"jpeg", caption="<b>Meal</b>")
+
+    assert result == {"message_id": 3}
+    calls = bot.session.calls
+    assert len(calls) == 2
+    assert calls[1]["data"]["caption"] == "<b>Meal</b>"
+    assert "parse_mode" not in calls[1]["data"]
 
 
 # ---- Anti-infinite-loop: poison-update ledger + restart tripwire -----
@@ -3915,7 +4494,7 @@ def _shape_setup(monkeypatch, tmp_path):
     monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
     monkeypatch.setattr(
         telegram_bot, "analyze_food_photo",
-        lambda client, image_bytes: {"is_food": True, "meal_description": "Shape meal",
+        lambda client, image_bytes, *a, **k: {"is_food": True, "meal_description": "Shape meal",
                                      "total_calories": 111},
     )
     monkeypatch.setattr(
@@ -4022,7 +4601,7 @@ def test_photo_caption_becomes_one_nl_correction_after_save(mock_db, monkeypatch
 def test_photo_caption_on_not_food_photo_does_nothing(mock_db, monkeypatch, tmp_path):
     text_calls = _shape_setup(monkeypatch, tmp_path)
     monkeypatch.setattr(telegram_bot, "analyze_food_photo",
-                        lambda client, image_bytes: {"is_food": False})
+                        lambda client, image_bytes, *a, **k: {"is_food": False})
     bot = ShapeBot()
     telegram_bot._process_update(object(), bot, {
         "update_id": 17,
@@ -4833,7 +5412,7 @@ def test_gemini_retry_loop_is_bounded_with_clamped_sleeps(monkeypatch, tmp_path)
 
     attempts = []
 
-    def always_429(client, image_bytes):
+    def always_429(client, image_bytes, *a, **k):
         attempts.append(1)
         raise RuntimeError("429 RESOURCE_EXHAUSTED; retryDelay: '86400s'")
 
@@ -4863,7 +5442,7 @@ def _photo_fanout_rig(monkeypatch):
             spawned.append(self)
             super().start()
 
-    def gated_analyze(client, image_bytes):
+    def gated_analyze(client, image_bytes, *a, **k):
         with lock:
             state["inflight"] += 1
             state["entered"] += 1
@@ -5431,8 +6010,9 @@ def test_poll_outage_alert_fires_wechat_first_then_chat_once(monkeypatch):
     pushed = events[0][1]
     assert pushed["title"] == "CalorieBot cannot reach Telegram"
     assert pushed["template"] == "txt"
-    # _call wraps the ConnectionError as "Telegram network-error calling …"
-    assert "Telegram network-error" in pushed["content"]
+    # _call wraps connection-class failures in the token-free typed message
+    # "Telegram connection error calling …"
+    assert "Telegram connection error" in pushed["content"]
     assert "can't fetch Telegram updates" in events[1][1]
 
 

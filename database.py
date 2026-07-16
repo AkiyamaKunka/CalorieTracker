@@ -1,6 +1,8 @@
 import sqlite3
 import json
 import re
+import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -153,18 +155,38 @@ def init_db():
 
         conn.commit()
 
-def save_meal(chat_id: int, date_str: str, time_str: str, timestamp_str: str, 
-              source: str, image_hash: str, file_id: str, analysis: Dict) -> int:
-    """Save a new meal to the database and return its row ID."""
+def save_meal(chat_id: int, date_str: str, time_str: str, timestamp_str: str,
+              source: str, image_hash: str, file_id: str, analysis: Dict,
+              mark_status: Optional[str] = None) -> int:
+    """Save a new meal to the database and return its row ID.
+
+    When mark_status is given, the photo_ingestions ledger row for this
+    image is moved to that status (the same write mark_photo_hash_status
+    does, with meal_id = the new row) inside the SAME transaction as the
+    meal INSERT — a crash between the two writes can never leave a saved
+    meal beside a stuck 'processing' reservation. Callers that still do
+    save_meal() + mark_photo_hash_status() as two steps keep working; the
+    combined path is opt-in. An empty image_hash skips the ledger write,
+    matching mark_photo_hash_status's no-op on empty hashes.
+    """
+    normalized_hash = _normalize_image_hash(image_hash)
     with _connect() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO meals (chat_id, date, time, timestamp, source, image_hash, file_id, analysis, corrected)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (chat_id, date_str, time_str, timestamp_str, source, _normalize_image_hash(image_hash),
-              file_id, json.dumps(analysis), False))
-        conn.commit()
-        return cursor.lastrowid
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO meals (chat_id, date, time, timestamp, source, image_hash, file_id, analysis, corrected)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (chat_id, date_str, time_str, timestamp_str, source, normalized_hash,
+                  file_id, json.dumps(analysis), False))
+            meal_id = cursor.lastrowid
+            if mark_status is not None and normalized_hash:
+                _apply_photo_hash_status(cursor, chat_id, normalized_hash,
+                                         mark_status, meal_id, source)
+            conn.commit()
+            return meal_id
+        except Exception:
+            conn.rollback()
+            raise
 
 
 def _normalize_image_hash(image_hash: str) -> str:
@@ -246,6 +268,26 @@ def reserve_photo_hash(chat_id: int, image_hash: str, source: str = "",
             raise
 
 
+def _apply_photo_hash_status(cursor, chat_id: int, normalized_hash: str, status: str,
+                             meal_id: Optional[int], source: str):
+    """Ledger status write shared by mark_photo_hash_status and save_meal's
+    atomic mark_status path. Runs on the caller's cursor, inside the
+    caller's transaction, and does not commit."""
+    now_str = datetime.now().isoformat()
+    cursor.execute("""
+        UPDATE photo_ingestions
+        SET last_seen_at = ?, status = ?, meal_id = COALESCE(?, meal_id),
+            source = CASE WHEN ? != '' THEN ? ELSE source END
+        WHERE chat_id = ? AND image_hash = ?
+    """, (now_str, status, meal_id, source, source, chat_id, normalized_hash))
+    if cursor.rowcount == 0:
+        cursor.execute("""
+            INSERT OR IGNORE INTO photo_ingestions
+                (chat_id, image_hash, first_seen_at, last_seen_at, source, status, meal_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (chat_id, normalized_hash, now_str, now_str, source, status, meal_id))
+
+
 def mark_photo_hash_status(chat_id: int, image_hash: str, status: str,
                            meal_id: Optional[int] = None, source: str = ""):
     """Update the processing status for a reserved photo hash."""
@@ -253,21 +295,9 @@ def mark_photo_hash_status(chat_id: int, image_hash: str, status: str,
     if not normalized_hash:
         return
 
-    now_str = datetime.now().isoformat()
     with _connect() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE photo_ingestions
-            SET last_seen_at = ?, status = ?, meal_id = COALESCE(?, meal_id),
-                source = CASE WHEN ? != '' THEN ? ELSE source END
-            WHERE chat_id = ? AND image_hash = ?
-        """, (now_str, status, meal_id, source, source, chat_id, normalized_hash))
-        if cursor.rowcount == 0:
-            cursor.execute("""
-                INSERT OR IGNORE INTO photo_ingestions
-                    (chat_id, image_hash, first_seen_at, last_seen_at, source, status, meal_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (chat_id, normalized_hash, now_str, now_str, source, status, meal_id))
+        _apply_photo_hash_status(conn.cursor(), chat_id, normalized_hash,
+                                 status, meal_id, source)
         conn.commit()
 
 
@@ -347,26 +377,26 @@ def get_reserved_photo_hashes(chat_id: int) -> List[str]:
     """Return image hashes already claimed by the ingestion guard.
 
     Stale 'processing' rows are skipped so a crash mid-analysis does not
-    permanently block /reconcile from recovering the photo.
+    permanently block /reconcile from recovering the photo. The staleness
+    filter runs in SQL: our .isoformat() timestamps compare
+    lexicographically the same as datetimes, so `last_seen_at >= cutoff`
+    matches the old parse-and-subtract check for well-formed rows.
+    NULL/empty last_seen_at rows stay reserved, like the old parse-failure
+    path (other malformed strings fall to plain string comparison — the
+    closest SQL can get to "unparseable rows are never stale").
     """
-    now = datetime.now()
+    cutoff = (
+        datetime.now() - timedelta(seconds=PHOTO_RESERVATION_STALE_SECONDS)
+    ).isoformat()
     with _connect() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT image_hash, status, last_seen_at FROM photo_ingestions "
-            "WHERE chat_id = ? AND image_hash != ''",
-            (chat_id,),
+        cursor = conn.execute(
+            "SELECT image_hash FROM photo_ingestions "
+            "WHERE chat_id = ? AND image_hash != '' "
+            "AND (status != 'processing' OR last_seen_at IS NULL "
+            "     OR last_seen_at = '' OR last_seen_at >= ?)",
+            (chat_id, cutoff),
         )
-        hashes = []
-        for image_hash, status, last_seen_at in cursor.fetchall():
-            if not image_hash:
-                continue
-            if status == "processing" and _processing_reservation_is_stale(
-                last_seen_at, now, PHOTO_RESERVATION_STALE_SECONDS
-            ):
-                continue
-            hashes.append(image_hash)
-        return hashes
+        return [row[0] for row in cursor.fetchall()]
 
 
 def meal_image_hash_exists(chat_id: int, image_hash: str) -> bool:
@@ -412,6 +442,127 @@ def get_recent_meals(chat_id: int, days: int = 3) -> List[Dict]:
     end_date = today.isoformat()
     start_date = (today - timedelta(days=max(days - 1, 0))).isoformat()
     return get_meals(chat_id, start_date, end_date)
+
+
+# /stats all-time aggregate, reduced inside SQLite. The is_food test must
+# reproduce Python truthiness over every JSON shape Gemini has produced
+# (bools, numbers, strings, arrays, objects, null, missing key, non-dict
+# analysis — json_type is NULL on a non-object root, landing in ELSE 0
+# exactly like get_meals's coerce-to-{} does), so the SQL spells each type
+# out instead of trusting `= 1`.
+_STATS_FOOD_SQL = """CASE json_type(analysis, '$.is_food')
+        WHEN 'true' THEN 1
+        WHEN 'integer' THEN json_extract(analysis, '$.is_food') <> 0
+        WHEN 'real' THEN json_extract(analysis, '$.is_food') <> 0.0
+        WHEN 'text' THEN json_extract(analysis, '$.is_food') <> ''
+        WHEN 'array' THEN json_array_length(analysis, '$.is_food') > 0
+        WHEN 'object' THEN json_extract(analysis, '$.is_food') <> '{}'
+        ELSE 0
+    END"""
+
+# Calorie clamp matching utils.safe_number: only real JSON numbers strictly
+# inside (-1e9, 1e9) count; bools, strings, huge ints (SQLite extracts
+# oversized integer literals as REAL Inf, which the range test rejects) and
+# anything else contribute 0.
+_STATS_CALORIES_SQL = """CASE
+        WHEN json_type(analysis, '$.total_calories') IN ('integer', 'real')
+             AND json_extract(analysis, '$.total_calories') > -1e9
+             AND json_extract(analysis, '$.total_calories') < 1e9
+        THEN json_extract(analysis, '$.total_calories') ELSE 0
+    END"""
+
+
+def _stat_calorie_value(value):
+    """Clamp an untrusted total_calories like utils.safe_number does (bools,
+    strings, inf/NaN and |v| >= 1e9 all count as 0) — duplicated here so
+    database.py keeps no import edge onto utils' config/requests chain."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    if not (-1e9 < value < 1e9):
+        return 0
+    return value
+
+
+def _get_meal_stats_python(chat_id: int, start_date: str, end_date: str) -> Dict:
+    """Fallback reduction over get_meals; must mirror _get_meal_stats_sql."""
+    meals = get_meals(chat_id, start_date, end_date)
+    food = [m for m in meals if m["analysis"].get("is_food")]
+    source_counts = {}
+    for meal in food:
+        source = meal.get("source") or "unknown"
+        source_counts[source] = source_counts.get(source, 0) + 1
+    return {
+        "total_meals": len(meals),
+        "food_meals": len(food),
+        "total_calories": sum(
+            _stat_calorie_value(m["analysis"].get("total_calories")) for m in food),
+        "active_days": len({m["date"] for m in food if m["date"]}),
+        "first_date": min((m["date"] for m in meals), default=None),
+        "last_date": max((m["date"] for m in meals), default=None),
+        "source_counts": source_counts,
+    }
+
+
+def _get_meal_stats_sql(chat_id: int, start_date: str, end_date: str) -> Dict:
+    # The interpolated fragments are module constants, not caller input; all
+    # caller values stay bound parameters.
+    with _connect() as conn:
+        head = conn.execute(f"""
+            SELECT COUNT(*),
+                   COALESCE(SUM({_STATS_FOOD_SQL}), 0),
+                   COALESCE(SUM(CASE WHEN {_STATS_FOOD_SQL}
+                                THEN {_STATS_CALORIES_SQL} ELSE 0 END), 0),
+                   COUNT(DISTINCT CASE WHEN {_STATS_FOOD_SQL} AND date <> ''
+                                  THEN date END),
+                   MIN(date), MAX(date)
+            FROM meals
+            WHERE chat_id = ? AND date >= ? AND date <= ?
+        """, (chat_id, start_date, end_date)).fetchone()
+        sources = conn.execute(f"""
+            SELECT COALESCE(NULLIF(source, ''), 'unknown'), COUNT(*)
+            FROM meals
+            WHERE chat_id = ? AND date >= ? AND date <= ? AND {_STATS_FOOD_SQL}
+            GROUP BY 1
+        """, (chat_id, start_date, end_date)).fetchall()
+    return {
+        "total_meals": head[0],
+        "food_meals": head[1],
+        "total_calories": head[2],
+        "active_days": head[3],
+        "first_date": head[4],
+        "last_date": head[5],
+        "source_counts": dict(sources),
+    }
+
+
+def get_meal_stats(chat_id: int) -> Dict:
+    """All-time aggregates for /stats, computed without shipping rows to Python.
+
+    Mirrors exactly what telegram_bot.format_database_stats reduces from
+    get_meals(chat_id, '1970-01-01', user-local today): raw row count, food
+    meal count (Python truthiness of analysis.is_food, non-dict analysis
+    counting as {}), the calorie total over food meals clamped like
+    utils.safe_number (format_database_stats's bare `or 0` would raise
+    TypeError on a string calorie value; the aggregate applies the same
+    clamp the bot uses everywhere else instead), distinct active days,
+    per-source food-meal counts ('' / NULL -> 'unknown'), and the raw rows'
+    first/last date (None when the window is empty).
+
+    Degrades, never crashes: a sqlite3 build without JSON1 or a stored
+    analysis that strict JSON parsing rejects (json.dumps emits bare
+    Infinity/NaN literals) raises OperationalError, and the helper falls
+    back to the get_meals + Python reduction.
+    """
+    start_date, end_date = "1970-01-01", user_local_today().isoformat()
+    try:
+        stats = _get_meal_stats_sql(chat_id, start_date, end_date)
+    except sqlite3.OperationalError:
+        stats = _get_meal_stats_python(chat_id, start_date, end_date)
+    stats["avg_calories_per_active_day"] = (
+        int(stats["total_calories"] / stats["active_days"])
+        if stats["active_days"] else 0)
+    return stats
+
 
 def update_meal_analysis(meal_id: int, chat_id: int, new_analysis: Dict):
     """Update a specific meal's analysis by its database ID. Validates chat_id for security."""
@@ -467,6 +618,10 @@ def update_android_heartbeat(device_name: str = "android_watcher", timezone: Opt
                 timezone=COALESCE(?, heartbeats.timezone)
         """, (device_name, now_str, timezone, timezone))
         conn.commit()
+    # Eager invalidation: a heartbeat may have just changed the stored
+    # offset — the TTL cache must never serve the pre-write value.
+    with _tz_cache_lock:
+        _tz_cache.pop(device_name, None)
 
 def get_last_android_heartbeat(device_name: str = "android_watcher") -> Optional[str]:
     """Get the last ping time for a specific device."""
@@ -476,13 +631,43 @@ def get_last_android_heartbeat(device_name: str = "android_watcher") -> Optional
         row = cursor.fetchone()
         return row[0] if row else None
 
+# The device timezone is read by every "today"/"now" computation — several
+# fresh sqlite connections per bot command — yet only changes when the phone
+# travels. A short in-process TTL cache absorbs that churn. 30s keeps a
+# genuine offset change (heartbeat after landing) visible fast, and
+# update_android_heartbeat invalidates eagerly so a write is never masked.
+# Tests that monkeypatch get_android_timezone itself bypass this entirely
+# (the cache lives inside the real function); clear_android_timezone_cache
+# is the reset hook for tests that hit the real DB.
+_TZ_CACHE_TTL_SECONDS = 30
+_tz_cache: Dict[str, tuple] = {}  # device_name -> (monotonic_stamp, value)
+_tz_cache_lock = threading.Lock()
+
+
+def clear_android_timezone_cache():
+    """Drop all cached timezone reads (test isolation / manual reset)."""
+    with _tz_cache_lock:
+        _tz_cache.clear()
+
+
 def get_android_timezone(device_name: str = "android_watcher") -> str:
-    """Get the last reported timezone for a specific device. Defaults to +0800."""
+    """Get the last reported timezone for a specific device. Defaults to +0800.
+
+    Served from a 30s in-process cache; see _TZ_CACHE_TTL_SECONDS above.
+    """
+    now = time.monotonic()
+    with _tz_cache_lock:
+        cached = _tz_cache.get(device_name)
+        if cached is not None and now - cached[0] < _TZ_CACHE_TTL_SECONDS:
+            return cached[1]
     with _connect() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT timezone FROM heartbeats WHERE device_name = ?", (device_name,))
         row = cursor.fetchone()
-        return row[0] if row and row[0] else "+0800"
+        value = row[0] if row and row[0] else "+0800"
+    with _tz_cache_lock:
+        _tz_cache[device_name] = (now, value)
+    return value
 
 
 _TZ_OFFSET_RE = re.compile(r"^([+-])(\d{2})(\d{2})$")

@@ -13,16 +13,19 @@ Configuration (env / .env):
   CLAUDE_ANALYZER_BIN               CLI binary (default: "claude")
   CLAUDE_ANALYZER_MODEL             optional --model override
   CLAUDE_ANALYZER_TIMEOUT_SECONDS   per-analysis wall clock (default: 120)
+  CLAUDE_ANALYZER_EXTRA_FLAGS       optional extra CLI flags (shlex-split)
   CLAUDE_CODE_OAUTH_TOKEN           subscription token (read by the CLI itself)
 """
 
 import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -31,10 +34,11 @@ from utils import parse_ai_json, parse_boolish
 
 log = logging.getLogger("claude_analyzer")
 
-# The CLI is a full Node process (hundreds of MB RSS). Serialize runs so a
-# burst of photos — e.g. a Telegram album fanning out one analysis thread per
-# photo — can't stack N of them and OOM a small host. The subprocess timeout
-# bounds how long any holder keeps the lock.
+# The CLI is a full Node process (hundreds of MB RSS). Single-flight: only
+# one run at a time, and a contended caller does NOT queue — it returns None
+# immediately so the photo falls through to Gemini instead of waiting out
+# another photo's full CLI run (measured ~42-63s cards on album bursts). The
+# subprocess timeout bounds how long the one holder keeps the lock.
 _CLI_LOCK = threading.Lock()
 
 
@@ -81,6 +85,22 @@ def _build_prompt(image_path: str) -> str:
     )
 
 
+def _extra_flags() -> list:
+    """CLAUDE_ANALYZER_EXTRA_FLAGS, shlex-split into argv elements.
+
+    A malformed value (unbalanced quote) degrades to no extra flags — the
+    analyzer must keep working rather than fail every photo on a typo.
+    """
+    raw = (os.environ.get("CLAUDE_ANALYZER_EXTRA_FLAGS") or "").strip()
+    if not raw:
+        return []
+    try:
+        return shlex.split(raw)
+    except ValueError as e:
+        log.warning(f"Ignoring malformed CLAUDE_ANALYZER_EXTRA_FLAGS: {e}")
+        return []
+
+
 def analyze_food_photo(image_bytes: bytes) -> Optional[Dict]:
     """Analyze a food photo via the Claude Code CLI; None means 'use Gemini'."""
     if not is_configured():
@@ -89,7 +109,14 @@ def analyze_food_photo(image_bytes: bytes) -> Optional[Dict]:
     if cli is None or not image_bytes:
         return None
 
+    # Contended-CLI bypass: another photo already owns the (up to 120s) CLI
+    # run. Don't queue behind it — Gemini answers this photo in seconds.
+    if not _CLI_LOCK.acquire(blocking=False):
+        log.info("Claude CLI busy — falling back to Gemini for this photo.")
+        return None
+
     tmp_path = None
+    start = time.time()
     try:
         with tempfile.NamedTemporaryFile(
             prefix="ct_claude_", suffix=".jpg", delete=False
@@ -107,15 +134,22 @@ def analyze_food_photo(image_bytes: bytes) -> Optional[Dict]:
         model = (os.environ.get("CLAUDE_ANALYZER_MODEL") or "").strip()
         if model:
             cmd += ["--model", model]
+        cmd += _extra_flags()
 
-        with _CLI_LOCK:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=_timeout_seconds(),
-                cwd=str(Path(tmp_path).parent),
-            )
+        # The CLI phones home for updates/telemetry on every run; both knobs
+        # shave that off (and are harmless no-ops on CLIs that predate them).
+        env = dict(os.environ)
+        env["DISABLE_AUTOUPDATER"] = "1"
+        env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_timeout_seconds(),
+            cwd=str(Path(tmp_path).parent),
+            env=env,
+        )
         if proc.returncode != 0:
             snippet = (proc.stderr or proc.stdout or "").strip()[:300]
             if "limit" in snippet.lower():
@@ -146,7 +180,15 @@ def analyze_food_photo(image_bytes: bytes) -> Optional[Dict]:
                 log.warning("Claude analysis is_food was not boolean-like.")
                 return None
             analysis["is_food"] = coerced
-        log.info("✅ Photo analyzed by Claude (subscription).")
+        # Envelope timings split CLI overhead from API time — the evidence
+        # trail for tuning startup flags without touching the model choice.
+        wall = time.time() - start
+        duration_ms = envelope.get("duration_ms")
+        duration_api_ms = envelope.get("duration_api_ms")
+        log.info(
+            f"✅ Photo analyzed by Claude (subscription) in {wall:.1f}s "
+            f"(cli={duration_ms}ms api={duration_api_ms}ms)."
+        )
         return analysis
     except subprocess.TimeoutExpired:
         log.warning(f"Claude CLI timed out after {_timeout_seconds()}s.")
@@ -158,6 +200,7 @@ def analyze_food_photo(image_bytes: bytes) -> Optional[Dict]:
         log.warning(f"Claude analyzer failed unexpectedly: {type(e).__name__}: {e}")
         return None
     finally:
+        _CLI_LOCK.release()
         if tmp_path:
             try:
                 os.unlink(tmp_path)

@@ -201,7 +201,7 @@ def _upload_food_photo_killed_at(monkeypatch, tmp_path, kill_at):
     analysis = {"is_food": True, "total_calories": 500,
                 "meal_description": "kill-window meal", "food_items": []}
     monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries",
-                        lambda client, image_bytes: dict(analysis))
+                        lambda client, image_bytes, *a, **k: dict(analysis))
 
     state = {"killed": False}
 

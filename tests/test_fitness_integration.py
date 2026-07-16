@@ -61,6 +61,9 @@ class FakeBot:
     def delete_message(self, chat_id, message_id):
         self.deleted.append((chat_id, message_id))
 
+    def send_chat_action(self, chat_id, action):
+        pass  # fire-and-forget 'typing'/'upload_photo' indicator
+
 
 def _intent_client(payload):
     """A Gemini stub whose generate_content always returns ``payload`` as JSON."""

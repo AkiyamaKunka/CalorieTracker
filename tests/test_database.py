@@ -152,6 +152,71 @@ def test_update_android_heartbeat_first_ping_without_timezone_defaults():
     assert database.get_last_android_heartbeat("fresh_device") is not None
 
 
+# ---- get_android_timezone TTL cache ---------------------------------
+
+def _write_timezone_directly(device_name, tz):
+    """Raw DB write that deliberately bypasses update_android_heartbeat's
+    cache invalidation, so tests can observe the cache actually serving."""
+    with sqlite3.connect(database.DB_PATH) as conn:
+        conn.execute("UPDATE heartbeats SET timezone = ? WHERE device_name = ?",
+                     (tz, device_name))
+        conn.commit()
+
+
+def test_get_android_timezone_serves_from_cache_within_ttl():
+    database.update_android_heartbeat("android_watcher", timezone="+0900")
+    assert database.get_android_timezone("android_watcher") == "+0900"
+
+    # A direct DB mutation (no invalidation) stays invisible inside the TTL —
+    # proof the repeated read cost zero connections.
+    _write_timezone_directly("android_watcher", "+0300")
+    assert database.get_android_timezone("android_watcher") == "+0900"
+
+    # The explicit clear hook (used by conftest between tests) forces a re-read.
+    database.clear_android_timezone_cache()
+    assert database.get_android_timezone("android_watcher") == "+0300"
+
+
+def test_get_android_timezone_cache_expires_after_ttl(monkeypatch):
+    database.update_android_heartbeat("android_watcher", timezone="+0900")
+    assert database.get_android_timezone("android_watcher") == "+0900"
+    _write_timezone_directly("android_watcher", "+0500")
+
+    # TTL 0 = every entry already stale: the next read must hit the DB.
+    monkeypatch.setattr(database, "_TZ_CACHE_TTL_SECONDS", 0)
+    assert database.get_android_timezone("android_watcher") == "+0500"
+
+
+def test_update_android_heartbeat_invalidates_the_cache_eagerly():
+    database.update_android_heartbeat("android_watcher", timezone="+0900")
+    assert database.get_android_timezone("android_watcher") == "+0900"  # now cached
+
+    # The documented write path must never be masked by the 30s TTL.
+    database.update_android_heartbeat("android_watcher", timezone="+0100")
+    assert database.get_android_timezone("android_watcher") == "+0100"
+
+
+def test_get_android_timezone_cache_is_per_device():
+    database.update_android_heartbeat("android_watcher", timezone="+0900")
+    database.update_android_heartbeat("ipad", timezone="-0500")
+    assert database.get_android_timezone("android_watcher") == "+0900"
+    assert database.get_android_timezone("ipad") == "-0500"
+    # Cached entries do not bleed across devices.
+    assert database.get_android_timezone("android_watcher") == "+0900"
+
+
+def test_monkeypatched_get_android_timezone_bypasses_cache(monkeypatch):
+    """Tests that setattr the function itself must win unconditionally —
+    the cache lives INSIDE the real function, so a replacement never sees it."""
+    database.update_android_heartbeat("android_watcher", timezone="+0900")
+    assert database.get_android_timezone("android_watcher") == "+0900"  # primes the cache
+
+    monkeypatch.setattr(database, "get_android_timezone",
+                        lambda device_name="android_watcher": "+1234")
+    assert database.get_android_timezone("android_watcher") == "+1234"
+    assert database.user_local_now() is not None  # indirect callers see it too
+
+
 def test_delete_meal_validates_chat_id():
     owner_chat = 111
     other_chat = 222
@@ -738,3 +803,362 @@ def test_wal_concurrent_workout_appends_all_survive(mock_db_path):
     assert len(rows) == _HAMMER_WRITES           # append-only: no lost inserts
     assert len(set(ids)) == _HAMMER_WRITES       # each append got its own row id
     assert {r["notes"] for r in rows} == {f"set-{i}" for i in range(_HAMMER_WRITES)}
+
+
+# ═══ Appended atomic meal save: INSERT + ledger status in ONE transaction ═══
+# save_meal(mark_status=...) folds the mark_photo_hash_status write into the
+# meal INSERT's transaction so a crash between the two can never strand a
+# saved meal beside a stuck 'processing' reservation.
+
+
+def _ledger_row(db_path, chat_id, image_hash):
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute(
+            "SELECT status, meal_id, source FROM photo_ingestions "
+            "WHERE chat_id = ? AND image_hash = ?",
+            (chat_id, image_hash),
+        ).fetchone()
+
+
+def test_save_meal_mark_status_saves_and_marks_in_one_call(mock_db_path):
+    chat_id = 12345
+    image_hash = "atomic_latte_hash"
+    assert database.reserve_photo_hash(chat_id, image_hash, "api_upload") is True
+
+    meal_id = database.save_meal(
+        chat_id, "2026-07-16", "12:00", "2026-07-16T12:00:00",
+        "telegram", image_hash, "file1",
+        {"is_food": True, "total_calories": 500},
+        mark_status="saved",
+    )
+
+    meals = database.get_meals(chat_id, "2026-07-16", "2026-07-16")
+    assert [m["id"] for m in meals] == [meal_id]
+    # Same ledger write mark_photo_hash_status does: status + meal_id, and a
+    # non-empty source overwrites the reservation's source.
+    assert _ledger_row(mock_db_path, chat_id, image_hash) == ("saved", meal_id, "telegram")
+    # The combined path leaves the same guard state as the two-step path.
+    assert database.reserve_photo_hash(chat_id, image_hash, "api_upload") is False
+
+
+def test_save_meal_without_mark_status_leaves_ledger_untouched(mock_db_path):
+    # The combined write is opt-in: legacy two-step callers keep the old
+    # save-then-mark behavior, so a bare save must not move the ledger.
+    chat_id = 12345
+    image_hash = "two_step_latte_hash"
+    assert database.reserve_photo_hash(chat_id, image_hash, "telegram") is True
+
+    database.save_meal(
+        chat_id, "2026-07-16", "12:00", "2026-07-16T12:00:00",
+        "telegram", image_hash, "file1", {"is_food": True},
+    )
+
+    assert _ledger_row(mock_db_path, chat_id, image_hash) == ("processing", None, "telegram")
+
+
+def test_save_meal_mark_status_upserts_ledger_row_when_reservation_missing(mock_db_path):
+    # mark_photo_hash_status inserts a ledger row when none exists (e.g. a
+    # path that never reserved); the atomic variant must do the same.
+    chat_id = 12345
+    image_hash = "unreserved_latte_hash"
+
+    meal_id = database.save_meal(
+        chat_id, "2026-07-16", "12:00", "2026-07-16T12:00:00",
+        "telegram", image_hash, "file1", {"is_food": True},
+        mark_status="saved",
+    )
+
+    assert _ledger_row(mock_db_path, chat_id, image_hash) == ("saved", meal_id, "telegram")
+
+
+def test_save_meal_mark_status_with_empty_hash_skips_ledger(mock_db_path):
+    # mark_photo_hash_status is a no-op on empty hashes (text-only meals);
+    # the atomic variant must still save the meal without inventing a
+    # ledger row keyed on ''.
+    chat_id = 12345
+    meal_id = database.save_meal(
+        chat_id, "2026-07-16", "12:00", "2026-07-16T12:00:00",
+        "telegram", "", "file1", {"is_food": True},
+        mark_status="saved",
+    )
+
+    assert meal_id == 1
+    with sqlite3.connect(mock_db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM photo_ingestions").fetchone() == (0,)
+
+
+def test_save_meal_mark_status_crash_between_writes_rolls_back_both(monkeypatch, mock_db_path):
+    # The crash-atomicity property this API exists for: a kill between the
+    # meal INSERT and the ledger UPDATE must roll BOTH back — never a saved
+    # meal beside a 'processing' reservation.
+    chat_id = 12345
+    image_hash = "crash_latte_hash"
+    assert database.reserve_photo_hash(chat_id, image_hash, "telegram") is True
+
+    real_apply = database._apply_photo_hash_status
+
+    def crash_after_ledger_write(cursor, *args):
+        real_apply(cursor, *args)
+        raise RuntimeError("injected crash after ledger write, before commit")
+
+    monkeypatch.setattr(database, "_apply_photo_hash_status", crash_after_ledger_write)
+    with pytest.raises(RuntimeError):
+        database.save_meal(
+            chat_id, "2026-07-16", "12:00", "2026-07-16T12:00:00",
+            "telegram", image_hash, "file1", {"is_food": True, "total_calories": 500},
+            mark_status="saved",
+        )
+
+    assert database.get_meals(chat_id, "1970-01-01", "2100-01-01") == []
+    assert _ledger_row(mock_db_path, chat_id, image_hash) == ("processing", None, "telegram")
+
+    # And the reservation is still in a retryable state: the same call
+    # succeeds once the fault is gone.
+    monkeypatch.setattr(database, "_apply_photo_hash_status", real_apply)
+    meal_id = database.save_meal(
+        chat_id, "2026-07-16", "12:00", "2026-07-16T12:00:00",
+        "telegram", image_hash, "file1", {"is_food": True, "total_calories": 500},
+        mark_status="saved",
+    )
+    assert _ledger_row(mock_db_path, chat_id, image_hash) == ("saved", meal_id, "telegram")
+
+
+# ═══ Appended /reconcile staleness filter now runs inside SQL ═══
+
+
+def test_reserved_hashes_keep_unparseable_last_seen_at_rows(mock_db_path):
+    # The old Python filter kept any 'processing' row whose last_seen_at
+    # failed to parse (parse failure == never stale). The SQL rewrite must
+    # preserve that for the NULL/empty shape and for non-date junk.
+    chat_id = 12345
+    for image_hash in ("empty_ts_hash", "junk_ts_hash"):
+        assert database.reserve_photo_hash(chat_id, image_hash, "telegram") is True
+    with sqlite3.connect(mock_db_path) as conn:
+        conn.execute(
+            "UPDATE photo_ingestions SET last_seen_at = '' WHERE image_hash = 'empty_ts_hash'")
+        conn.execute(
+            "UPDATE photo_ingestions SET last_seen_at = 'not-a-timestamp' "
+            "WHERE image_hash = 'junk_ts_hash'")
+        conn.commit()
+
+    reserved = database.get_reserved_photo_hashes(chat_id)
+    assert "empty_ts_hash" in reserved
+    assert "junk_ts_hash" in reserved
+    # Still scoped per chat.
+    assert database.get_reserved_photo_hashes(999) == []
+
+
+# ═══ Appended /stats aggregate: SQL json_extract path vs Python reduction ═══
+import random
+
+import utils
+
+
+def _sqlite_has_json1():
+    try:
+        sqlite3.connect(":memory:").execute("SELECT json_extract('{}', '$.x')")
+        return True
+    except sqlite3.OperationalError:
+        return False
+
+
+def _freeze_user_clock(monkeypatch):
+    """get_meal_stats recomputes user_local_today() internally; freeze it so
+    a midnight rollover mid-test cannot shift the aggregation window."""
+    monkeypatch.setattr(
+        database, "get_android_timezone", lambda device_name="android_watcher": "+0800")
+    frozen_now = database.user_local_now()
+    monkeypatch.setattr(
+        database, "user_local_now", lambda device_name="android_watcher": frozen_now)
+    return frozen_now.date()
+
+
+def _reference_meal_stats(chat_id, today_str):
+    """Equivalence oracle: the reduction format_database_stats ships (food
+    truthiness filter, `source or 'unknown'` counting, truthy-date active
+    days, 1970..today window) with utils.safe_number clamping the calorie
+    sum — the bare `(x or 0)` in the formatter would raise TypeError on a
+    string calorie value, so the aggregate pins the bot's standard clamp."""
+    meals = database.get_meals(chat_id, "1970-01-01", today_str)
+    food = [m for m in meals if m.get("analysis", {}).get("is_food")]
+    total = sum(utils.safe_number(m["analysis"].get("total_calories")) for m in food)
+    active_days = len({m.get("date") for m in food if m.get("date")})
+    sources = {}
+    for meal in food:
+        source = meal.get("source") or "unknown"
+        sources[source] = sources.get(source, 0) + 1
+    return {
+        "total_meals": len(meals),
+        "food_meals": len(food),
+        "total_calories": total,
+        "active_days": active_days,
+        "first_date": min((m["date"] for m in meals), default=None),
+        "last_date": max((m["date"] for m in meals), default=None),
+        "source_counts": sources,
+        "avg_calories_per_active_day": int(total / active_days) if active_days else 0,
+    }
+
+
+_HOSTILE_IS_FOOD = [True, False, 1, 0, 2, -1, 3.14, 0.0, "yes", "", "0", "false",
+                    None, [], [1], {}, {"nested": 1}, 10**400, "inf"]
+# Float calorie values are dyadic (.25/.5 steps) so the two summation orders
+# (SQL scan order vs get_meals's ORDER BY timestamp) are both exact — the
+# equality assertion cannot flake on float association.
+_HOSTILE_CALORIES = [500, 640, 0, -50, 250.25, 0.5, -0.75, "500", "inf", "-inf",
+                     "NaN", "", True, False, None, [], [100], {}, {"kcal": 100},
+                     10**18, 10**400, 999999999, 1000000000, -1000000000,
+                     999999999.5, -999999999.5]
+# json.dumps of these is valid strict JSON that parses to a non-dict, which
+# get_meals coerces to {} and json_type reports as a non-object root.
+_NON_DICT_ANALYSES = ["just a string", 42, [1, 2, 3], None, True, 3.5]
+
+
+def _seed_hostile_meals(chat_id, today, count=500):
+    rng = random.Random(20260717)
+    sources = [None, "", "telegram", "api_upload", "ios_shortcut"]
+    for i in range(count):
+        if rng.random() < 0.12:
+            analysis = rng.choice(_NON_DICT_ANALYSES)
+        else:
+            analysis = {}
+            if rng.random() < 0.85:
+                analysis["is_food"] = rng.choice(_HOSTILE_IS_FOOD)
+            if rng.random() < 0.85:
+                analysis["total_calories"] = rng.choice(_HOSTILE_CALORIES)
+        day = (today - timedelta(days=rng.randrange(45))).isoformat()
+        database.save_meal(chat_id, day, "12:00", f"{day}T12:00:00",
+                           rng.choice(sources), f"hostile_hash_{i}", f"file{i}",
+                           analysis)
+    # Rows outside the '1970-01-01'..today window that both paths must skip.
+    tomorrow = (today + timedelta(days=1)).isoformat()
+    database.save_meal(chat_id, tomorrow, "12:00", f"{tomorrow}T12:00:00",
+                       "telegram", "future_hash", "file_future",
+                       {"is_food": True, "total_calories": 500})
+    database.save_meal(chat_id, "", "12:00", "T12:00:00",
+                       "telegram", "dateless_hash", "file_dateless",
+                       {"is_food": True, "total_calories": 500})
+
+
+@pytest.mark.skipif(not _sqlite_has_json1(),
+                    reason="sqlite3 lacks JSON1; only the Python fallback applies")
+def test_get_meal_stats_sql_path_matches_python_reference_on_hostile_values(monkeypatch):
+    chat_id = 12345
+    today = _freeze_user_clock(monkeypatch)
+    _seed_hostile_meals(chat_id, today)
+    # A second user's meal must not leak into the aggregate.
+    database.save_meal(999, today.isoformat(), "12:00", f"{today}T12:00:00",
+                       "telegram", "other_chat_hash", "file_other",
+                       {"is_food": True, "total_calories": 111})
+
+    reference = _reference_meal_stats(chat_id, today.isoformat())
+    # Sanity: the seed produced a non-trivial mix inside the window.
+    assert reference["total_meals"] == 500
+    assert 0 < reference["food_meals"] < 500
+    assert "unknown" in reference["source_counts"]
+
+    def no_fallback(*args):
+        raise AssertionError("SQL stats path unexpectedly fell back to Python")
+
+    monkeypatch.setattr(database, "_get_meal_stats_python", no_fallback)
+    assert database.get_meal_stats(chat_id) == reference
+    assert database.get_meal_stats(999)["total_calories"] == 111
+
+
+def test_get_meal_stats_python_fallback_matches_reference(monkeypatch):
+    # The degrade path (no JSON1 / json_extract raising) must produce the
+    # exact same aggregate as the SQL path's oracle.
+    chat_id = 12345
+    today = _freeze_user_clock(monkeypatch)
+    _seed_hostile_meals(chat_id, today, count=120)
+    reference = _reference_meal_stats(chat_id, today.isoformat())
+
+    def json1_missing(*args):
+        raise sqlite3.OperationalError("no such function: json_extract")
+
+    monkeypatch.setattr(database, "_get_meal_stats_sql", json1_missing)
+    assert database.get_meal_stats(chat_id) == reference
+
+
+def test_get_meal_stats_survives_json_sqlite_cannot_parse(monkeypatch):
+    # json.dumps writes float('inf') as a bare Infinity literal — fine for
+    # Python's json.loads, malformed JSON to SQLite's json_extract. The
+    # helper must degrade to the Python reduction (clamping inf to 0), not
+    # crash /stats.
+    chat_id = 12345
+    today_str = _freeze_user_clock(monkeypatch).isoformat()
+    database.save_meal(chat_id, today_str, "12:00", f"{today_str}T12:00:00",
+                       "telegram", "good_hash", "file1",
+                       {"is_food": True, "total_calories": 640})
+    with database._connect() as conn:
+        conn.execute(
+            "INSERT INTO meals (chat_id, date, time, timestamp, source, image_hash,"
+            " file_id, analysis, corrected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+            (chat_id, today_str, "13:00", f"{today_str}T13:00:00", "api_upload",
+             "inf_hash", "file2",
+             json.dumps({"is_food": True, "total_calories": float("inf")})))
+        conn.commit()
+
+    # Whether JSON1 is missing or the row is malformed, the SQL path raises...
+    with pytest.raises(sqlite3.OperationalError):
+        database._get_meal_stats_sql(chat_id, "1970-01-01", today_str)
+
+    # ...and the public helper still answers, via the Python reduction.
+    assert database.get_meal_stats(chat_id) == {
+        "total_meals": 2,
+        "food_meals": 2,
+        "total_calories": 640,
+        "active_days": 1,
+        "first_date": today_str,
+        "last_date": today_str,
+        "source_counts": {"telegram": 1, "api_upload": 1},
+        "avg_calories_per_active_day": 640,
+    }
+
+
+def test_get_meal_stats_empty_chat_returns_zeroed_shape():
+    assert database.get_meal_stats(424242) == {
+        "total_meals": 0,
+        "food_meals": 0,
+        "total_calories": 0,
+        "active_days": 0,
+        "first_date": None,
+        "last_date": None,
+        "source_counts": {},
+        "avg_calories_per_active_day": 0,
+    }
+
+
+def test_get_meal_stats_pins_stats_semantics_by_hand(monkeypatch):
+    # Readable pin of the /stats reduction rules on a hand-built dataset;
+    # the property test above covers breadth, this one documents the rules.
+    chat_id = 12345
+    today = _freeze_user_clock(monkeypatch)
+    day_a = (today - timedelta(days=1)).isoformat()
+    day_b = today.isoformat()
+
+    rows = [
+        (day_a, "telegram", {"is_food": True, "total_calories": 500}),
+        (day_a, "api_upload", {"is_food": True, "total_calories": "300"}),  # string -> 0
+        (day_a, "telegram", {"is_food": False, "total_calories": 400}),     # not food
+        (day_a, None, {"is_food": 1}),                            # NULL source -> unknown
+        (day_a, "", {"is_food": "yes", "total_calories": None}),  # '' source -> unknown
+        (day_b, "telegram", {"is_food": True, "total_calories": 10**400}),  # clamped
+        (day_b, "telegram", {"is_food": [1], "total_calories": True}),      # bool -> 0
+        (day_b, "ios_shortcut", {"is_food": True, "total_calories": 250.25}),
+        (day_b, "telegram", "not even a dict"),                   # raw row only
+    ]
+    for i, (day, source, analysis) in enumerate(rows):
+        database.save_meal(chat_id, day, "12:00", f"{day}T12:00:00",
+                           source, f"pin_hash_{i}", f"file{i}", analysis)
+
+    assert database.get_meal_stats(chat_id) == {
+        "total_meals": 9,
+        "food_meals": 7,
+        "total_calories": 750.25,
+        "active_days": 2,
+        "first_date": day_a,
+        "last_date": day_b,
+        "source_counts": {"telegram": 3, "api_upload": 1, "unknown": 2,
+                          "ios_shortcut": 1},
+        "avg_calories_per_active_day": 375,  # int(750.25 / 2)
+    }

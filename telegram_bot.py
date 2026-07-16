@@ -312,6 +312,86 @@ def _release_analysis_slot(token):
         log.warning("Photo-analysis slot over-released; ignoring.")
 
 
+# Telegram photos parked by the slot-denied branch of handle_photo_message,
+# in arrival order. In-memory ONLY as a drain hint: the photos themselves
+# are durable failed uploads, so a restart merely downgrades them from
+# "auto-drained" to "manual /retry_failed" — nothing is lost.
+_parked_photo_lock = threading.Lock()
+_parked_photo_paths: List[Path] = []
+
+
+def _park_photo_for_drain(path: Path):
+    with _parked_photo_lock:
+        _parked_photo_paths.append(path)
+
+
+def _drain_one_parked_photo(bot, gemini_client):
+    """Best-effort: after a slot release, analyze ONE parked slot-denied photo.
+
+    Called from the analysis workers' finally blocks. Runs only when a slot
+    is immediately re-acquirable (never blocks the releasing worker); the
+    drain itself happens on a background thread through the existing
+    failed-upload retry machinery. A drained photo is popped BEFORE its
+    retry and never re-parked on failure — the file simply stays a normal
+    failed upload for /retry_failed — so a poison photo cannot drain-loop.
+    Each successful drain's own release cascades to the next parked item.
+    Totally non-raising: this runs inside finally blocks.
+    """
+    with _parked_photo_lock:
+        path = _parked_photo_paths.pop(0) if _parked_photo_paths else None
+    if path is None:
+        return
+    slot = _acquire_analysis_slot()
+    if slot is None:
+        # Capacity vanished between the release and here; re-park at the
+        # front so the next release picks it up in order.
+        with _parked_photo_lock:
+            _parked_photo_paths.insert(0, path)
+        return
+
+    def _drain_worker():
+        try:
+            result = _retry_failed_upload_path(gemini_client, path)
+            status = result.get("status")
+            if status == "logged":
+                bot.send_message(
+                    ALLOWED_CHAT_ID,
+                    "✅ <b>Queued photo analyzed:</b>\n\n"
+                    + format_food_result(ALLOWED_CHAT_ID, result["analysis"]),
+                )
+            elif status in {"not_food", "duplicate", "already_reserved"}:
+                log.info(f"  ⏭️ Parked-photo drain: {status} for {path.name}")
+            else:
+                # The user was told "queued" — a silently-kept failure would
+                # read as an eaten photo. One short pointer, no spam.
+                bot.send_message(
+                    ALLOWED_CHAT_ID,
+                    "⚠️ A queued photo could not be analyzed; it is kept as a "
+                    "failed upload — retry with <code>/retry_failed</code>.",
+                )
+        except Exception as e:
+            log.error(f"Parked-photo drain failed: {bot._redact(e)}")
+        finally:
+            _release_analysis_slot(slot)
+            _drain_one_parked_photo(bot, gemini_client)
+
+    try:
+        worker = threading.Thread(target=_drain_worker)
+        worker.start()
+    except Exception as e:
+        # Thread spawn failing is exactly the memory pressure the slot cap
+        # exists for: return the slot, keep the photo parked, stay quiet.
+        _release_analysis_slot(slot)
+        with _parked_photo_lock:
+            _parked_photo_paths.insert(0, path)
+        log.error(f"Could not spawn parked-photo drain worker: {e}")
+        return
+    # Thread doubles that never run the target (test fakes) must not strand
+    # the slot; the token release is idempotent — see handle_photo_message.
+    if not (hasattr(worker, "is_alive") and worker.is_alive()):
+        _release_analysis_slot(slot)
+
+
 def _generate_content_with_deadline(client, **kwargs):
     """client.models.generate_content bounded by GEMINI_HTTP_DEADLINE_SECONDS.
 
@@ -395,6 +475,17 @@ def _truncate_telegram_html(text: str) -> str:
 
 
 # ─── Telegram Bot API ─────────────────────────────────────────────
+class TelegramConnectionError(RuntimeError):
+    """Connection-class Telegram failure (no HTTP response ever arrived).
+
+    Distinct from HTTP-status failures so send paths can retry the IDENTICAL
+    request once: a cold keep-alive socket (server closed it while idle —
+    RemoteDisconnected) fails exactly one attempt and the very next attempt
+    on a fresh connection succeeds, whereas an HTTP 400 would fail the same
+    way forever. Message is deliberately token-free.
+    """
+
+
 class TelegramBot:
     """Simple Telegram Bot using HTTP polling (no library needed)."""
 
@@ -438,6 +529,14 @@ class TelegramBot:
             # requests embeds the full URL (token included) in HTTPError messages,
             # and ConnectionError/ConnectTimeout messages carry it too.
             resp = getattr(e, "response", None)
+            if resp is None and isinstance(e, requests.exceptions.ConnectionError):
+                # Connection-class only (RemoteDisconnected arrives wrapped in
+                # requests' ConnectionError): the typed error lets send paths
+                # retry identically. Timeouts were already caught above and
+                # HTTPError always carries a response.
+                raise TelegramConnectionError(
+                    f"Telegram connection error calling {method}"
+                ) from None
             status = resp.status_code if resp is not None else "network-error"
             raise RuntimeError(f"Telegram {status} calling {method}") from None
         data = resp.json()
@@ -593,13 +692,26 @@ class TelegramBot:
             return self._call("sendMessage", **payload)
         except Exception as e:
             log.error(f"Failed to send message: {self._redact(e)}")
+            if isinstance(e, TelegramConnectionError):
+                # Cold-connection retry: identical arguments (same
+                # parse_mode). The formatting fallback below would hand the
+                # user raw tags for what was purely transport trouble.
+                try:
+                    return self._call("sendMessage", **payload)
+                except Exception as retry_error:
+                    log.warning(
+                        f"sendMessage connection retry failed: {self._redact(retry_error)}"
+                    )
             # Retry without parse_mode in case of formatting issues
             try:
                 fallback = {"chat_id": chat_id, "text": text}
                 if reply_markup:
                     fallback["reply_markup"] = reply_markup
                 return self._call("sendMessage", **fallback)
-            except Exception:
+            except Exception as final_error:
+                log.error(
+                    f"sendMessage failed after all fallbacks: {self._redact(final_error)}"
+                )
                 return None
 
     def send_photo(self, chat_id: int, photo_bytes: bytes, caption: str = "", parse_mode: str = "HTML"):
@@ -631,6 +743,16 @@ class TelegramBot:
             return _post(data)
         except Exception as e:
             log.error(f"Failed to send photo: {self._redact(e)}")
+            if isinstance(e, requests.exceptions.ConnectionError):
+                # Cold-connection retry, identical arguments (same
+                # parse_mode) — see send_message. The duplicate-photo
+                # trade-off documented below applies here too.
+                try:
+                    return _post(data)
+                except Exception as retry_error:
+                    log.warning(
+                        f"sendPhoto connection retry failed: {self._redact(retry_error)}"
+                    )
             if caption:
                 # Mirror send_message exactly: the retry KEEPS the caption and
                 # drops only parse_mode — the meal card text is the payload
@@ -641,8 +763,13 @@ class TelegramBot:
                 # than the transient failures the retry recovers from.
                 try:
                     return _post({"chat_id": chat_id, "caption": caption})
-                except Exception:
+                except Exception as final_error:
+                    log.error(
+                        f"sendPhoto failed after all fallbacks: {self._redact(final_error)}"
+                    )
                     return None
+            else:
+                log.error("sendPhoto failed with no caption fallback to try.")
             return None
 
     def answer_callback_query(self, callback_query_id: str, text: str = ""):
@@ -659,6 +786,18 @@ class TelegramBot:
             self._call("deleteMessage", chat_id=chat_id, message_id=message_id)
         except Exception as e:
             log.warning(f"Failed to delete message: {self._redact(e)}")
+
+    def send_chat_action(self, chat_id: int, action: str):
+        """Fire-and-forget sendChatAction ('typing' / 'upload_photo' bubble).
+
+        Pure UX (the action auto-expires after ~5s); failures are swallowed
+        and never retried — spending a second RTT on an indicator would
+        defeat its purpose.
+        """
+        try:
+            self._call("sendChatAction", chat_id=chat_id, action=action)
+        except Exception as e:
+            log.debug(f"sendChatAction failed (ignored): {self._redact(e)}")
 
     def get_file(self, file_id: str) -> bytes:
         """Download a file from Telegram."""
@@ -984,6 +1123,35 @@ def _gemini_failure_context() -> str:
     return "\n".join(lines)
 
 
+def _normalize_photo_for_analysis(image_bytes: bytes) -> Optional[bytes]:
+    """Single-decode normalize: EXIF-upright, <=1568px, JPEG quality 85.
+
+    Computed once per photo and reused by every consumer (Claude temp file,
+    Gemini inline blob, chat echo), replacing three separate full-size PIL
+    decodes — the biggest RAM spike on the 1GB host. 1568px matches the
+    Anthropic API's own server-side cap (accuracy-neutral for Claude) and is
+    comfortably above Gemini's needs. draft() needs an aspect-corrected box:
+    PIL only engages the cheap DCT-domain downscale when BOTH dims stay >=
+    the request, so a square (1568,1568) box on a 4:3 image never bites.
+    Returns None on any failure — callers fall back to the original bytes
+    and the pre-existing per-consumer preparation paths.
+    """
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        width, height = img.size
+        scale = 1568 / max(width, height)
+        if 0 < scale < 1:
+            img.draft("RGB", (max(1, round(width * scale)), max(1, round(height * scale))))
+        img = ImageOps.exif_transpose(img)
+        img.thumbnail((1568, 1568))
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=85)
+        return buf.getvalue()
+    except Exception as e:
+        log.warning(f"Could not normalize photo for analysis; using originals: {e}")
+        return None
+
+
 def _prepare_image_for_gemini(image_bytes: bytes) -> Image.Image:
     """Downscale a photo before sending it to Gemini.
 
@@ -1030,18 +1198,23 @@ def _compress_photo_for_echo(image_bytes: bytes) -> Optional[bytes]:
         return image_bytes if (is_jpeg or is_png) else None
 
 
-def _echo_meal_photo(bot: TelegramBot, chat_id: int, image_bytes: bytes, result_text: str):
+def _echo_meal_photo(bot: TelegramBot, chat_id: int, image_bytes: bytes, result_text: str,
+                     normalized_bytes: Optional[bytes] = None):
     """Send the analyzed photo with the meal card, falling back to text.
 
     Chat-sent photos are already visible in the conversation, but API
     uploads (Android watcher / iOS Shortcut) used to produce text-only meal
     cards — the user never saw WHICH photo a meal came from. Best-effort:
     any failure still delivers the plain text card.
+
+    ``normalized_bytes`` (the worker's single-decode 1568px q85 JPEG) is
+    sent as-is — well under sendPhoto's caps — skipping this path's own
+    full decode; only a failed normalization pays for _compress_photo_for_echo.
     """
     if not ECHO_UPLOAD_PHOTOS:
         bot.send_message(chat_id, result_text)
         return
-    compressed = _compress_photo_for_echo(image_bytes)
+    compressed = normalized_bytes if normalized_bytes else _compress_photo_for_echo(image_bytes)
     if compressed is None:
         bot.send_message(chat_id, result_text)
         return
@@ -1054,40 +1227,76 @@ def _echo_meal_photo(bot: TelegramBot, chat_id: int, image_bytes: bytes, result_
     bot.send_message(chat_id, result_text)
 
 
-def _analyze_food_photo_once(client: genai.Client, image_bytes: bytes) -> Dict:
-    """Analyze a food photo once with Gemini, letting callers handle failures."""
-    img = _prepare_image_for_gemini(image_bytes)
+def _analyze_food_photo_once(
+    client: genai.Client,
+    image_bytes: bytes,
+    normalized_bytes: Optional[bytes] = None,
+    prep_cache: Optional[dict] = None,
+) -> Dict:
+    """Analyze a food photo once with Gemini, letting callers handle failures.
+
+    With ``normalized_bytes`` (the worker's single-decode JPEG) the image
+    rides as an inline blob Part — no second full decode, no SDK re-encode.
+    Without it, the original _prepare_image_for_gemini path runs unchanged.
+    ``prep_cache`` (a dict owned by the retry loop) keeps whichever image
+    part was built so retries reuse it instead of re-preparing per attempt.
+    """
+    if prep_cache is None:
+        prep_cache = {}
+    if "image" not in prep_cache:
+        if normalized_bytes:
+            prep_cache["image"] = types.Part.from_bytes(
+                data=normalized_bytes, mime_type="image/jpeg"
+            )
+        else:
+            prep_cache["image"] = _prepare_image_for_gemini(image_bytes)
     response = _generate_content_with_deadline(
         client,
         model=GEMINI_MODEL,
-        contents=[FOOD_DETECTION_PROMPT, img],
+        contents=[FOOD_DETECTION_PROMPT, prep_cache["image"]],
         config=GEMINI_JSON_CONFIG,
     )
     return parse_ai_json(response.text)
 
 
-def analyze_food_photo(client: genai.Client, image_bytes: bytes) -> Optional[Dict]:
-    """Analyze a food photo with Gemini (single attempt for the interactive path)."""
-    return analyze_food_photo_with_retries(client, image_bytes, max_attempts=1)
+def analyze_food_photo(client: genai.Client, image_bytes: bytes,
+                       normalized_bytes: Optional[bytes] = None) -> Optional[Dict]:
+    """Analyze a food photo (single attempt for the interactive path).
+
+    Normalizes here when the caller didn't pass ``normalized_bytes``: the
+    Telegram photo worker has no other consumer of the normalized JPEG, so
+    this seam keeps the single-decode win without widening its call sites.
+    """
+    if normalized_bytes is None:
+        normalized_bytes = _normalize_photo_for_analysis(image_bytes)
+    return analyze_food_photo_with_retries(
+        client, image_bytes, max_attempts=1, normalized_bytes=normalized_bytes
+    )
 
 
 def analyze_food_photo_with_retries(
     client: genai.Client,
     image_bytes: bytes,
     max_attempts: int = GEMINI_ANALYSIS_MAX_ATTEMPTS,
+    normalized_bytes: Optional[bytes] = None,
 ) -> Optional[Dict]:
     """Analyze a photo: Claude (subscription) first, Gemini as fallback/default.
 
     The Claude hop is best-effort — unconfigured, rate-windowed, or failing,
     it returns None and the original Gemini retry path below runs unchanged.
+    ``normalized_bytes`` is the caller's single-decode 1568px JPEG: Claude
+    writes it to the temp file (accuracy-neutral — the API caps at 1568px
+    server-side, and it stays under the API's 5MB reject limit) and Gemini
+    sends it inline. None means "normalize failed/unavailable": both legs
+    fall back to the original bytes and their old preparation paths.
     """
     # Entry stamp bounds the watchdog-visible gap across the Claude leg:
-    # a _CLI_LOCK wait behind two 120s runs plus its own 120s run is the
-    # longest legitimate stretch of silence in the whole bot (~360s), still
-    # well inside the hang threshold when measured from here.
+    # the CLI is single-flight with a contended-caller bypass, so the longest
+    # legitimate silence here is one CLI run (~120s), well inside the hang
+    # threshold when measured from here.
     _stamp_progress()
     if claude_analyzer.is_configured():
-        result = claude_analyzer.analyze_food_photo(image_bytes)
+        result = claude_analyzer.analyze_food_photo(normalized_bytes or image_bytes)
         if result is not None:
             # Inert provenance marker: nothing reads it yet, but it lands in
             # the saved meal's analysis JSON so engine mix is auditable later.
@@ -1102,6 +1311,9 @@ def analyze_food_photo_with_retries(
 
     max_attempts = max(1, max_attempts)
     start = time.time()
+    # One prepared image part shared across attempts: retries must not pay
+    # (or re-spike RAM on) the image preparation again.
+    prep_cache: dict = {}
 
     for attempt in range(1, max_attempts + 1):
         # Per-attempt stamp: each Gemini try is bounded (90s deadline
@@ -1109,7 +1321,7 @@ def analyze_food_photo_with_retries(
         # run never looks like a hang.
         _stamp_progress()
         try:
-            result = _analyze_food_photo_once(client, image_bytes)
+            result = _analyze_food_photo_once(client, image_bytes, normalized_bytes, prep_cache)
             _record_gemini_health(True, latency_seconds=time.time() - start)
             # Log parity with the Claude success branch, including the model.
             log.info(f"✅ Photo analyzed by Gemini ({GEMINI_MODEL}).")
@@ -1575,12 +1787,15 @@ def maybe_warn_ios_vpn_unverified(bot: TelegramBot, endpoint: str):
 
 
 def save_meal(chat_id: int, analysis: Dict, source: str, file_id: str = "", image_hash: str = "",
-              captured_at: Optional[datetime] = None):
+              captured_at: Optional[datetime] = None, mark_status: Optional[str] = None):
     """Save a meal analysis to the log (from direct Telegram photo).
 
     captured_at, when given, is the device-local moment the photo was TAKEN
     (from the camera filename) — a backfilled photo from yesterday must land
     on yesterday's ledger, not on the day the sync finally uploaded it.
+    mark_status passes through to database.save_meal: the meal INSERT and
+    the ledger status write happen in one transaction, so a crash between
+    them can't strand a saved meal behind a 'processing' reservation.
     """
     # Meal date/time use the user's clock so late-night meals land on the right
     # day; timestamp stays on the server clock because duplicate detection and
@@ -1589,7 +1804,8 @@ def save_meal(chat_id: int, analysis: Dict, source: str, file_id: str = "", imag
     date_str = user_now.date().isoformat()
     time_str = user_now.strftime("%I:%M %p")
     timestamp_str = datetime.now().isoformat()
-    return database.save_meal(chat_id, date_str, time_str, timestamp_str, source, image_hash, file_id, analysis)
+    return database.save_meal(chat_id, date_str, time_str, timestamp_str, source, image_hash,
+                              file_id, analysis, mark_status=mark_status)
 
 
 # Oldest capture time /upload will honor; anything older (or unparseable, or
@@ -1861,7 +2077,12 @@ def _retry_failed_upload_path(gemini_client, path: Path) -> Dict:
             "message": "photo is already being processed or was already handled; file kept",
         }
 
-    analysis = analyze_food_photo_with_retries(gemini_client, image_bytes)
+    # Same single-decode normalization as the live workers; None (e.g. a
+    # corrupt failed file) falls back to the original-bytes paths.
+    normalized_bytes = _normalize_photo_for_analysis(image_bytes)
+    analysis = analyze_food_photo_with_retries(
+        gemini_client, image_bytes, normalized_bytes=normalized_bytes
+    )
     if analysis is None:
         database.mark_photo_hash_status(ALLOWED_CHAT_ID, img_hash, "failed", source="api_retry")
         if _gemini_quota_pause():
@@ -1886,8 +2107,8 @@ def _retry_failed_upload_path(gemini_client, path: Path) -> Dict:
         }
 
     try:
-        meal_id = save_meal(ALLOWED_CHAT_ID, analysis, "api_retry", "failed_upload", img_hash)
-        database.mark_photo_hash_status(ALLOWED_CHAT_ID, img_hash, "saved", meal_id, source="api_retry")
+        save_meal(ALLOWED_CHAT_ID, analysis, "api_retry", "failed_upload", img_hash,
+                  mark_status="saved")
     except Exception as e:
         database.mark_photo_hash_status(ALLOWED_CHAT_ID, img_hash, "failed", source="api_retry")
         log.exception(f"Could not save retried upload {path}")
@@ -2519,34 +2740,31 @@ def format_database_stats(chat_id: int) -> str:
     local_today = database.user_local_today()
     today_str = local_today.isoformat()
     seven_days_ago = (local_today - timedelta(days=6)).isoformat()
-    all_meals = database.get_meals(chat_id, "1970-01-01", today_str)
+    # The all-time reduction runs as a SQL aggregate (get_meal_stats): the
+    # old full-table get_meals + per-row json.loads scan was the only query
+    # whose cost grows without bound (measured 65ms @5k meals, 62% of it
+    # JSON parsing — 2.4x slower than the aggregate, and widening).
+    stats = database.get_meal_stats(chat_id)
     recent_meals = database.get_meals(chat_id, seven_days_ago, today_str)
     today_meals = get_todays_meals(chat_id)
 
-    food_all = [m for m in all_meals if m.get("analysis", {}).get("is_food")]
     food_recent = [m for m in recent_meals if m.get("analysis", {}).get("is_food")]
-    total_calories = sum((m["analysis"].get("total_calories") or 0) for m in food_all)
-    recent_calories = sum((m["analysis"].get("total_calories") or 0) for m in food_recent)
-    active_days = len({m.get("date") for m in food_all if m.get("date")})
-    source_counts = {}
-    for meal in food_all:
-        source = meal.get("source") or "unknown"
-        source_counts[source] = source_counts.get(source, 0) + 1
+    recent_calories = sum(safe_number(m["analysis"].get("total_calories")) for m in food_recent)
 
     lines = [
         "📈 <b>Database Stats</b>",
         f"Food meals today: {len(today_meals)}",
         f"Food meals last 7 days: {len(food_recent)}",
-        f"Food meals all time: {len(food_all)}",
-        f"Raw DB rows all time: {len(all_meals)}",
-        f"Calories last 7 days: ~{recent_calories:,}",
-        f"Calories all time: ~{total_calories:,}",
+        f"Food meals all time: {stats['food_meals']}",
+        f"Raw DB rows all time: {stats['total_meals']}",
+        f"Calories last 7 days: ~{int(recent_calories):,}",
+        f"Calories all time: ~{int(stats['total_calories']):,}",
     ]
-    if active_days:
-        lines.append(f"Average per active day: ~{int(total_calories / active_days):,} kcal")
-    if source_counts:
+    if stats["active_days"]:
+        lines.append(f"Average per active day: ~{stats['avg_calories_per_active_day']:,} kcal")
+    if stats["source_counts"]:
         lines.append("\n<b>Sources</b>")
-        for source, count in sorted(source_counts.items(), key=lambda item: (-item[1], item[0])):
+        for source, count in sorted(stats["source_counts"].items(), key=lambda item: (-item[1], item[0])):
             lines.append(f"• <code>{escape(source)}</code>: {count}")
     return "\n".join(lines)
 
@@ -4065,6 +4283,11 @@ def handle_text_message(
         yesterday=(today_local - timedelta(days=1)).isoformat(),
     )
 
+    # 'Typing...' ack immediately before the (up to ~90s) Gemini leg: the
+    # observed failure was 24s of dead silence convincing the user their
+    # message was lost, prompting a duplicate send. Fire-and-forget.
+    bot.send_chat_action(chat_id, "typing")
+
     try:
         response = _generate_content_with_deadline(
             gemini_client,
@@ -4258,10 +4481,12 @@ def _analyze_telegram_photo_background(
             " yet). Send it as a normal message once the meal is logged."
         )
     try:
-        processing_msg = bot.send_message(chat_id, "🔍 Processing image... one moment!")
-        analysis = analyze_food_photo(gemini_client, image_bytes)
-        if processing_msg and processing_msg.get("message_id"):
-            bot.delete_message(chat_id, processing_msg["message_id"])
+        # Feedback via chat action instead of a send+delete message pair:
+        # two full RTTs off this path, and the "uploading photo..." bubble
+        # auto-expires (~5s) so there is nothing to clean up. Fire-and-forget.
+        bot.send_chat_action(chat_id, "upload_photo")
+        normalized_bytes = _normalize_photo_for_analysis(image_bytes)
+        analysis = analyze_food_photo(gemini_client, image_bytes, normalized_bytes)
 
         if analysis is None:
             if _gemini_quota_pause():
@@ -4303,8 +4528,8 @@ def _analyze_telegram_photo_background(
             return
 
         if analysis.get("is_food"):
-            meal_id = save_meal(chat_id, analysis, "telegram", file_id, img_hash)
-            database.mark_photo_hash_status(chat_id, img_hash, "saved", meal_id, source="telegram")
+            save_meal(chat_id, analysis, "telegram", file_id, img_hash,
+                      mark_status="saved")
             reserved_photo = False
             log.info(
                 f"  ✅ Food: {analysis.get('meal_description')} "
@@ -4353,6 +4578,8 @@ def _analyze_telegram_photo_background(
         _release_analysis_slot(analysis_slot)
         if staged_path is not None:
             _discard_api_upload(staged_path)
+        # The freed slot may unblock a parked (slot-denied) photo.
+        _drain_one_parked_photo(bot, gemini_client)
 
 
 def handle_photo_message(
@@ -4445,17 +4672,36 @@ def handle_photo_message(
             return True
         reserved_photo = True
 
-        # Admission control BEFORE staging/thread spawn: past the cap, turn
-        # the photo away (a deliberate human can simply re-send) instead of
-        # pinning another full-size image on the 1GB host.
+        # Admission control BEFORE staging/thread spawn: past the cap, park
+        # the ORIGINAL bytes as a failed upload (durable) and queue it for
+        # the auto-drain that runs when a slot frees — instead of demanding
+        # a manual re-send. The full-size image goes to disk, not RAM.
         analysis_slot = _acquire_analysis_slot()
         if analysis_slot is None:
-            database.release_photo_hash(chat_id, img_hash)
+            log.warning("  ⏳ Photo analysis slots exhausted; parking the photo for auto-drain.")
+            try:
+                parked_staged = _stage_api_upload(image_bytes, img_hash, "telegram_photo.jpg")
+            except OSError as e:
+                parked_staged = None
+                log.error(f"Could not park slot-denied Telegram photo: {e}")
+            if parked_staged is None:
+                # Unwritable disk (or a stubbed stage in tests): degrade to
+                # the old ask-for-a-re-send.
+                database.release_photo_hash(chat_id, img_hash)
+                reserved_photo = False
+                bot.send_message(
+                    chat_id,
+                    "⏳ I am analyzing several photos right now — please re-send this one in a minute.",
+                )
+                return True
+            parked_path = _keep_failed_api_upload(parked_staged, img_hash)
+            database.mark_photo_hash_status(chat_id, img_hash, "failed", source="telegram")
             reserved_photo = False
-            log.warning("  ⏳ Photo analysis slots exhausted; asking for a re-send.")
+            _park_photo_for_drain(parked_path)
             bot.send_message(
                 chat_id,
-                "⏳ I am analyzing several photos right now — please re-send this one in a minute.",
+                "⏳ Queued — I'm analyzing several photos right now and will "
+                "analyze this one automatically when a slot frees.",
             )
             return True
 
@@ -4672,6 +4918,16 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
             device_display = _html(device)
             staged_path = Path(upload_file_path)
             processing_msg = None
+
+            def drop_processing_notice():
+                # Deleted AFTER the outcome message is sent: deleting first
+                # spends an extra RTT that delays the meal card, and leaves
+                # a feedback gap if the outcome send is slow.
+                nonlocal processing_msg
+                if processing_msg and processing_msg.get("message_id"):
+                    bot.delete_message(ALLOWED_CHAT_ID, processing_msg["message_id"])
+                processing_msg = None
+
             try:
                 log.info(f"🔍 Analyzing food from {device} API upload in background...")
 
@@ -4682,8 +4938,7 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
                     bytes_data = staged_path.read_bytes()
                 except OSError as e:
                     log.error(f"  ❌ API Upload: Could not read staged upload: {e}")
-                    if processing_msg and processing_msg.get("message_id"):
-                        bot.delete_message(ALLOWED_CHAT_ID, processing_msg["message_id"])
+                    drop_processing_notice()
                     # Mirror the unhandled-exception path: if the staged file
                     # still exists, keep it (under the declared hash) and mark
                     # the reservation failed. Releasing the reservation while
@@ -4711,11 +4966,14 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
                         )
                     return
 
-                analysis = analyze_food_photo_with_retries(gemini_client, bytes_data)
-
-                # Delete the temporary processing message
-                if processing_msg and processing_msg.get("message_id"):
-                    bot.delete_message(ALLOWED_CHAT_ID, processing_msg["message_id"])
+                # Single-decode normalization BEFORE the analyzer: the same
+                # bytes feed Claude's temp file, Gemini's inline blob, AND
+                # the chat echo below (the echo artifact is pre-computed —
+                # no post-analysis PIL spike on this path anymore).
+                normalized_bytes = _normalize_photo_for_analysis(bytes_data)
+                analysis = analyze_food_photo_with_retries(
+                    gemini_client, bytes_data, normalized_bytes=normalized_bytes
+                )
 
                 if analysis is None:
                     failed_path = _keep_failed_api_upload(staged_path, hsh)
@@ -4741,32 +4999,35 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
                             f"Wait/retry later: <code>/retry_failed {_html(_failed_upload_selector(failed_path, hsh))}</code>\n"
                             f"Give up/delete: <code>/clear_failed {_html(_failed_upload_selector(failed_path, hsh))} confirm</code>.",
                         )
+                    drop_processing_notice()
                     return
 
                 if analysis.get("is_food"):
-                    meal_id = save_meal(ALLOWED_CHAT_ID, analysis, "api_auto", "api", hsh,
-                                        captured_at=captured)
-                    database.mark_photo_hash_status(ALLOWED_CHAT_ID, hsh, "saved", meal_id, source="api_auto")
+                    save_meal(ALLOWED_CHAT_ID, analysis, "api_auto", "api", hsh,
+                              captured_at=captured, mark_status="saved")
                     log.info(f"  ✅ API Food: {analysis.get('meal_description')} (~{analysis.get('total_calories')} kcal)")
                     result_text = format_food_result(ALLOWED_CHAT_ID, analysis)
                     # Discard the staged file BEFORE the echo: the meal is
-                    # saved and hash-marked, and the echo's PIL decode is the
-                    # biggest memory spike on this path — dying inside it must
-                    # not leave a pending file for the boot sweep to "recover"
-                    # into a false failed-upload notice.
+                    # saved and hash-marked, and (when normalization failed
+                    # and the echo has to re-decode) the echo's PIL decode is
+                    # the biggest memory spike on this path — dying inside it
+                    # must not leave a pending file for the boot sweep to
+                    # "recover" into a false failed-upload notice.
                     _discard_api_upload(staged_path)
                     _echo_meal_photo(
                         bot, ALLOWED_CHAT_ID, bytes_data,
                         f"📲 <b>Auto-Logged from {device_display}:</b>\n\n" + result_text,
+                        normalized_bytes=normalized_bytes,
                     )
+                    drop_processing_notice()
                 else:
                     log.info("  ⏭️ API Upload: Not food")
                     database.mark_photo_hash_status(ALLOWED_CHAT_ID, hsh, "skipped", source="api_auto")
                     _discard_api_upload(staged_path)
+                    drop_processing_notice()
             except Exception as e:
                 log.exception(f"Unhandled API upload background error for {hsh}")
-                if processing_msg and processing_msg.get("message_id"):
-                    bot.delete_message(ALLOWED_CHAT_ID, processing_msg["message_id"])
+                drop_processing_notice()
                 failed_path = staged_path
                 if staged_path.exists():
                     failed_path = _keep_failed_api_upload(staged_path, hsh)
@@ -4783,6 +5044,8 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
             finally:
                 _release_analysis_slot(analysis_slot)
                 _finish_api_upload_processing(hsh)
+                # The freed slot may unblock a parked (slot-denied) photo.
+                _drain_one_parked_photo(bot, gemini_client)
 
         try:
             worker = threading.Thread(target=background_process, args=(str(upload_path), img_hash, device_name, captured_at))

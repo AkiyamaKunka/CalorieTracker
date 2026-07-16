@@ -215,6 +215,9 @@ def test_handle_text_message_passes_native_json_config(monkeypatch, tmp_path):
         def send_message(self, chat_id, text, parse_mode="HTML", reply_markup=None):
             sent.append(text)
 
+        def send_chat_action(self, chat_id, action):
+            pass
+
     class FakeModels:
         def generate_content(self, **kwargs):
             captured.update(kwargs)
@@ -508,7 +511,7 @@ def test_retry_failed_upload_not_food_removes_file(monkeypatch, tmp_path):
     monkeypatch.setattr(telegram_bot.database, "meal_image_hash_exists", lambda chat_id, image_hash: False)
     monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: True)
     monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status", lambda *args, **kwargs: marked.append((args, kwargs)))
-    monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", lambda client, image_bytes: {"is_food": False})
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", lambda client, image_bytes, *a, **k: {"is_food": False})
 
     result = telegram_bot.retry_failed_upload(object(), "latest")
 
@@ -527,12 +530,12 @@ def test_retry_failed_upload_save_error_keeps_file(monkeypatch, tmp_path):
     monkeypatch.setattr(telegram_bot.database, "meal_image_hash_exists", lambda chat_id, image_hash: False)
     monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: True)
     monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status", lambda *args, **kwargs: marked.append((args, kwargs)))
-    monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", lambda client, image_bytes: {
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", lambda client, image_bytes, *a, **k: {
         "is_food": True,
         "meal_description": "Soup",
         "total_calories": 100,
     })
-    monkeypatch.setattr(telegram_bot, "save_meal", lambda *args: (_ for _ in ()).throw(RuntimeError("db locked")))
+    monkeypatch.setattr(telegram_bot, "save_meal", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("db locked")))
 
     result = telegram_bot.retry_failed_upload(object(), "latest")
 
@@ -592,20 +595,24 @@ def test_retry_failed_upload_logged_marks_hash_saved(monkeypatch, tmp_path):
     monkeypatch.setattr(telegram_bot.database, "meal_image_hash_exists", lambda chat_id, image_hash: False)
     monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: True)
     monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status", lambda *args, **kwargs: marked.append((args, kwargs)))
-    monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", lambda client, image_bytes: {
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", lambda client, image_bytes, *a, **k: {
         "is_food": True,
         "meal_description": "Latte",
         "total_calories": 120,
     })
-    monkeypatch.setattr(telegram_bot, "save_meal", lambda *args: 42)
+    saves = []
+    monkeypatch.setattr(telegram_bot, "save_meal",
+                        lambda *args, **kwargs: saves.append((args, kwargs)) or 42)
 
     result = telegram_bot.retry_failed_upload(object(), "latest")
 
     assert "Latte" in result
     assert not failed_path.exists()
-    assert marked
-    assert marked[0][0][2] == "saved"
-    assert marked[0][0][3] == 42
+    # The ledger flip to 'saved' now rides INSIDE save_meal (one atomic
+    # transaction — pinned in tests/test_database.py); the separate
+    # mark_photo_hash_status call is gone from the success path.
+    assert saves and saves[0][1].get("mark_status") == "saved"
+    assert not marked
 
 def test_android_vpn_status_from_request_headers():
     from flask import Flask
@@ -866,6 +873,9 @@ def test_handle_text_message_correction_invalid_index(monkeypatch, tmp_path):
         def send_message(self, chat_id, text, parse_mode="HTML", reply_markup=None):
             sent.append(text)
 
+        def send_chat_action(self, chat_id, action):
+            pass
+
     class FakeModels:
         def generate_content(self, **kwargs):
             return SimpleNamespace(text=json.dumps({
@@ -950,8 +960,8 @@ def test_retry_all_failed_uploads_logs_food_and_removes_not_food(monkeypatch, tm
         {"is_food": False},
     ]
     saved = []
-    monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", lambda client, image_bytes: analyses.pop(0))
-    monkeypatch.setattr(telegram_bot, "save_meal", lambda *args: saved.append(args) or len(saved))
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries", lambda client, image_bytes, *a, **k: analyses.pop(0))
+    monkeypatch.setattr(telegram_bot, "save_meal", lambda *args, **kwargs: saved.append(args) or len(saved))
     monkeypatch.setattr(telegram_bot.database, "meal_image_hash_exists", lambda chat_id, image_hash: False)
     monkeypatch.setattr(telegram_bot.database, "reserve_photo_hash", lambda *args, **kwargs: True)
     monkeypatch.setattr(telegram_bot.database, "mark_photo_hash_status", lambda *args, **kwargs: None)
@@ -1070,11 +1080,26 @@ def test_format_database_stats_counts_sources(monkeypatch):
     ]
     monkeypatch.setattr(telegram_bot.database, "get_meals", lambda chat_id, start, end: meals)
     monkeypatch.setattr(telegram_bot, "get_todays_meals", lambda chat_id: meals[:2])
+    # The all-time reduction now comes from the SQL aggregate; its
+    # equivalence to the old Python reduction (incl. hostile values) is
+    # pinned in tests/test_database.py — here we stub its output shape.
+    monkeypatch.setattr(telegram_bot.database, "get_meal_stats", lambda chat_id: {
+        "total_meals": 3,
+        "food_meals": 2,
+        "total_calories": 500,
+        "active_days": 1,
+        "first_date": date.today().isoformat(),
+        "last_date": date.today().isoformat(),
+        "source_counts": {"api_auto": 1, "telegram": 1},
+        "avg_calories_per_active_day": 500,
+    })
 
     result = telegram_bot.format_database_stats(12345)
 
     assert "Food meals all time: 2" in result
+    assert "Raw DB rows all time: 3" in result
     assert "Calories all time: ~500" in result
+    assert "Average per active day: ~500" in result
     assert "api_auto" in result
 
 
@@ -1132,6 +1157,9 @@ def test_handle_text_message_new_meal_saves_and_replies(monkeypatch):
         def send_message(self, chat_id, text, parse_mode="HTML"):
             sent.append(text)
 
+        def send_chat_action(self, chat_id, action):
+            pass
+
     class FakeModels:
         def generate_content(self, **kwargs):
             return SimpleNamespace(text=json.dumps({
@@ -1150,7 +1178,7 @@ def test_handle_text_message_new_meal_saves_and_replies(monkeypatch):
         models = FakeModels()
 
     monkeypatch.setattr(telegram_bot, "get_recent_meals", lambda chat_id, days: [])
-    monkeypatch.setattr(telegram_bot, "save_meal", lambda *args: saved.append(args))
+    monkeypatch.setattr(telegram_bot, "save_meal", lambda *args, **kwargs: saved.append(args))
     monkeypatch.setattr(telegram_bot, "format_food_result", lambda chat_id, analysis: "formatted meal")
 
     telegram_bot.handle_text_message(FakeClient(), FakeBot(), 12345, "I ate a rice bowl")
@@ -1176,6 +1204,9 @@ def test_handle_text_message_correction_updates_meal(monkeypatch):
     class FakeBot:
         def send_message(self, chat_id, text, parse_mode="HTML"):
             sent.append(text)
+
+        def send_chat_action(self, chat_id, action):
+            pass
 
     class FakeModels:
         def generate_content(self, **kwargs):
@@ -1220,6 +1251,9 @@ class _RecordingBot:
         self.sent.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
         return {"message_id": len(self.sent)}
 
+    def send_chat_action(self, chat_id, action):
+        pass
+
     def answer_callback_query(self, callback_query_id, text=""):
         self.answered.append((callback_query_id, text))
 
@@ -1247,7 +1281,8 @@ def test_save_meal_stamps_user_local_date_and_server_timestamp(monkeypatch):
 
     saved = {}
 
-    def fake_db_save(chat_id, date_str, time_str, timestamp_str, source, image_hash, file_id, analysis):
+    def fake_db_save(chat_id, date_str, time_str, timestamp_str, source, image_hash, file_id, analysis,
+                     mark_status=None):
         saved.update(date=date_str, time=time_str, timestamp=timestamp_str)
         return 7
 
@@ -1311,7 +1346,10 @@ def test_call_wraps_connection_error_without_token(monkeypatch):
         bot._call("sendMessage")
 
     assert "SECRETTOKEN" not in str(excinfo.value)
-    assert "Telegram network-error calling sendMessage" in str(excinfo.value)
+    # Connection-class failures surface as the typed, token-free
+    # TelegramConnectionError so send paths can retry identically.
+    assert "Telegram connection error calling sendMessage" in str(excinfo.value)
+    assert isinstance(excinfo.value, telegram_bot.TelegramConnectionError)
 
 
 def test_get_file_wraps_connection_error_without_token(monkeypatch):
@@ -1366,7 +1404,7 @@ def test_send_message_connection_error_logs_are_token_free(monkeypatch, caplog):
     assert result is None
     assert caplog.text
     assert "SECRETTOKEN" not in caplog.text
-    assert "network-error" in caplog.text
+    assert "connection error" in caplog.text
 
 
 def test_request_remote_ip_honors_xff_only_with_trusted_proxy(monkeypatch):

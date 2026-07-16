@@ -366,39 +366,47 @@ def test_empty_image_bytes_short_circuit(monkeypatch, tmp_path):
 # Temp file lifecycle
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_concurrent_analyses_use_distinct_temp_files(monkeypatch, tmp_path):
-    """Two in-flight analyses must never share a ct_claude_*.jpg path.
-
-    The memory-heavy CLI subprocess itself is serialized by _CLI_LOCK, so
-    the stub asserts one-at-a-time execution rather than barrier-forcing an
-    overlap; each caller still stages its own temp file before queueing."""
+def test_concurrent_analyses_never_stack_cli_runs(monkeypatch, tmp_path):
+    """A burst (e.g. a Telegram album) must never stack two memory-heavy CLI
+    subprocesses. The old mechanics QUEUED the second caller behind the full
+    CLI run; the invariant it pinned — one CLI at a time, distinct temp
+    files, nothing leaked — now holds via the contended-CLI bypass: while
+    one run is in flight, a second caller returns None immediately (its
+    photo falls through to Gemini) without launching a subprocess."""
     _configure(monkeypatch)
     _redirect_tempdir(monkeypatch, tmp_path)
     seen = []
+    first_run_started = threading.Event()
+    release_first_run = threading.Event()
 
     def run(cmd, **kwargs):
         path = _prompt_image_path(cmd)
-        assert claude_analyzer._CLI_LOCK.locked()  # serialized by the lock
+        assert claude_analyzer._CLI_LOCK.locked()
         assert os.path.exists(path)
         seen.append(path)
-        time.sleep(0.05)  # widen the window: the second caller must queue
+        first_run_started.set()
+        # Hold the CLI "in flight" until the contended caller has finished.
+        assert release_first_run.wait(timeout=30)
         return SimpleNamespace(returncode=0,
                                stdout=_envelope(json.dumps(GOOD_ANALYSIS)), stderr="")
 
     monkeypatch.setattr(claude_analyzer.subprocess, "run", run)
-    results = []
-    threads = [
-        threading.Thread(target=lambda: results.append(claude_analyzer.analyze_food_photo(b"img")))
-        for _ in range(2)
-    ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=30)
+    first_result = {}
+    worker = threading.Thread(
+        target=lambda: first_result.update(result=claude_analyzer.analyze_food_photo(b"img"))
+    )
+    worker.start()
+    try:
+        assert first_run_started.wait(timeout=30)
+        # Deterministically contended: the first run is provably in flight.
+        assert claude_analyzer.analyze_food_photo(b"img2") is None
+        assert len(seen) == 1                          # no second subprocess
+    finally:
+        release_first_run.set()
+        worker.join(timeout=30)
 
-    assert results == [GOOD_ANALYSIS, GOOD_ANALYSIS]
-    assert len(seen) == 2 and len(set(seen)) == 2      # unique names guaranteed
-    assert _leftover_temp_files(tmp_path) == []        # both cleaned afterwards
+    assert first_result["result"] == GOOD_ANALYSIS     # the holder is unaffected
+    assert _leftover_temp_files(tmp_path) == []        # everything cleaned up
 
 
 def test_temp_file_not_leaked_when_write_fails(monkeypatch, tmp_path):
@@ -579,7 +587,9 @@ def _patch_claude(monkeypatch, configured, result=None, must_not_run=False):
 def _patch_gemini_once(monkeypatch, result=None):
     calls = []
 
-    def once(client, image_bytes):
+    def once(client, image_bytes, *args, **kwargs):
+        # Extra args are the normalized-bytes/prep-cache plumbing of the
+        # single-decode pipeline; these tests only track WHETHER Gemini ran.
         calls.append(image_bytes)
         return result
 
@@ -738,6 +748,111 @@ def test_cli_lock_released_after_timeout(monkeypatch):
 
     assert claude_analyzer.analyze_food_photo(b"jpegbytes") is None
     assert claude_analyzer._CLI_LOCK.locked() is False
+
+
+def test_contended_cli_lock_bypasses_to_gemini_without_subprocess(monkeypatch, tmp_path, caplog):
+    """Lock held by another photo -> immediate None (caller falls back to
+    Gemini), no subprocess launch, no temp file, and the holder's lock is
+    left exactly as it was."""
+    _configure(monkeypatch)
+    _redirect_tempdir(monkeypatch, tmp_path)
+    calls = _fake_run(monkeypatch, stdout=_envelope(json.dumps(GOOD_ANALYSIS)))
+
+    assert claude_analyzer._CLI_LOCK.acquire(blocking=False)
+    try:
+        with caplog.at_level(logging.INFO, logger="claude_analyzer"):
+            assert claude_analyzer.analyze_food_photo(b"img") is None
+    finally:
+        claude_analyzer._CLI_LOCK.release()
+
+    assert calls == []                                  # no subprocess
+    assert _leftover_temp_files(tmp_path) == []         # not even a temp file
+    assert "Claude CLI busy — falling back to Gemini" in caplog.text
+
+
+def test_free_cli_lock_runs_normally_and_releases(monkeypatch):
+    """Lock free -> the normal single run happens and the lock is returned."""
+    _configure(monkeypatch)
+    calls = _fake_run(monkeypatch, stdout=_envelope(json.dumps(GOOD_ANALYSIS)))
+
+    assert claude_analyzer.analyze_food_photo(b"img") == GOOD_ANALYSIS
+    assert len(calls) == 1
+    assert claude_analyzer._CLI_LOCK.locked() is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI instrumentation + safe env (duration logging, env knobs, extra flags)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_subprocess_env_inherits_and_adds_safety_knobs(monkeypatch):
+    _configure(monkeypatch)
+    monkeypatch.setenv("CT_TEST_MARKER_ENV", "carried-through")
+    captured = _fake_run_capture(monkeypatch, stdout=_envelope(json.dumps(GOOD_ANALYSIS)))
+
+    assert claude_analyzer.analyze_food_photo(b"img") == GOOD_ANALYSIS
+    (_, kwargs), = captured
+    env = kwargs["env"]
+    assert env["DISABLE_AUTOUPDATER"] == "1"
+    assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+    # The current process env rides along (the CLI needs PATH, HOME, token…).
+    assert env["CT_TEST_MARKER_ENV"] == "carried-through"
+
+
+def test_extra_flags_env_appended_shlex_split(monkeypatch):
+    _configure(monkeypatch)
+    monkeypatch.setenv(
+        "CLAUDE_ANALYZER_EXTRA_FLAGS",
+        '--strict-mcp-config --no-session-persistence --note "two words"',
+    )
+    calls = _fake_run(monkeypatch, stdout=_envelope(json.dumps(GOOD_ANALYSIS)))
+
+    assert claude_analyzer.analyze_food_photo(b"img") == GOOD_ANALYSIS
+    cmd = calls[0]
+    assert cmd[-4:] == ["--strict-mcp-config", "--no-session-persistence",
+                        "--note", "two words"]          # shlex: quoted arg stays one element
+
+
+def test_extra_flags_absent_or_malformed_add_nothing(monkeypatch):
+    _configure(monkeypatch)
+    monkeypatch.delenv("CLAUDE_ANALYZER_EXTRA_FLAGS", raising=False)
+    monkeypatch.delenv("CLAUDE_ANALYZER_MODEL", raising=False)
+    calls = _fake_run(monkeypatch, stdout=_envelope(json.dumps(GOOD_ANALYSIS)))
+    assert claude_analyzer.analyze_food_photo(b"img") == GOOD_ANALYSIS
+    assert calls[0][-2:] == ["--allowedTools", "Read"]  # base argv unchanged
+
+    # Unbalanced quote: degrade to no extra flags, never fail the photo.
+    monkeypatch.setenv("CLAUDE_ANALYZER_EXTRA_FLAGS", '--broken "unclosed')
+    assert claude_analyzer.analyze_food_photo(b"img") == GOOD_ANALYSIS
+    assert calls[1][-2:] == ["--allowedTools", "Read"]
+
+
+def test_success_log_includes_wall_and_envelope_durations(monkeypatch, caplog):
+    _configure(monkeypatch)
+    envelope = json.dumps({
+        "type": "result", "subtype": "success", "is_error": False,
+        "duration_ms": 4200, "duration_api_ms": 3100,
+        "result": json.dumps(GOOD_ANALYSIS),
+    })
+    _fake_run(monkeypatch, stdout=envelope)
+
+    with caplog.at_level(logging.INFO, logger="claude_analyzer"):
+        assert claude_analyzer.analyze_food_photo(b"img") == GOOD_ANALYSIS
+
+    lines = [r.message for r in caplog.records if "Photo analyzed by Claude" in r.message]
+    assert len(lines) == 1
+    assert "(subscription) in " in lines[0]
+    assert "cli=4200ms api=3100ms" in lines[0]
+
+
+def test_success_log_tolerates_missing_envelope_durations(monkeypatch, caplog):
+    """Older CLIs may omit the duration fields; the success line must still land."""
+    _configure(monkeypatch)
+    _fake_run(monkeypatch, stdout=_envelope(json.dumps(GOOD_ANALYSIS)))
+    with caplog.at_level(logging.INFO, logger="claude_analyzer"):
+        assert claude_analyzer.analyze_food_photo(b"img") == GOOD_ANALYSIS
+    lines = [r.message for r in caplog.records if "Photo analyzed by Claude" in r.message]
+    assert len(lines) == 1
+    assert "cli=Nonems api=Nonems" in lines[0]
 
 
 def test_timeout_bounds_lock_hold_even_with_pipe_holding_grandchild(monkeypatch, tmp_path):

@@ -27,6 +27,21 @@ def _isolate_service_health_ledger(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _clear_android_timezone_cache():
+    """database.get_android_timezone carries a 30s in-process TTL cache.
+
+    Tests swap DB_PATH per test, so a cached offset from one test's database
+    must never leak into the next (tests that monkeypatch the function itself
+    bypass the cache entirely and don't need this). Cleared on both sides so
+    a test can neither inherit nor bequeath a stale entry.
+    """
+    import database
+    database.clear_android_timezone_cache()
+    yield
+    database.clear_android_timezone_cache()
+
+
+@pytest.fixture(autouse=True)
 def _no_real_pushplus_pushes(monkeypatch):
     """Tests must never send a real WeChat push.
 
