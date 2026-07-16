@@ -310,6 +310,45 @@ def test_daily_quota_error_stops_retry_and_sets_pause(monkeypatch, tmp_path):
     assert health["gemini"]["last_error_type"] == "daily_quota_exhausted"
     assert health["gemini"]["quota_pause_until"]
 
+def test_active_quota_pause_gates_pure_gemini_analysis(monkeypatch, tmp_path):
+    """An active quota_pause_until in the health ledger makes the plain Gemini
+    photo path (Claude analyzer unconfigured) return None without ever calling
+    generate_content — and without touching the pause record.
+
+    Regression pin for the 2026-07-16 22:46 one-off suite failure: this exact
+    gate read the developer's REAL ~/CalorieTracker/logs/service_health.json in
+    tests that had not patched SERVICE_HEALTH_PATH, so a real-world pause that
+    expired mid-run failed one test and then vanished. The ledger is now
+    per-test (conftest autouse) and this test pins the gating behavior itself.
+    """
+    class MockModels:
+        def generate_content(self, **kwargs):
+            pytest.fail("paused Gemini must never be spent")
+
+    class MockClient:
+        models = MockModels()
+
+    health_path = tmp_path / "service_health.json"
+    pause_until = (datetime.now() + timedelta(hours=2)).isoformat(timespec="seconds")
+    health_path.write_text(json.dumps({
+        "gemini": {
+            "quota_pause_until": pause_until,
+            "quota_pause_reason": "daily free-tier quota exhausted",
+        }
+    }))
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", health_path)
+    monkeypatch.setattr(telegram_bot, "_prepare_image_for_gemini", lambda image_bytes: object())
+    # Pure-Gemini path: the Claude-first hop must stay out of the way even on
+    # a dev machine with CLAUDE_ANALYZER_ENABLED exported and a real CLI.
+    monkeypatch.setattr(telegram_bot.claude_analyzer, "is_configured", lambda: False)
+
+    result = telegram_bot.analyze_food_photo_with_retries(MockClient(), b"fake_image_bytes")
+
+    assert result is None
+    # The skip path records nothing: the pause survives for the next caller.
+    health = json.loads(health_path.read_text())
+    assert health["gemini"]["quota_pause_until"] == pause_until
+
 def test_retry_failed_upload_waits_when_daily_quota_paused(monkeypatch, tmp_path):
     failed_dir = tmp_path / "failed_uploads"
     failed_dir.mkdir()
@@ -2026,3 +2065,107 @@ def test_format_food_result_survives_hostile_analysis_shapes():
 
     scalar_items = {"is_food": True, "meal_description": "x", "food_items": -1}
     assert isinstance(telegram_bot.format_food_result(12345, scalar_items), str)
+
+
+# ═══ HTML-injection audit: VPN warnings & health-file ages (hunter 4) ═══
+
+class _CollectingBot:
+    def __init__(self):
+        self.sent = []
+
+    def send_message(self, chat_id, text, parse_mode="HTML", reply_markup=None):
+        self.sent.append(text)
+        return {"message_id": len(self.sent)}
+
+
+def _vpn_warning_rig(monkeypatch, tmp_path):
+    from flask import Flask
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot, "TRUSTED_PROXY_ENABLED", True)
+    monkeypatch.setattr(telegram_bot, "_last_android_vpn_warning_at", None)
+    monkeypatch.setattr(telegram_bot, "_last_ios_vpn_warning_at", None)
+    monkeypatch.setattr(telegram_bot, "_remote_ip_country_code", lambda remote_ip: "CN")
+    return Flask(__name__)
+
+
+def test_android_vpn_warning_escapes_client_vpn_check(monkeypatch, tmp_path):
+    """vpn_check is verbatim client text (headers/JSON/form). Real interface
+    dumps contain '<' (e.g. 'wlan0<->tun0'); raw it 400s the HTML send and the
+    warning arrives as plain text full of markup."""
+    app = _vpn_warning_rig(monkeypatch, tmp_path)
+    bot = _CollectingBot()
+    with app.test_request_context(
+        "/ping",
+        method="POST",
+        headers={
+            "X-VPN-Active": "false",
+            "X-VPN-Check": "wlan0<->tun0 down",
+            "X-VPN-Check-Reliable": "true",
+            "X-Forwarded-For": "203.0.113.10",
+        },
+    ):
+        telegram_bot.maybe_warn_android_vpn_inactive(bot, "/ping")
+
+    assert bot.sent, "warning must fire for direct-country evidence"
+    text = bot.sent[-1]
+    assert "Android VPN appears OFF" in text
+    assert "wlan0<->tun0 down" not in text
+    assert "wlan0&lt;-&gt;tun0 down" in text
+
+
+def test_ios_vpn_warning_escapes_client_vpn_detail(monkeypatch, tmp_path):
+    app = _vpn_warning_rig(monkeypatch, tmp_path)
+    bot = _CollectingBot()
+    with app.test_request_context(
+        "/upload",
+        method="POST",
+        headers={
+            "X-VPN-Required": "true",
+            "X-VPN-Active": "false",
+            "X-VPN-Check": "utun4 <no addr>",
+            "X-Forwarded-For": "203.0.113.10",
+        },
+    ):
+        telegram_bot.maybe_warn_ios_vpn_unverified(bot, "/upload")
+
+    assert bot.sent, "warning must fire for direct-country evidence"
+    text = bot.sent[-1]
+    assert "iPhone VPN may be OFF" in text
+    assert "utun4 <no addr>" not in text
+    assert "utun4 &lt;no addr&gt;" in text
+
+
+def test_format_report_status_escapes_unparseable_timestamp(monkeypatch, tmp_path):
+    """Stored-then-displayed: a corrupted service_health.json timestamp flows
+    through _format_age's ValueError fallback straight into parse_mode=HTML
+    text — the same hostile-stored-field standard the profile tests pin."""
+    import json as _json
+    health_path = tmp_path / "health.json"
+    health_path.write_text(_json.dumps({
+        "daily_report": {
+            "last_ok": True,
+            "last_target_date": "2026-07-15",
+            "last_source": "cron",
+            "last_attempt_at": "<b>corrupt",
+            "consecutive_failures": 0,
+        },
+    }))
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", health_path)
+
+    status = telegram_bot.format_report_status()
+
+    assert "Last attempt:" in status
+    assert "<b>corrupt" not in status
+    assert "&lt;b&gt;corrupt" in status
+
+
+def test_format_age_parses_good_values_and_never_raises():
+    """Pins the working contract of _format_age: buckets for good timestamps,
+    'never' for empty — the fallback branch is pinned (as buggy) above."""
+    now = datetime.now()
+    assert telegram_bot._format_age(None) == "never"
+    assert telegram_bot._format_age("") == "never"
+    assert telegram_bot._format_age(now.isoformat()).endswith("s ago")
+    assert telegram_bot._format_age((now - timedelta(minutes=5)).isoformat()) == "5m ago"
+    assert telegram_bot._format_age((now - timedelta(hours=3)).isoformat()) == "3h ago"
+    assert telegram_bot._format_age((now - timedelta(days=4)).isoformat()) == "4d ago"

@@ -738,3 +738,59 @@ def test_cli_lock_released_after_timeout(monkeypatch):
 
     assert claude_analyzer.analyze_food_photo(b"jpegbytes") is None
     assert claude_analyzer._CLI_LOCK.locked() is False
+
+
+def test_timeout_bounds_lock_hold_even_with_pipe_holding_grandchild(monkeypatch, tmp_path):
+    """Pins the _CLI_LOCK boundedness claim against a REAL subprocess.
+
+    The comment on _CLI_LOCK promises 'the subprocess timeout bounds how long
+    any holder keeps the lock'. The Claude CLI is a Node process that can
+    spawn children; if such a grandchild inherits the stdout pipe and
+    outlives the kill, some subprocess APIs block until pipe EOF — a forever
+    lock hold. On POSIX, subprocess.run() kills the direct child and then
+    only wait()s (it does NOT drain the pipes again), so the hold really is
+    bounded. This test fails loudly if that load-bearing behavior ever
+    changes (e.g. a refactor to Popen+communicate)."""
+    pidfile = tmp_path / "grandchild.pid"
+    cli = tmp_path / "fake_claude"
+    cli.write_text(
+        "#!/bin/sh\n"
+        "sleep 30 &\n"                      # grandchild inherits the stdout pipe
+        'echo $! > "%s"\n' % pidfile +
+        # exec: the shell BECOMES this sleep, so the timeout kill reaches it
+        # and only the deliberate background grandchild outlives the kill.
+        "exec sleep 30\n"
+    )
+    cli.chmod(0o755)
+    monkeypatch.setenv("CLAUDE_ANALYZER_ENABLED", "1")
+    monkeypatch.setenv("CLAUDE_ANALYZER_BIN", str(cli))
+    monkeypatch.delenv("CLAUDE_ANALYZER_MODEL", raising=False)
+    monkeypatch.setattr(claude_analyzer, "_timeout_seconds", lambda: 1)
+
+    result_box = {}
+
+    def run_analysis():
+        result_box["result"] = claude_analyzer.analyze_food_photo(b"\xff\xd8\xff jpeg")
+
+    worker = threading.Thread(target=run_analysis)
+    start = time.monotonic()
+    worker.start()
+    worker.join(timeout=8)
+    hung = worker.is_alive()
+    try:
+        assert not hung, (
+            "analyze_food_photo still running 8s after a 1s subprocess timeout — "
+            "the _CLI_LOCK hold is NOT bounded by the timeout"
+        )
+        assert result_box["result"] is None
+        assert claude_analyzer._CLI_LOCK.locked() is False
+        assert time.monotonic() - start < 8
+    finally:
+        # Reap the deliberate orphan so nothing outlives the test; in the
+        # hung case this also closes the pipe and unblocks the worker.
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text().strip()), 9)
+            except (ValueError, OSError):
+                pass
+        worker.join(timeout=35)

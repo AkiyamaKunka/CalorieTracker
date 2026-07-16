@@ -180,6 +180,12 @@ def test_meal_relay_happy_path_saves_meal_and_dedupes(monkeypatch, tmp_path):
     database.init_db()
     monkeypatch.setattr(database, "get_android_timezone",
                         lambda device_name="android_watcher": "+0800")
+    # Freeze the user-local clock: the relay dates the meal inside do_POST and
+    # the test recomputes expected_date afterwards — a midnight rollover in
+    # between would file the meal on "yesterday" and fail the lookup.
+    frozen_now = database.user_local_now()
+    monkeypatch.setattr(database, "user_local_now",
+                        lambda device_name="android_watcher": frozen_now)
     monkeypatch.setattr(meal_relay, "RELAY_API_KEY", "relay-key")
     monkeypatch.setattr(meal_relay, "TELEGRAM_CHAT_ID", "12345")
 

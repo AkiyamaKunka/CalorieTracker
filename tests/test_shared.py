@@ -21,8 +21,28 @@ def test_reports_dir_single_source_of_truth():
 
 
 def test_service_health_path_single_source_of_truth():
-    assert telegram_bot.SERVICE_HEALTH_PATH is service_health.DEFAULT_PATH
-    assert daily_report.SERVICE_HEALTH_PATH is service_health.DEFAULT_PATH
+    # The autouse _isolate_service_health_ledger fixture (conftest.py)
+    # deliberately repoints the RUNTIME globals at a per-test path, so the
+    # live-module identity can no longer be asserted here. Pin the
+    # import-time wiring at source level instead: both modules must assign
+    # SERVICE_HEALTH_PATH = service_health.DEFAULT_PATH and nothing else.
+    import ast
+    import inspect
+
+    for mod in (telegram_bot, daily_report):
+        assigns = [
+            node for node in ast.walk(ast.parse(inspect.getsource(mod)))
+            if isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "SERVICE_HEALTH_PATH"
+                    for t in node.targets)
+        ]
+        assert assigns, f"{mod.__name__} must define SERVICE_HEALTH_PATH"
+        for node in assigns:
+            assert ast.unparse(node.value) == "service_health.DEFAULT_PATH", (
+                f"{mod.__name__} assigns SERVICE_HEALTH_PATH = "
+                f"{ast.unparse(node.value)} — must stay wired to "
+                f"service_health.DEFAULT_PATH"
+            )
 
 
 def test_apply_report_health_schema():
@@ -316,3 +336,73 @@ def test_service_health_update_survives_thread_contention(tmp_path):
     for t in threads:
         t.join()
     assert len(service_health.load(path).get("events", [])) == 100
+
+
+def test_service_health_update_heavy_hammer_no_lost_updates(tmp_path):
+    """8 writers x 50 read-modify-write cycles (bot poll loop + cron
+    daily_report shapes): every increment must survive. A lost update here
+    is a lost poison-ledger attempt or an erased quota pause in production."""
+    import threading
+    import service_health
+
+    path = tmp_path / "health.json"
+
+    def worker(tag):
+        for _ in range(50):
+            def mutate(d, t=tag):
+                counters = d.setdefault("counters", {})
+                counters[t] = counters.get(t, 0) + 1
+                d["total"] = d.get("total", 0) + 1
+            service_health.update(mutate, path, warn=lambda m: None)
+
+    threads = [threading.Thread(target=worker, args=(f"w{k}",)) for k in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    data = service_health.load(path)
+    assert data["total"] == 400
+    assert sorted(data["counters"].values()) == [50] * 8
+
+
+def test_service_health_update_survives_external_file_chaos(tmp_path):
+    """The health file being deleted or replaced with junk between writes
+    must never crash a writer; the next update recreates a valid file."""
+    import service_health
+
+    path = tmp_path / "health.json"
+    warn = lambda m: None
+
+    service_health.update(lambda d: d.__setitem__("a", 1), path, warn=warn)
+
+    path.unlink()  # external actor deletes the file mid-run
+    assert service_health.update(lambda d: d.__setitem__("b", 2), path, warn=warn) == {"b": 2}
+
+    path.write_text("{ not json !!!")  # replaced with junk mid-run
+    assert service_health.update(lambda d: d.__setitem__("c", 3), path, warn=warn) == {"c": 3}
+
+    path.write_text("[1, 2, 3]")  # valid JSON, wrong shape
+    assert service_health.update(lambda d: d.__setitem__("d", 4), path, warn=warn) == {"d": 4}
+    assert service_health.load(path) == {"d": 4}
+
+
+def test_service_health_update_survives_disk_full(tmp_path, monkeypatch):
+    """ENOSPC during save must warn and return, never raise — the bot's poll
+    loop calls update() for every single Telegram update. The previous file
+    stays intact because the write goes through a tmp file + atomic replace."""
+    import pathlib
+    import service_health
+
+    path = tmp_path / "health.json"
+    service_health.save({"keep": 1}, path)
+
+    def _enospc(self, *a, **k):
+        raise OSError(28, "No space left on device")
+
+    warnings = []
+    monkeypatch.setattr(pathlib.Path, "write_text", _enospc)
+    data = service_health.update(lambda d: d.__setitem__("x", 2), path, warn=warnings.append)
+    assert data == {"keep": 1, "x": 2}  # mutation applied in memory
+    assert warnings                     # failure surfaced, not raised
+    assert service_health.load(path) == {"keep": 1}  # old file undamaged

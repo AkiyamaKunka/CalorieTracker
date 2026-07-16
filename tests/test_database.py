@@ -108,16 +108,20 @@ def test_update_meal_analysis():
 def test_android_heartbeat():
     # Initial state should be None
     assert database.get_last_android_heartbeat() is None
-    
-    # Update heartbeat
+
+    # Update heartbeat. Sandwich the write between two host-clock reads so
+    # the date assertion cannot straddle midnight (write at 23:59:59.9,
+    # assert at 00:00:00.1 used to fail once a night).
+    date_before = date.today()
     database.update_android_heartbeat("android_watcher")
-    
+    date_after = date.today()
+
     last_ping = database.get_last_android_heartbeat("android_watcher")
     assert last_ping is not None
-    
+
     # Ensure it's a valid ISO string
     dt = datetime.fromisoformat(last_ping)
-    assert dt.date() == date.today()
+    assert dt.date() in (date_before, date_after)
 
 
 def test_android_timezone_defaults_and_updates():
@@ -175,7 +179,14 @@ def test_get_today_hashes_returns_only_hashes_for_today(monkeypatch):
         database, "get_android_timezone", lambda device_name="android_watcher": "+0800"
     )
     chat_id = 12345
-    user_today = database.user_local_now().date()
+    # Freeze the clock: get_today_hashes recomputes user_local_today()
+    # internally, so a midnight rollover between this read and the query
+    # would empty the expected list.
+    frozen_now = database.user_local_now()
+    monkeypatch.setattr(
+        database, "user_local_now", lambda device_name="android_watcher": frozen_now
+    )
+    user_today = frozen_now.date()
     today = user_today.isoformat()
     yesterday = (user_today - timedelta(days=1)).isoformat()
     database.save_meal(
@@ -343,7 +354,14 @@ def test_get_recent_meals_window_spans_exactly_n_user_local_days(monkeypatch):
         database, "get_android_timezone", lambda device_name="android_watcher": "+0800"
     )
     chat_id = 12345
-    today = database.user_local_now().date()
+    # Freeze the clock: get_recent_meals recomputes its user-local window
+    # internally, so a midnight rollover mid-test would shift the expected
+    # date sets by one day.
+    frozen_now = database.user_local_now()
+    monkeypatch.setattr(
+        database, "user_local_now", lambda device_name="android_watcher": frozen_now
+    )
+    today = frozen_now.date()
     for offset in range(4):
         day = (today - timedelta(days=offset)).isoformat()
         database.save_meal(

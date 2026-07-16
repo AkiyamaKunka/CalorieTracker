@@ -12,6 +12,7 @@ import json
 import sqlite3
 from types import SimpleNamespace
 
+import pytest
 from PIL import Image
 
 import database
@@ -164,3 +165,146 @@ def test_reconcile_after_crash_before_recovery_does_not_double_log(monkeypatch, 
     resp = client.post("/reconcile", headers={"X-API-Key": "k"},
                        json={"hashes": [declared]})
     assert resp.get_json()["missing_hashes"] == []
+
+
+# ---- Kill windows around save_meal / mark-saved / discard / echo ----
+#
+# The 1d0c59c reorder discards the staged file BEFORE the photo echo. These
+# tests model a hard kill (BaseException — `except Exception` cannot contain
+# it, like OOM/SIGKILL) at each cut point of the success path:
+#   save_meal -> mark saved -> discard staged file -> echo photo
+
+
+class RunNowThread:
+    """Runs the background target synchronously inside the request."""
+
+    def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+        self._target, self._args, self._kwargs = target, args, kwargs or {}
+
+    def start(self):
+        if self._target:
+            self._target(*self._args, **self._kwargs)
+
+
+class KillSignal(BaseException):
+    pass
+
+
+DECLARED = "dd" * 16
+
+
+def _upload_food_photo_killed_at(monkeypatch, tmp_path, kill_at):
+    """POST a food photo to /upload and 'kill the process' once at the named
+    cut point inside the background worker; later calls behave normally
+    (the restarted process runs unpatched code)."""
+    _wire(monkeypatch, tmp_path, RunNowThread)
+    analysis = {"is_food": True, "total_calories": 500,
+                "meal_description": "kill-window meal", "food_items": []}
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo_with_retries",
+                        lambda client, image_bytes: dict(analysis))
+
+    state = {"killed": False}
+
+    def _once(real, die_after=False):
+        def wrapper(*args, **kwargs):
+            if state["killed"]:
+                return real(*args, **kwargs)
+            state["killed"] = True
+            if die_after:
+                real(*args, **kwargs)
+            raise KillSignal()
+        return wrapper
+
+    if kill_at == "after_save_before_mark":
+        monkeypatch.setattr(telegram_bot, "save_meal",
+                            _once(telegram_bot.save_meal, die_after=True))
+    elif kill_at == "after_mark_before_discard":
+        monkeypatch.setattr(telegram_bot, "_discard_api_upload",
+                            _once(telegram_bot._discard_api_upload))
+    elif kill_at == "after_discard_before_echo":
+        monkeypatch.setattr(telegram_bot, "_echo_meal_photo",
+                            _once(telegram_bot._echo_meal_photo))
+    else:
+        raise AssertionError(f"unknown kill point {kill_at}")
+
+    bot = FakeBot()
+    app = telegram_bot._build_api_app(bot, object())
+    with pytest.raises(KillSignal):
+        app.test_client().post(
+            "/upload", headers={"X-API-Key": "k"},
+            data={"photo": (io.BytesIO(_jpeg()), "m.jpg"), "original_hash": DECLARED})
+
+    _simulate_restart(monkeypatch)
+    return bot
+
+
+def _meal_hashes(chat_id=12345):
+    with sqlite3.connect(database.DB_PATH) as conn:
+        return [r[0] for r in conn.execute(
+            "SELECT image_hash FROM meals WHERE chat_id=?", (chat_id,))]
+
+
+def test_kill_between_discard_and_echo_leaves_nothing_for_the_sweep(monkeypatch, tmp_path):
+    """Kill inside the photo echo (the biggest memory spike on this path —
+    the reason 2986c13 moved the discard BEFORE the echo): the staged file is
+    already gone and the ledger says 'saved', so the boot sweep must find
+    nothing, touch nothing, and stay silent."""
+    _upload_food_photo_killed_at(monkeypatch, tmp_path, "after_discard_before_echo")
+
+    assert list((tmp_path / "pending").iterdir()) == []
+    assert _ledger()[DECLARED][0] == "saved"
+    assert _meal_hashes() == [DECLARED]
+
+    boot_bot = FakeBot()
+    telegram_bot._sweep_stranded_pending_uploads(boot_bot)
+
+    assert boot_bot.sent == []                # no false recovery notice
+    assert _ledger()[DECLARED][0] == "saved"  # row untouched
+    assert not (tmp_path / "failed").exists() or list((tmp_path / "failed").iterdir()) == []
+    assert _meal_hashes() == [DECLARED]
+
+
+@pytest.mark.parametrize("kill_at", ["after_save_before_mark", "after_mark_before_discard"])
+def test_saved_meal_never_double_logs_after_sweep_mislabel(monkeypatch, tmp_path, kill_at):
+    """Kill in the save->discard window strands the staged file although the
+    meal IS saved. The boot sweep consults the meals table and quietly
+    discards the stranded copy (no saved->failed mislabel, nothing left to
+    retry), and no path may log the meal twice: reserve_photo_hash's
+    meals-table check blocks /upload and Telegram re-sends."""
+    _upload_food_photo_killed_at(monkeypatch, tmp_path, kill_at)
+    assert _meal_hashes() == [DECLARED]
+
+    telegram_bot._sweep_stranded_pending_uploads(FakeBot())
+
+    # The reservation can never be re-taken while the meal row exists —
+    # not by the strict /upload path, not by a deliberate Telegram re-send
+    # (which may reclaim failed/skipped/deleted, but never a logged meal).
+    assert database.reserve_photo_hash(12345, DECLARED, "api_upload") is False
+    assert database.reserve_photo_hash(
+        12345, DECLARED, "telegram",
+        reclaim_statuses={"failed", "skipped", "deleted"}) is False
+
+    # The stranded staged copy was discarded, not swept into the failed dir,
+    # so no retry path (or human) can ever feed the photo back in.
+    assert list((tmp_path / "pending").iterdir()) == []
+    failed_dir = tmp_path / "failed"
+    assert not failed_dir.exists() or list(failed_dir.iterdir()) == []
+
+    assert _meal_hashes() == [DECLARED]        # exactly one meal, ever
+    assert _ledger()[DECLARED][0] == "saved"   # the sweep restored the truth
+
+
+def test_boot_sweep_stays_quiet_for_already_saved_meal(monkeypatch, tmp_path):
+    _upload_food_photo_killed_at(monkeypatch, tmp_path, "after_mark_before_discard")
+    assert _ledger()[DECLARED][0] == "saved"
+    assert _meal_hashes() == [DECLARED]
+
+    boot_bot = FakeBot()
+    telegram_bot._sweep_stranded_pending_uploads(boot_bot)
+
+    # The meal is saved: quietly dropping the stranded staged copy is the
+    # only correct recovery — no user notice, no saved->failed flip.
+    assert boot_bot.sent == []
+    assert _ledger()[DECLARED][0] == "saved"
+    assert list((tmp_path / "pending").iterdir()) == []
+    assert _ledger()[DECLARED][0] == "saved"

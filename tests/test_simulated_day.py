@@ -110,6 +110,12 @@ def test_simulated_full_day(monkeypatch, tmp_path):
     database.init_db()
     monkeypatch.setattr(database, "get_android_timezone",
                         lambda device_name="android_watcher": "+0800")
+    # Freeze the user-local clock for the whole simulated day: every upload
+    # and query below recomputes user_local_today() inside product code, so a
+    # real midnight rollover mid-test would scatter the day across two dates.
+    _frozen_now = database.user_local_now()
+    monkeypatch.setattr(database, "user_local_now",
+                        lambda device_name="android_watcher": _frozen_now)
     monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", chat_id)
     monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "day-key")
     monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", pending)

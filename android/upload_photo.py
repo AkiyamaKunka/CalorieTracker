@@ -253,17 +253,51 @@ def _unclobbered_destination(dest_dir, src_path):
         dest_path = dest_dir / f"{src_path.stem}_{int(time.time())}{suffix}"
     return dest_path
 
-def queue_photo(file_path):
-    """Copy a failed upload to the offline queue without clobbering another file.
+def _content_hash(path):
+    """md5 of the file's bytes — the same original_hash the server dedups on."""
+    digest = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
-    Returns True when the photo was queued, False when it could not be saved
-    (so the caller can signal the watcher to retry instead of losing the photo).
+def queue_photo(file_path, original_hash=None):
+    """Copy a failed upload to the offline queue, deduplicating by content.
+
+    Entries are named '<md5-12>__<original-name>', keyed on the same
+    original_hash the server dedups on: re-queueing identical bytes (every
+    failed nightly sync re-offers the whole lookback window) is a no-op
+    instead of stacking a fresh timestamped copy per attempt. The original
+    filename is kept in the entry name so _captured_at_from_filename still
+    dates the photo correctly when the drain uploads it. Callers that already
+    hashed the file pass original_hash to skip a redundant multi-MB read.
+
+    Returns True when the photo is in the queue (newly copied or already
+    present), False when it could not be saved (so the caller can signal the
+    watcher to retry instead of losing the photo).
     """
     src_path = Path(file_path)
+    tmp_path = None
     try:
         QUEUE_DIR.mkdir(exist_ok=True)
-        shutil.copy2(src_path, _unclobbered_destination(QUEUE_DIR, src_path))
+        content_hash = original_hash or _content_hash(src_path)
+        dest_path = QUEUE_DIR / f"{content_hash[:12]}__{src_path.name}"
+        if dest_path.exists():
+            print(f"[{time.strftime('%X')}] {src_path.name} is already queued; skipping duplicate copy.")
+            return True
+        # Stage under a suffix the drain ignores, then rename into place:
+        # dest_path's existence is the dedup gate, so an interrupted copy must
+        # never leave a partial file at the final name. copy2 + replace keep
+        # the source mtime, which the drain uses for oldest-first ordering.
+        tmp_path = dest_path.with_name(dest_path.name + ".part")
+        shutil.copy2(src_path, tmp_path)
+        os.replace(tmp_path, dest_path)
     except OSError as e:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
         print(f"[{time.strftime('%X')}] Could not queue {src_path.name}: {e}")
         return False
     print(f"[{time.strftime('%X')}] Saved {src_path.name} to offline queue.")
@@ -538,7 +572,9 @@ def sync_photos():
                 print(f"[{time.strftime('%X')}] Uploading missed photo: {file_path.name}")
                 success = upload_photo(str(file_path))
                 if not success:
-                    queue_photo(str(file_path))
+                    # m_hash was computed from this file's bytes above; reuse
+                    # it so queueing does not reread a multi-MB original.
+                    queue_photo(str(file_path), original_hash=m_hash)
         else:
             print(f"[{time.strftime('%X')}] Reconcile failed: {response.text}")
     except (requests.exceptions.RequestException, RuntimeError) as e:

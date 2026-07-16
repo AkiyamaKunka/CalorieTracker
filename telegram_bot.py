@@ -23,6 +23,7 @@ import hashlib
 import hmac
 import logging
 import os
+import random
 import re
 import signal
 import statistics
@@ -134,6 +135,20 @@ ECHO_UPLOAD_PHOTOS = parse_boolish(os.environ.get("ECHO_UPLOAD_PHOTOS")) is not 
 BOT_SERVICE_NAME = os.environ.get("CALORIE_BOT_SERVICE_NAME", "caloriebot.service")
 RETRY_ALL_FAILED_MAX = _env_int("RETRY_ALL_FAILED_MAX", 10, 1, 50)
 MAX_API_UPLOAD_BYTES = _env_int("MAX_API_UPLOAD_BYTES", 25 * 1024 * 1024, 1024, 100 * 1024 * 1024)
+# Admission control for photo-analysis fan-out: every analysis thread pins its
+# full image bytes for its whole life, and the threads convoy on the Claude
+# CLI lock — a 10-photo album on the 1GB host is an OOM. Slots are taken
+# non-blocking; a denied Telegram photo is turned away with a re-send-later
+# reply, a denied /upload is kept as a failed upload for /retry_all_failed.
+MAX_CONCURRENT_ANALYSES = _env_int("MAX_CONCURRENT_ANALYSES", 3, 1, 16)
+_analysis_slots = threading.BoundedSemaphore(MAX_CONCURRENT_ANALYSES)
+# Gemini calls carry no client-side socket timeout in google-genai 0.3.0, so a
+# black-holed connection would hang its caller (the polling thread included)
+# forever. All generate_content calls run under this wall-clock deadline.
+GEMINI_HTTP_DEADLINE_SECONDS = _env_int("GEMINI_HTTP_DEADLINE_SECONDS", 90, 15, 600)
+# Captured at import: tests stub the module-level `threading` name with
+# synchronous fakes, and the deadline worker must stay a real thread.
+_DEADLINE_THREAD = threading.Thread
 # How many days of meals a natural-language correction/delete can reach back
 # over (widened from 3 so "earlier this week" resolves, not just "yesterday").
 # NOTE: HELP_TEXT's Corrections section states this number — keep them in sync.
@@ -268,6 +283,110 @@ logging.basicConfig(
 log = logging.getLogger("calorie_bot")
 
 
+def _acquire_analysis_slot():
+    """Non-blocking claim of one photo-analysis slot (MAX_CONCURRENT_ANALYSES).
+
+    Returns a single-release token dict, or None when all slots are busy.
+    The token makes the release idempotent: both the spawner (when its worker
+    thread never took ownership) and the worker's finally can safely call
+    _release_analysis_slot with it.
+    """
+    return {"held": True} if _analysis_slots.acquire(blocking=False) else None
+
+
+def _release_analysis_slot(token):
+    if not token or not token.pop("held", False):
+        return
+    try:
+        _analysis_slots.release()
+    except ValueError:
+        # BoundedSemaphore refuses an over-release. Slot bookkeeping is
+        # containment, not accounting truth — never crash a worker over it.
+        log.warning("Photo-analysis slot over-released; ignoring.")
+
+
+def _generate_content_with_deadline(client, **kwargs):
+    """client.models.generate_content bounded by GEMINI_HTTP_DEADLINE_SECONDS.
+
+    The call runs on a daemon worker thread; on deadline the worker is
+    abandoned (it may linger until the dead socket errors out, but shutdown
+    is never blocked on it) and a RuntimeError is raised. Its message says
+    'timeout' so _classify_gemini_error files it as network_service and the
+    existing retry machinery treats it as retryable network trouble.
+    """
+    outcome = {}
+
+    def _run():
+        # Total capture: the worker's outcome must reach the caller intact,
+        # whatever generate_content raises.
+        try:
+            outcome["response"] = client.models.generate_content(**kwargs)
+        except BaseException as e:  # noqa: BLE001 - re-raised on the caller thread
+            outcome["error"] = e
+
+    worker = _DEADLINE_THREAD(target=_run, daemon=True)
+    worker.start()
+    worker.join(GEMINI_HTTP_DEADLINE_SECONDS)
+    if worker.is_alive():
+        log.error(
+            f"Gemini call exceeded the {GEMINI_HTTP_DEADLINE_SECONDS}s deadline; "
+            "abandoning the worker thread."
+        )
+        raise RuntimeError(
+            f"Gemini call exceeded deadline (timeout after {GEMINI_HTTP_DEADLINE_SECONDS}s)"
+        )
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["response"]
+
+
+# Paired Telegram-HTML tags this bot emits; the truncation tag repair only
+# needs to understand these.
+_TELEGRAM_PAIRED_TAG_RE = re.compile(r"<(/?)(b|i|u|s|code|pre|a)(\s[^<>]*)?>", re.IGNORECASE)
+
+
+def _truncate_telegram_html(text: str) -> str:
+    """Cut text to ~4000 UTF-16 units without breaking Telegram HTML.
+
+    Rebuilding from codepoints means a surrogate pair is never split. The tag
+    repair then keeps the result parseable — a cut mid-tag ('<b' with no '>')
+    or mid-element (unclosed '<b>') would 400 the send and degrade the whole
+    message to raw plain text: the partial tag is stripped, and a cut inside
+    an element drops back to just before its opener. Dropping (rather than
+    appending closers) keeps the result a strict prefix of the original,
+    which downstream consumers rely on.
+    """
+    kept = []
+    units = 0
+    for ch in text:
+        units += 2 if ord(ch) > 0xFFFF else 1
+        if units > 4000:
+            break
+        kept.append(ch)
+    truncated = "".join(kept)
+
+    # A cut inside a tag leaves a bare '<...' tail.
+    lt = truncated.rfind("<")
+    if lt != -1 and ">" not in truncated[lt:]:
+        truncated = truncated[:lt]
+
+    # Stack of tags the cut left unclosed, with opener positions. The first
+    # unclosed opener is the outermost: everything from it onward belongs to
+    # elements the cut broke, so drop back to it for balanced output.
+    open_tags = []
+    for match in _TELEGRAM_PAIRED_TAG_RE.finditer(truncated):
+        name = match.group(2).lower()
+        if match.group(1):
+            if open_tags and open_tags[-1][0] == name:
+                open_tags.pop()
+        else:
+            open_tags.append((name, match.start()))
+    if open_tags:
+        truncated = truncated[:open_tags[0][1]]
+
+    return truncated + "\n\n<i>(truncated)</i>"
+
+
 # ─── Telegram Bot API ─────────────────────────────────────────────
 class TelegramBot:
     """Simple Telegram Bot using HTTP polling (no library needed)."""
@@ -277,6 +396,10 @@ class TelegramBot:
         self.base_url = f"https://api.telegram.org/bot{token}"
         self.offset = 0  # Track last processed update
         self.session = requests.Session()
+        # Consecutive getUpdates failures drive the poll backoff; the alert
+        # latch sends the outage notice once per streak, re-armed on success.
+        self._poll_failure_streak = 0
+        self._poll_alert_sent = False
 
     def _redact(self, value) -> str:
         """Strip the bot token from text destined for logs or user messages.
@@ -296,6 +419,10 @@ class TelegramBot:
         try:
             resp = self.session.post(f"{self.base_url}/{method}", json=kwargs, timeout=60)
             resp.raise_for_status()
+        except requests.exceptions.Timeout:
+            # Stdlib TimeoutError carries no token URL, and get_updates keys
+            # its quiet-retry branch on it.
+            raise TimeoutError(f"Telegram timeout calling {method}") from None
         except requests.RequestException as e:
             # requests embeds the full URL (token included) in HTTPError messages,
             # and ConnectionError/ConnectTimeout messages carry it too.
@@ -307,36 +434,101 @@ class TelegramBot:
             raise RuntimeError(f"Telegram API error: {data}")
         return data.get("result", {})
 
+    # A getUpdates failure streak this long triggers the one-time outage
+    # alert: sendMessage still works during a 409/network flap, so the alert
+    # is deliverable even while the poll loop itself is dead.
+    POLL_ALERT_STREAK = 6
+
+    def _note_poll_failure(self, summary: str, quiet: bool = False):
+        """Record one failed getUpdates: streak, health ledger, alert, backoff.
+
+        quiet=True (client timeout) still counts toward the streak — a long
+        poll normally returns 200-empty, so timing out is real trouble — but
+        skips the ERROR log and the penalty sleep.
+        """
+        self._poll_failure_streak += 1
+        streak = self._poll_failure_streak
+        if "Telegram 401" in summary:
+            log.error(f"getUpdates failed (streak {streak}): token revoked/invalid — {summary}")
+        elif "Telegram 409" in summary:
+            log.error(f"getUpdates failed (streak {streak}): another getUpdates poller is running — {summary}")
+        elif not quiet:
+            log.error(f"Error getting updates (streak {streak}): {summary}")
+
+        def mutate(data):
+            telegram = data.get("telegram")
+            if not isinstance(telegram, dict):
+                telegram = {}
+            telegram["poll_failure_streak"] = streak
+            telegram["last_poll_error"] = summary[:300]
+            telegram["last_poll_error_at"] = service_health.timestamp()
+            data["telegram"] = telegram
+
+        service_health.update(mutate, SERVICE_HEALTH_PATH, warn=log.warning)
+
+        if streak >= self.POLL_ALERT_STREAK and not self._poll_alert_sent:
+            self._poll_alert_sent = True  # latched until the next successful poll
+            try:
+                self.send_message(
+                    ALLOWED_CHAT_ID,
+                    "⚠️ <b>I can't fetch Telegram updates right now.</b>\n\n"
+                    f"{streak} getUpdates polls in a row have failed "
+                    f"(last error: <code>{_html(summary[:200])}</code>).\n\n"
+                    "Messages you send me may not be processed until this recovers.",
+                )
+            except Exception:
+                log.error("Could not send the getUpdates outage alert.")
+
+        if quiet:
+            return
+        # Exponential backoff 5s → 300s cap. The first failure sleeps exactly
+        # 5s (pinned) and the capped stage exactly 300s, so the ±20% jitter in
+        # between can never reorder consecutive sleeps (ranges are disjoint).
+        delay = 5 * 2 ** min(streak - 1, 6)
+        if delay >= 300:
+            delay = 300
+        elif streak > 1:
+            delay *= random.uniform(0.8, 1.2)
+        time.sleep(delay)
+
     def get_updates(self, timeout: int = 30) -> list:
         """Long-poll for new messages."""
         try:
             result = self._call(
                 "getUpdates", offset=self.offset, timeout=timeout
             )
-            if result:
-                self.offset = result[-1]["update_id"] + 1
-            return result
-        except requests.exceptions.Timeout:
+        except TimeoutError as e:
+            # Quiet branch: no ERROR log, no penalty sleep — but the streak
+            # still grows, so persistent timeouts surface and alert too.
+            self._note_poll_failure(str(e), quiet=True)
             return []
         except Exception as e:
-            log.error(f"Error getting updates: {self._redact(e)}")
-            time.sleep(5)
+            # Contain and back off; the offset is never advanced, so the
+            # failed batch is re-polled rather than silently skipped.
+            self._note_poll_failure(self._redact(e))
             return []
+        if self._poll_failure_streak:
+            self._poll_failure_streak = 0
+            self._poll_alert_sent = False
+
+            def mutate(data):
+                telegram = data.get("telegram")
+                if isinstance(telegram, dict):
+                    telegram["poll_failure_streak"] = 0
+                    data["telegram"] = telegram
+
+            service_health.update(mutate, SERVICE_HEALTH_PATH, warn=log.warning)
+        if result:
+            self.offset = result[-1]["update_id"] + 1
+        return result
 
     def send_message(self, chat_id: int, text: str, parse_mode: str = "HTML", reply_markup: Optional[dict] = None):
         """Send a text message. Returns the Message dict on success, or None."""
         # Truncate if too long for Telegram (4096-char limit, counted in
-        # UTF-16 code units — astral emoji are 2 units each). Rebuilding
-        # from codepoints means we can never split a surrogate pair.
+        # UTF-16 code units — astral emoji are 2 units each), repairing any
+        # HTML tag the cut point lands inside.
         if utf16_len(text) > 4000:
-            kept = []
-            units = 0
-            for ch in text:
-                units += 2 if ord(ch) > 0xFFFF else 1
-                if units > 4000:
-                    break
-                kept.append(ch)
-            text = "".join(kept) + "\n\n<i>(truncated)</i>"
+            text = _truncate_telegram_html(text)
         payload = {
             "chat_id": chat_id,
             "text": text,
@@ -804,7 +996,8 @@ def _echo_meal_photo(bot: TelegramBot, chat_id: int, image_bytes: bytes, result_
 def _analyze_food_photo_once(client: genai.Client, image_bytes: bytes) -> Dict:
     """Analyze a food photo once with Gemini, letting callers handle failures."""
     img = _prepare_image_for_gemini(image_bytes)
-    response = client.models.generate_content(
+    response = _generate_content_with_deadline(
+        client,
         model=GEMINI_MODEL,
         contents=[FOOD_DETECTION_PROMPT, img],
         config=GEMINI_JSON_CONFIG,
@@ -1239,10 +1432,10 @@ def maybe_warn_android_vpn_inactive(bot: TelegramBot, endpoint: str):
     bot.send_message(
         ALLOWED_CHAT_ID,
         "⚠️ <b>Android VPN appears OFF</b>\n\n"
-        f"The Android uploader reached <code>{endpoint}</code> from "
-        f"<code>{remote_ip}</code>, but it reported no VPN interface "
-        f"(<code>{vpn_check or 'no detail'}</code>).\n\n"
-        f"Network evidence: <code>{evidence_detail}</code>.\n\n"
+        f"The Android uploader reached <code>{_html(endpoint)}</code> from "
+        f"<code>{_html(remote_ip)}</code>, but it reported no VPN interface "
+        f"(<code>{_html(vpn_check or 'no detail')}</code>).\n\n"
+        f"Network evidence: <code>{_html(evidence_detail)}</code>.\n\n"
         "Turn on the VPN before relying on WiFi/cellular auto-upload from mainland China.",
     )
 
@@ -1303,10 +1496,10 @@ def maybe_warn_ios_vpn_unverified(bot: TelegramBot, endpoint: str):
     bot.send_message(
         ALLOWED_CHAT_ID,
         "⚠️ <b>iPhone VPN may be OFF</b>\n\n"
-        f"The iOS Shortcut reached <code>{endpoint}</code> from <code>{remote_ip}</code>, "
+        f"The iOS Shortcut reached <code>{_html(endpoint)}</code> from <code>{_html(remote_ip)}</code>, "
         "and the network evidence looks like a direct/non-VPN connection.\n\n"
-        f"Detail: <code>{detail}</code>\n\n"
-        f"Network evidence: <code>{evidence_detail}</code>.\n\n"
+        f"Detail: <code>{_html(detail)}</code>\n\n"
+        f"Network evidence: <code>{_html(evidence_detail)}</code>.\n\n"
         "Turn on the VPN before relying on WiFi/cellular auto-upload from mainland China.",
     )
 
@@ -1371,7 +1564,9 @@ def _format_age(iso_value: Optional[str]) -> str:
     try:
         dt = datetime.fromisoformat(iso_value)
     except ValueError:
-        return iso_value
+        # Callers interpolate this into parse_mode=HTML text; a corrupted
+        # stored timestamp must arrive escaped (and short), not as markup.
+        return _html(iso_value[:64])
 
     seconds = max(0, int((datetime.now() - dt).total_seconds()))
     if seconds < 60:
@@ -1764,7 +1959,8 @@ def run_gemini_probe(gemini_client) -> str:
 
     start = time.time()
     try:
-        response = gemini_client.models.generate_content(
+        response = _generate_content_with_deadline(
+            gemini_client,
             model=GEMINI_MODEL,
             contents="Reply with exactly OK.",
         )
@@ -3461,7 +3657,10 @@ def _nl_correction(bot: TelegramBot, chat_id: int, text: str, meals: List[Dict],
         return
 
     if meal_index is None or meal_index < 0 or meal_index >= len(meals):
-        bot.send_message(chat_id, f"❌ Invalid meal index ({result.get('meal_index')}). You have {len(meals)} recent meals.")
+        # meal_index is raw model output: escape it (and keep it short) so
+        # hallucinated markup can neither inject formatting nor 400 the send.
+        shown_index = _html(str(result.get("meal_index"))[:40])
+        bot.send_message(chat_id, f"❌ Invalid meal index ({shown_index}). You have {len(meals)} recent meals.")
         return
 
     # An empty or non-food analysis would overwrite the meal into a row every
@@ -3475,21 +3674,27 @@ def _nl_correction(bot: TelegramBot, chat_id: int, text: str, meals: List[Dict],
         )
         return
 
-    # Get old values for the diff
+    # A hostile food_items shape (scalar/dict/strings) persisted here would
+    # crash every later prompt build over the edit window; store dicts only.
+    if "food_items" in new_analysis:
+        new_analysis["food_items"] = safe_food_items(new_analysis)
+
+    # Compute EVERY reply input before the write: numeric coercion via
+    # safe_number means a hallucinated string calorie value can no longer
+    # raise after update_meal_analysis already ran (the user was told the
+    # request failed although the row had been rewritten).
     old_analysis = meals[meal_index]["analysis"]
-    old_cal = old_analysis.get("total_calories") or 0
-    new_cal = new_analysis.get("total_calories") or 0
+    old_cal = safe_number(old_analysis.get("total_calories"), 0)
+    new_cal = safe_number(new_analysis.get("total_calories"), 0)
     old_desc = old_analysis.get("meal_description", "Unknown")
     new_desc = new_analysis.get("meal_description", old_desc)
+    diff = new_cal - old_cal
+    diff_str = f"+{diff}" if diff > 0 else str(diff)
 
     # Update by the DB id from the snapshot Gemini indexed, so a meal
     # logged mid-conversation cannot shift the target.
     meal_id = meals[meal_index]["id"]
     database.update_meal_analysis(meal_id, chat_id, new_analysis)
-
-    # Format reply with diff
-    diff = new_cal - old_cal
-    diff_str = f"+{diff}" if diff > 0 else str(diff)
     reply_lines = [
         f"✏️ <b>Corrected meal {meal_index + 1}!</b>",
         "",
@@ -3505,6 +3710,13 @@ def _nl_correction(bot: TelegramBot, chat_id: int, text: str, meals: List[Dict],
 
 def _nl_delete(bot: TelegramBot, chat_id: int, text: str, meals: List[Dict], result: Dict):
     meal_indices = result.get("meal_indices", [])
+    if not isinstance(meal_indices, list):
+        # Iterating a scalar string "12" would stage meals 1 and 2 (a dict,
+        # its keys). Honor a bare integer; anything else means "no match".
+        if isinstance(meal_indices, int) and not isinstance(meal_indices, bool):
+            meal_indices = [meal_indices]
+        else:
+            meal_indices = []
     reason = result.get("reason", "")
 
     if not meals:
@@ -3560,7 +3772,11 @@ def _nl_delete(bot: TelegramBot, chat_id: int, text: str, meals: List[Dict], res
 
 def _nl_new_meal(bot: TelegramBot, chat_id: int, text: str, meals: List[Dict], result: Dict):
     analysis = result.get("analysis", {})
-    if analysis.get("is_food"):
+    if isinstance(analysis, dict) and analysis.get("is_food"):
+        # A hostile food_items shape persisted here would crash every later
+        # prompt build over the edit window; store dicts only.
+        if "food_items" in analysis:
+            analysis["food_items"] = safe_food_items(analysis)
         save_meal(chat_id, analysis, "manual_text", "text", "")
         log.info(f"  ✅ Manual Food: {analysis.get('meal_description')} (~{analysis.get('total_calories')} kcal)")
         result_text = format_food_result(chat_id, analysis)
@@ -3619,7 +3835,11 @@ def _nl_log_activity(bot: TelegramBot, chat_id: int, text: str, meals: List[Dict
 
 
 def _nl_chat(bot: TelegramBot, chat_id: int, text: str, meals: List[Dict], result: Dict):
-    reply = result.get("reply", "I'm not sure what you mean. Try describing a meal or correction!")
+    reply = result.get("reply")
+    if not isinstance(reply, str) or not reply.strip():
+        # A null/blank reply becomes an empty-text sendMessage, which the
+        # real Telegram API rejects — the user would hear nothing at all.
+        reply = "I'm not sure what you mean. Try describing a meal or correction!"
     bot.send_message(chat_id, _html(reply))
     log.info("  💬 Chat response sent")
 
@@ -3652,10 +3872,16 @@ def _normalize_nl_actions(result) -> List[Dict]:
         # Only honor "actions" when the wrapper is the designed multi shape
         # or has no recognized single intent of its own — a real single
         # intent carrying a hallucinated decomposition list must win.
+        # Hashability guard: a list/dict intent must read as "no recognized
+        # single intent", not raise TypeError out of the membership test.
+        recognized = (
+            isinstance(result.get("intent"), str)
+            and result["intent"] in _NL_INTENT_HANDLERS
+        )
         use_actions = (
             isinstance(actions, list)
             and actions
-            and (result.get("intent") == "multi" or result.get("intent") not in _NL_INTENT_HANDLERS)
+            and (result.get("intent") == "multi" or not recognized)
         )
         items = actions if use_actions else [result]
     elif isinstance(result, list):
@@ -3720,8 +3946,11 @@ def handle_text_message(
             d = meal.get("date", "?")
             desc = a.get("meal_description", "Unknown")
             cal = a.get("total_calories", 0)
-            items = a.get("food_items", [])
-            items_str = ", ".join(item.get("name", "?") for item in items)
+            # Stored analyses are untrusted (any past Gemini response shape):
+            # one poison row must not kill every later prompt build.
+            items_str = ", ".join(
+                str(item.get("name", "?")) for item in safe_food_items(a)
+            )
             meals_list_parts.append(
                 f"[{i}] Date: {d} | Meal: {desc} (~{cal} kcal) — Items: {items_str}"
             )
@@ -3740,7 +3969,8 @@ def handle_text_message(
     )
 
     try:
-        response = gemini_client.models.generate_content(
+        response = _generate_content_with_deadline(
+            gemini_client,
             model=GEMINI_MODEL,
             contents=[prompt],
             config=GEMINI_JSON_CONFIG,
@@ -3820,7 +4050,11 @@ def handle_text_message_safe(gemini_client, bot: TelegramBot, chat_id: int, text
 def handle_callback_query(gemini_client, bot: TelegramBot, callback_query: Dict) -> bool:
     """Handle Telegram inline-button actions."""
     callback_id = callback_query.get("id", "")
-    data = callback_query.get("data", "")
+    # An explicit null (or non-string) data field must fall through to the
+    # "Unknown action." answer, not raise before the callback is answered.
+    data = callback_query.get("data") or ""
+    if not isinstance(data, str):
+        data = ""
     message = callback_query.get("message") or {}
     chat = message.get("chat") or {}
     chat_id = chat.get("id") or callback_query.get("from", {}).get("id")
@@ -3899,6 +4133,7 @@ def _analyze_telegram_photo_background(
     file_id: str,
     img_hash: str,
     staged_path: Optional[Path] = None,
+    analysis_slot: Optional[dict] = None,
 ):
     """Analyze a Telegram photo off the long-poll thread and report the result.
 
@@ -3973,6 +4208,9 @@ def _analyze_telegram_photo_background(
         log.error(f"Error processing photo: {bot._redact(e)}")
         bot.send_message(chat_id, "❌ Error processing your photo. Please try again.")
     finally:
+        # The caller's admission slot is owned here from the moment this
+        # thread actually ran; every exit returns it.
+        _release_analysis_slot(analysis_slot)
         if staged_path is not None:
             _discard_api_upload(staged_path)
 
@@ -3997,13 +4235,17 @@ def handle_photo_message(
     document = message.get("document")
     file_id = None
 
-    if photos:
-        file_id = photos[-1]["file_id"]
-    elif document:
+    # Guarded extraction: this runs BEFORE the try/except below, so a
+    # malformed photo/document field must degrade to "not an image"
+    # (return False), never raise through _process_update.
+    if isinstance(photos, list) and photos and isinstance(photos[-1], dict):
+        file_id = photos[-1].get("file_id")
+    elif isinstance(document, dict):
         mime = document.get("mime_type", "")
-        if mime.startswith("image/"):
-            file_id = document["file_id"]
-            log.info(f"  📎 Received image as document ({mime})")
+        if isinstance(mime, str) and mime.startswith("image/"):
+            file_id = document.get("file_id")
+            if file_id:
+                log.info(f"  📎 Received image as document ({mime})")
 
     if not file_id:
         return False
@@ -4011,8 +4253,21 @@ def handle_photo_message(
     log.info(f"[{user}] Received photo, analyzing...")
     img_hash = ""
     reserved_photo = False
+    analysis_slot = None
     try:
         image_bytes = bot.get_file(file_id)
+
+        # Telegram getFile hands over up to 20MB with no cap of its own
+        # (MAX_API_UPLOAD_BYTES only guarded /upload): refuse oversize
+        # images before they pin memory for an analysis thread's lifetime.
+        if len(image_bytes) > MAX_API_UPLOAD_BYTES:
+            bot.send_message(
+                chat_id,
+                "❌ That image is too large for me to analyze "
+                f"(over {MAX_API_UPLOAD_BYTES // (1024 * 1024)}MB). "
+                "Please send a smaller photo.",
+            )
+            return True
 
         # Duplicate detection
         img_hash = hashlib.md5(image_bytes).hexdigest()
@@ -4043,6 +4298,20 @@ def handle_photo_message(
             return True
         reserved_photo = True
 
+        # Admission control BEFORE staging/thread spawn: past the cap, turn
+        # the photo away (a deliberate human can simply re-send) instead of
+        # pinning another full-size image on the 1GB host.
+        analysis_slot = _acquire_analysis_slot()
+        if analysis_slot is None:
+            database.release_photo_hash(chat_id, img_hash)
+            reserved_photo = False
+            log.warning("  ⏳ Photo analysis slots exhausted; asking for a re-send.")
+            bot.send_message(
+                chat_id,
+                "⏳ I am analyzing several photos right now — please re-send this one in a minute.",
+            )
+            return True
+
         # Stage a crash-recovery copy before spawning the thread: the
         # long-poll offset is confirmed on the next getUpdates, so Telegram
         # never re-delivers this photo. A hard kill mid-analysis leaves this
@@ -4055,13 +4324,22 @@ def handle_photo_message(
         except OSError as e:
             log.warning(f"Could not stage Telegram photo for crash recovery: {e}")
 
-        threading.Thread(
+        worker = threading.Thread(
             target=_analyze_telegram_photo_background,
-            args=(gemini_client, bot, chat_id, image_bytes, file_id, img_hash, staged_path),
-        ).start()
+            args=(gemini_client, bot, chat_id, image_bytes, file_id, img_hash, staged_path,
+                  analysis_slot),
+        )
+        worker.start()
+        # Slot ownership passed to the worker's finally. A thread double that
+        # never runs the target (test fakes; a failed spawn) must not strand
+        # the slot — the token release is idempotent, so reclaiming here is
+        # safe even when a synchronous fake already released it.
+        if not (hasattr(worker, "is_alive") and worker.is_alive()):
+            _release_analysis_slot(analysis_slot)
     except Exception as e:
         if reserved_photo:
             database.release_photo_hash(chat_id, img_hash)
+        _release_analysis_slot(analysis_slot)
         # Defense in depth: network errors can embed the token URL.
         log.error(f"Error processing photo: {bot._redact(e)}")
         bot.send_message(chat_id, "❌ Error processing your photo. Please try again.")
@@ -4134,8 +4412,10 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
             # request body with no multipart wrapper — the practical
             # workaround for an iOS bug where Form file fields silently
             # coerce to ~50 bytes of text. Accept the body when it actually
-            # looks like an image.
-            body = request.get_data()[:MAX_API_UPLOAD_BYTES + 1]
+            # looks like an image. The read itself is capped: a chunked body
+            # has no Content-Length for the early 413 guard, and get_data()
+            # would buffer a multi-GB stream into RAM before any slice.
+            body = request.stream.read(MAX_API_UPLOAD_BYTES + 1)
             if _looks_like_image(body):
                 image_bytes = body
                 upload_name = "raw_body.jpg"
@@ -4208,6 +4488,20 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
             _finish_api_upload_processing(img_hash)
             log.error(f"  ❌ API Upload: Could not stage upload: {e}")
             return jsonify({"error": "Could not stage upload"}), 500
+
+        # Admission control before spawning the worker: the file is already
+        # staged, so a denied upload is kept as a failed upload — the phone
+        # gets a durable "saved" answer and /retry_all_failed drains it.
+        analysis_slot = _acquire_analysis_slot()
+        if analysis_slot is None:
+            failed_path = _keep_failed_api_upload(upload_path, img_hash)
+            database.mark_photo_hash_status(ALLOWED_CHAT_ID, img_hash, "failed", source="api_upload")
+            _finish_api_upload_processing(img_hash)
+            log.warning(
+                f"  ⏳ /upload denied an analysis slot (cap {MAX_CONCURRENT_ANALYSES}); "
+                f"kept for retry at {failed_path}"
+            )
+            return jsonify({"status": "saved_for_retry_busy"})
 
         # Process the photo in a background thread to return 200 OK instantly to iOS
         def background_process(upload_file_path, hsh, device, captured=None):
@@ -4323,9 +4617,15 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
                     f"Hash: <code>{_html(hsh)}</code>",
                 )
             finally:
+                _release_analysis_slot(analysis_slot)
                 _finish_api_upload_processing(hsh)
 
-        threading.Thread(target=background_process, args=(str(upload_path), img_hash, device_name, captured_at)).start()
+        worker = threading.Thread(target=background_process, args=(str(upload_path), img_hash, device_name, captured_at))
+        worker.start()
+        # Slot ownership passed to the worker's finally; reclaim (idempotent)
+        # if a thread double never ran the target — see handle_photo_message.
+        if not (hasattr(worker, "is_alive") and worker.is_alive()):
+            _release_analysis_slot(analysis_slot)
 
         return jsonify({"status": "processing_in_background"})
 
@@ -4351,6 +4651,15 @@ def _sweep_stranded_pending_uploads(bot: TelegramBot):
         except OSError as e:
             log.warning(f"Could not read stranded pending upload {path}: {e}")
             still_pending.append(path)
+            continue
+        if database.meal_image_hash_exists(ALLOWED_CHAT_ID, img_hash):
+            # A kill inside the save->discard window: the meal IS logged, only
+            # the staged copy survived. Quietly drop it — flipping the row to
+            # 'failed' and announcing a recovery would steer the user toward
+            # a pointless (and duplicate-risking) /retry_failed.
+            _discard_api_upload(path)
+            database.mark_photo_hash_status(ALLOWED_CHAT_ID, img_hash, "saved", source="startup_sweep")
+            log.info(f"♻️ Discarded stranded staged copy of already-saved meal {img_hash}.")
             continue
         failed_path = _keep_failed_api_upload(path, img_hash)
         if failed_path == path:
@@ -4413,8 +4722,13 @@ def _poison_update_should_skip(bot: TelegramBot, update_id) -> bool:
     dying arrives back (offset unconfirmed -> Telegram re-delivers) with a
     growing count and is eventually skipped instead of crash-looping the
     service forever (the 2026-07-16 failure mode, then only stopped by an
-    in-code bug fix). Counts live in service_health.json, pruned to the 20
-    newest update_ids — a clean pass simply ages out.
+    in-code bug fix). Entries live in service_health.json as
+    {'n': count, 'at': timestamp} (legacy bare-int counts are tolerated),
+    pruned by RECENCY to 20 — pruning by numeric id would evict a small
+    post-reset update_id on every sighting and crash-loop forever after a
+    Telegram update_id reset. An update already in the processed ring
+    (see _poison_update_clear) is a redelivery of completed work: skipped
+    quietly, without counting an attempt.
     """
     if update_id is None:
         return False
@@ -4422,17 +4736,37 @@ def _poison_update_should_skip(bot: TelegramBot, update_id) -> bool:
     seen = {}
 
     def mutate(data):
+        ring = data.get("processed_updates")
+        if isinstance(ring, list) and key in ring:
+            seen["already_processed"] = True
+            return
         attempts = data.get("update_attempts")
         attempts = dict(attempts) if isinstance(attempts, dict) else {}
-        seen["n"] = attempts.get(key, 0) + 1 if isinstance(attempts.get(key), int) else 1
-        attempts[key] = seen["n"]
+        prev = attempts.get(key)
+        if isinstance(prev, dict) and isinstance(prev.get("n"), int):
+            n = prev["n"] + 1
+        elif isinstance(prev, int):  # legacy bare-count entry
+            n = prev + 1
+        else:
+            n = 1
+        seen["n"] = n
+        attempts[key] = {"n": n, "at": service_health.timestamp()}
         if len(attempts) > 20:
-            # update_ids are monotonically increasing; keep the newest.
-            for old in sorted(attempts, key=lambda k: int(k) if k.isdigit() else 0)[:-20]:
+            # Evict the LEAST RECENTLY SEEN entries, never the one just
+            # written (legacy int entries have no 'at' and age out first).
+            def _last_seen(k):
+                value = attempts[k]
+                return value.get("at", "") if isinstance(value, dict) else ""
+
+            stale = sorted((k for k in attempts if k != key), key=_last_seen)
+            for old in stale[:len(attempts) - 20]:
                 attempts.pop(old, None)
         data["update_attempts"] = attempts
 
     service_health.update(mutate, SERVICE_HEALTH_PATH, warn=log.warning)
+    if seen.get("already_processed"):
+        log.info(f"Skipping already-processed update {update_id} (redelivery).")
+        return True
     n = seen.get("n", 1)
     if n <= POISON_UPDATE_MAX_ATTEMPTS:
         return False
@@ -4460,6 +4794,11 @@ def _poison_update_clear(update_id):
     Without this, healthy updates sharing a re-delivered batch with a
     poison one would accumulate attempts in lockstep and eventually be
     skipped with a false "crashed me repeatedly" notice.
+
+    Also records the update in the durable processed ring (newest 256), so
+    a kill AFTER the clear but BEFORE the offset is confirmed cannot re-run
+    the update's side effects on redelivery — _poison_update_should_skip
+    recognizes ring members and skips them quietly.
     """
     if update_id is None:
         return
@@ -4470,6 +4809,15 @@ def _poison_update_clear(update_id):
         if isinstance(attempts, dict) and key in attempts:
             attempts.pop(key, None)
             data["update_attempts"] = attempts
+        ring = data.get("processed_updates")
+        ring = [str(x) for x in ring] if isinstance(ring, list) else []
+        if key not in ring:
+            ring.append(key)
+        if len(ring) > 256:
+            # update_ids are monotonically increasing between resets; keep
+            # the numerically newest.
+            ring = sorted(ring, key=lambda k: int(k) if k.isdigit() else 0)[-256:]
+        data["processed_updates"] = ring
 
     service_health.update(mutate, SERVICE_HEALTH_PATH, warn=log.warning)
 
@@ -4546,11 +4894,17 @@ def _process_update(gemini_client, bot: TelegramBot, update: Dict):
         return
 
     message = update.get("message")
-    if not message:
+    if not isinstance(message, dict):
         return
 
-    chat_id = message["chat"]["id"]
-    user = message.get("from", {}).get("first_name", "User")
+    # Structurally invalid messages are ignored, not raised: one malformed
+    # update must never burn its whole batch in main()'s catch-all.
+    chat = message.get("chat")
+    chat_id = chat.get("id") if isinstance(chat, dict) else None
+    if chat_id is None:
+        return
+    sender = message.get("from")
+    user = sender.get("first_name", "User") if isinstance(sender, dict) else "User"
 
     # ─── Security Check ──────────────────────────────
     if chat_id != ALLOWED_CHAT_ID:
@@ -4561,7 +4915,10 @@ def _process_update(gemini_client, bot: TelegramBot, update: Dict):
         )
         return
 
-    text = message.get("text", "").strip()
+    text = message.get("text")
+    if not isinstance(text, str):  # explicit null / non-string text
+        text = ""
+    text = text.strip()
     command = text.split()[0].lower().split("@")[0] if text.startswith("/") else ""
     args = text.split()[1:] if text.startswith("/") else []
 
@@ -4793,6 +5150,10 @@ def main():
 
     # Initialize
     bot = TelegramBot(BOT_TOKEN)
+    # Tripwire FIRST: a boot that crashes inside the sweep/app build below
+    # must still count as a crash boot, or a boot-time crash loop restarts
+    # forever without ever feeding the alert.
+    _record_boot_and_maybe_alert(bot)
     gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
     # systemd stop sends SIGTERM; raising KeyboardInterrupt on the main thread
@@ -4809,7 +5170,6 @@ def main():
     log.info("🚀 Flask REST API started on port 5000")
     
     log.info("Bot is running! Listening for corrections and commands.")
-    _record_boot_and_maybe_alert(bot)
     log.info("Press Ctrl+C to stop.\n")
 
     try:

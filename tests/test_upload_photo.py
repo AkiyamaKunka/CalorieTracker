@@ -62,7 +62,10 @@ def test_a1_complete_offline_mode(mock_post, mock_queue_dir, tmp_path, mock_env)
     assert not upload_photo.QUEUE_DIR.exists()
     assert upload_photo.queue_photo(str(img_path)) is True
 
-    assert (upload_photo.QUEUE_DIR / "test_photo.jpg").read_bytes() == b"dummy image data"
+    # Queue entries are named <md5-12>__<original-name> so identical content
+    # dedups while the original name still drives captured_at derivation.
+    entry_name = hashlib.md5(b"dummy image data").hexdigest()[:12] + "__test_photo.jpg"
+    assert (upload_photo.QUEUE_DIR / entry_name).read_bytes() == b"dummy image data"
 
 @patch('upload_photo.requests.post')
 def test_a2_cellular_fallback(mock_post, mock_env, monkeypatch):
@@ -174,17 +177,43 @@ def test_upload_photo_vanished_file_returns_false(mock_env, tmp_path):
     assert upload_photo.upload_photo(str(tmp_path / "gone.jpg")) is False
 
 
-def test_queue_photo_avoids_clobbering_existing_file(mock_queue_dir, tmp_path, monkeypatch):
+def test_queue_photo_avoids_clobbering_existing_file(mock_queue_dir, tmp_path):
+    """Same name, different bytes (e.g. a pre-upgrade queue entry): both
+    copies must survive — content-hash entry names keep them apart."""
     img_path = tmp_path / "photo.jpg"
     img_path.write_bytes(b"new")
     mock_queue_dir.mkdir(exist_ok=True)
     (mock_queue_dir / "photo.jpg").write_bytes(b"old")
-    monkeypatch.setattr(upload_photo.time, "time", lambda: 1234567890)
 
     upload_photo.queue_photo(str(img_path))
 
     assert (mock_queue_dir / "photo.jpg").read_bytes() == b"old"
-    assert (mock_queue_dir / "photo_1234567890.jpg").read_bytes() == b"new"
+    hashed_name = hashlib.md5(b"new").hexdigest()[:12] + "__photo.jpg"
+    assert (mock_queue_dir / hashed_name).read_bytes() == b"new"
+
+
+def test_queue_photo_same_content_is_noop(mock_queue_dir, tmp_path):
+    """Re-queueing identical bytes must not create a second copy and must
+    still report success (the photo IS safely queued)."""
+    img_path = tmp_path / "meal.jpg"
+    img_path.write_bytes(b"same meal bytes")
+
+    assert upload_photo.queue_photo(str(img_path)) is True
+    assert upload_photo.queue_photo(str(img_path)) is True
+
+    assert len([p for p in mock_queue_dir.iterdir() if p.is_file()]) == 1
+
+
+def test_captured_at_survives_hash_prefixed_queue_name():
+    """The drain derives captured_at from the queued filename; the <md5-12>__
+    prefix must not break the timestamp regex — including the worst case of
+    an all-digit hash prefix before a name that starts with the date."""
+    assert upload_photo._captured_at_from_filename(
+        "a3f9c2d81b04__IMG_20260715_193042.jpg"
+    ) == "2026-07-15 19:30:42"
+    assert upload_photo._captured_at_from_filename(
+        "123456789012__20260715_193042.jpg"
+    ) == "2026-07-15 19:30:42"
 
 
 def test_process_queue_honors_batch_limit(mock_queue_dir, monkeypatch):
@@ -884,3 +913,36 @@ def test_queue_drain_unlinks_on_duplicate_reply(mock_post, mock_queue_dir, mock_
     upload_photo.process_queue()
 
     assert not queued.exists()
+
+
+@patch('upload_photo.requests.post')
+def test_repeated_failed_syncs_do_not_duplicate_queue_copies(
+        mock_post, mock_queue_dir, tmp_path, mock_env, monkeypatch):
+    camera = tmp_path / "camera"
+    camera.mkdir()
+    (camera / "meal.jpg").write_bytes(b"meal-bytes")
+    monkeypatch.setattr(upload_photo, "CAMERA_DIR", camera)
+    missing = hashlib.md5(b"meal-bytes").hexdigest()
+
+    def fake_post(url, **kwargs):
+        resp = MagicMock()
+        if url.endswith("/ping"):
+            resp.status_code = 200
+        elif url.endswith("/reconcile"):
+            resp.status_code = 200
+            resp.json.return_value = {"missing_hashes": [missing]}
+        else:  # /upload: the server is persistently erroring
+            resp.status_code = 500
+            resp.text = "internal error"
+        return resp
+
+    mock_post.side_effect = fake_post
+
+    upload_photo.sync_photos()   # outage day 1: queues meal.jpg
+    upload_photo.sync_photos()   # outage day 2: must NOT queue a second copy
+
+    queued = [p for p in upload_photo.QUEUE_DIR.iterdir() if p.is_file()]
+    assert len(queued) == 1, (
+        f"one camera photo produced {len(queued)} queued copies across two "
+        f"failed syncs: {[p.name for p in queued]}"
+    )

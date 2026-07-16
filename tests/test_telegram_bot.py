@@ -22,6 +22,18 @@ def mock_db(tmp_path, monkeypatch):
     # monkeypatch guarantees restoration even if init_db raises mid-fixture.
     monkeypatch.setattr(database, "DB_PATH", tmp_path / "test_meals.db")
     database.init_db()
+    # Freeze the user-local clock for the duration of the test. Dozens of
+    # tests compute `today = database.user_local_now().date()` during setup
+    # and then call handlers that recompute user_local_today() themselves;
+    # if host midnight falls between those two reads the seeded rows land on
+    # "yesterday" and the assertions break. One value per test removes the
+    # straddle. Tests that need a specific clock re-patch user_local_now and
+    # win because their setattr runs after this one.
+    frozen_local_now = database.user_local_now()
+    monkeypatch.setattr(
+        database, "user_local_now",
+        lambda device_name="android_watcher": frozen_local_now,
+    )
     yield
 
 
@@ -3273,18 +3285,22 @@ def test_rapid_restart_alert_ignores_old_boots(monkeypatch, tmp_path):
 
 def test_poison_clear_protects_healthy_batch_mates(monkeypatch, tmp_path):
     """A healthy update re-delivered alongside a poison one is cleared after
-    every survived pass, so it can never be falsely declared poison."""
+    its first survived pass and ring-skipped on every redelivery, so it can
+    never be falsely declared poison (and its side effects never re-run)."""
     _poison_setup(monkeypatch, tmp_path)
     bot = FakeBot()
+    assert telegram_bot._poison_update_should_skip(bot, 555) is False  # healthy A processes
+    telegram_bot._poison_update_clear(555)                             # loop survived A
     for _ in range(telegram_bot.POISON_UPDATE_MAX_ATTEMPTS + 3):
-        assert telegram_bot._poison_update_should_skip(bot, 555) is False  # healthy A
-        telegram_bot._poison_update_clear(555)                             # loop survived A
-        telegram_bot._poison_update_should_skip(bot, 556)                  # poison B, never cleared
-    assert bot.sent[-1:] == [] or "crashed me repeatedly" in bot.sent[-1]["text"]
-    # B crossed the threshold; A never did.
+        # Redelivered A: recognized as already processed, skipped quietly.
+        assert telegram_bot._poison_update_should_skip(bot, 555) is True
+        telegram_bot._poison_update_should_skip(bot, 556)              # poison B, never cleared
+    # Exactly one notice, for B alone; A never accumulated a single attempt.
+    assert len(bot.sent) == 1
+    assert "crashed me repeatedly" in bot.sent[-1]["text"]
     attempts = service_health.load(tmp_path / "health.json")["update_attempts"]
     assert "555" not in attempts
-    assert attempts["556"] > telegram_bot.POISON_UPDATE_MAX_ATTEMPTS
+    assert attempts["556"]["n"] > telegram_bot.POISON_UPDATE_MAX_ATTEMPTS
 
 
 def test_service_health_load_tolerates_non_dict_json(tmp_path):
@@ -3305,3 +3321,1631 @@ def test_process_update_rejects_unauthorized_chat(monkeypatch, tmp_path):
         "message": {"chat": {"id": 99999}, "from": {"first_name": "Stranger"}, "text": "hi"},
     })
     assert "not authorized" in bot.sent[-1]["text"]
+
+
+# ═══ HTML-injection & formatting audit at the send boundary (hunter 4) ═══
+
+import re as _re_h4
+from utils import utf16_len as _utf16_len
+
+_TELEGRAM_TAG_RE = _re_h4.compile(r"<(/?)(b|strong|i|em|u|ins|s|strike|del|code|pre|a|span|blockquote|tg-spoiler|tg-emoji)(\s[^<>]*)?>", _re_h4.IGNORECASE)
+
+
+def _telegram_html_parse_ok(text):
+    """Mimic Telegram's HTML entity parser strictly enough for these tests:
+    every '<' must start a complete, supported tag, and open/close tags must
+    balance. A stray '<' or an unclosed tag makes sendMessage 400."""
+    stack = []
+    idx = 0
+    while True:
+        lt = text.find("<", idx)
+        if lt == -1:
+            break
+        m = _TELEGRAM_TAG_RE.match(text, lt)
+        if not m:
+            return False  # bare '<' or a tag cut in half
+        name = m.group(2).lower()
+        if m.group(1):
+            if not stack or stack[-1] != name:
+                return False
+            stack.pop()
+        else:
+            stack.append(name)
+        idx = m.end()
+    return not stack
+
+
+def test_send_message_truncation_yields_parseable_telegram_html():
+    """A valid long HTML message must still be valid HTML after truncation.
+    Today the codepoint cut at 4000 units can land inside <b>...</b> (unclosed
+    tag) or inside the tag itself (stray '<'); Telegram rejects both and the
+    parse_mode-less retry shows the user 4000 chars of raw markup."""
+    # Cut lands between <b> and </b> -> unclosed tag.
+    bot = telegram_bot.TelegramBot("123:abc")
+    bot.session = _FakeSession([{"ok": True, "result": {"message_id": 1}}])
+    bot.send_message(12345, "A" * 3995 + "<b>" + "B" * 100 + "</b>")
+    sent = bot.session.calls[0]["json"]["text"]
+    assert _telegram_html_parse_ok(sent), f"unbalanced tail: {sent[-40:]!r}"
+
+    # Cut lands inside the tag itself -> bare '<' (unsupported start tag).
+    bot.session = _FakeSession([{"ok": True, "result": {"message_id": 1}}])
+    bot.send_message(12345, "A" * 3999 + "<code>xyz</code>" + "A" * 100)
+    sent = bot.session.calls[0]["json"]["text"]
+    assert _telegram_html_parse_ok(sent), f"split tag around cut: {sent[3990:4010]!r}"
+
+
+def test_send_message_truncation_limit_and_marker():
+    """Pins the working parts of the truncation: the posted text stays under
+    Telegram's 4096-unit cap, ends with the (truncated) marker, and never
+    splits an astral pair (the char straddling the cut is dropped whole)."""
+    bot = telegram_bot.TelegramBot("123:abc")
+    bot.session = _FakeSession([{"ok": True, "result": {"message_id": 1}}])
+    bot.send_message(12345, "x" * 3999 + "🍜" * 10)  # astral char straddles unit 4000
+    sent = bot.session.calls[0]["json"]["text"]
+    assert _utf16_len(sent) <= 4096
+    assert sent.endswith("<i>(truncated)</i>")
+    # The surrogate-pair char at the boundary was dropped whole, not split.
+    assert sent[3998] == "x" and "🍜" not in sent
+
+    # At exactly 4000 units nothing is truncated.
+    bot.session = _FakeSession([{"ok": True, "result": {"message_id": 1}}])
+    bot.send_message(12345, "y" * 4000)
+    assert bot.session.calls[0]["json"]["text"] == "y" * 4000
+
+
+def test_nl_correction_invalid_index_reply_escapes_model_meal_index(mock_db, monkeypatch):
+    """Gemini controls meal_index; a hallucinated non-numeric value is echoed
+    back verbatim. '<b>2</b>' renders as bold (model-controlled formatting),
+    an unclosed '<b' 400s the send and the reply degrades to raw plain text."""
+    _stable_tz(monkeypatch)
+    _no_pause(monkeypatch)
+    monkeypatch.setattr(telegram_bot, "get_recent_meals", _wide_recent_meals)
+    today = database.user_local_now().date().isoformat()
+    database.save_meal(CHAT, today, "12:00", datetime.now().isoformat(), "t", "hx", "f",
+                       {"is_food": True, "meal_description": "Rice", "total_calories": 500})
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client({
+        "intent": "correction", "meal_index": "<b>2</b>",
+        "analysis": {"is_food": True, "meal_description": "Duck", "total_calories": 450},
+    }), bot, CHAT, "fix meal <b>2</b>")
+
+    reply = bot.sent[-1]["text"]
+    assert "Invalid meal index" in reply  # the branch under test actually ran
+    assert "<b>2</b>" not in reply
+    assert "&lt;b&gt;2&lt;/b&gt;" in reply
+
+
+def test_echo_meal_photo_caption_gate_exact_1024_boundary():
+    """Pins the caption/split decision at the exact Telegram limit: 1024
+    UTF-16 units ride as the caption, 1025 switch to captionless photo +
+    separate text message. Counted on the FULL string the caller passes."""
+    class EchoBot(FakeBot):
+        def __init__(self):
+            super().__init__()
+            self.photo_calls = []
+
+        def send_photo(self, chat_id, photo_bytes, caption="", parse_mode="HTML"):
+            self.photo_calls.append({"caption": caption})
+            return {"message_id": 1}
+
+    jpeg = _real_jpeg_bytes()
+
+    at_limit = "🍜" * 512  # astral: exactly 1024 units
+    assert _utf16_len(at_limit) == 1024
+    bot = EchoBot()
+    telegram_bot._echo_meal_photo(bot, 12345, jpeg, at_limit)
+    assert bot.photo_calls == [{"caption": at_limit}]
+    assert bot.sent == []
+
+    over_limit = at_limit + "!"  # 1025 units
+    bot = EchoBot()
+    telegram_bot._echo_meal_photo(bot, 12345, jpeg, over_limit)
+    assert bot.photo_calls == [{"caption": ""}]
+    assert bot.sent[-1]["text"] == over_limit
+
+
+def test_upload_echo_caption_gate_counts_auto_logged_prefix(mock_db, monkeypatch, tmp_path):
+    """The 1024 gate must be applied to the caption the user actually gets —
+    'Auto-Logged from <device>' prefix INCLUDED. A card that fits alone but
+    overflows with the prefix must go captionless + separate text (an off-by-
+    prefix here would hand Telegram an oversized caption to reject)."""
+    app, bot = _upload_app(monkeypatch, tmp_path, analysis="food")
+    prefix = "📲 <b>Auto-Logged from Phone:</b>\n\n"
+    prefix_units = _utf16_len(prefix)
+    card = "C" * (1024 - prefix_units + 1)  # fits alone, overflows with prefix
+    monkeypatch.setattr(telegram_bot, "format_food_result", lambda chat_id, analysis: card)
+
+    resp = app.test_client().post("/upload", headers={"X-API-Key": "test-upload-key"},
+                                  data=JPEG_MAGIC + b"\xe0meal-photo-bytes",
+                                  content_type="image/jpeg")
+    assert resp.status_code == 200
+
+    echoed = [m for m in bot.sent if m.get("photo_bytes")]
+    assert len(echoed) == 1
+    assert echoed[0]["text"] == ""  # captionless: prefix+card is 1025 units
+    texts = [m for m in bot.sent if not m.get("photo_bytes")]
+    assert texts[-1]["text"] == prefix + card
+
+    # One unit shorter and the whole prefixed card rides as the caption.
+    bot.sent.clear()
+    card_fits = "C" * (1024 - prefix_units)
+    monkeypatch.setattr(telegram_bot, "format_food_result", lambda chat_id, analysis: card_fits)
+    resp = app.test_client().post("/upload", headers={"X-API-Key": "test-upload-key"},
+                                  data=JPEG_MAGIC + b"\xe1other-photo-bytes",
+                                  content_type="image/jpeg")
+    assert resp.status_code == 200
+    echoed = [m for m in bot.sent if m.get("photo_bytes")]
+    assert len(echoed) == 1
+    assert echoed[0]["text"] == prefix + card_fits
+
+
+def test_upload_device_name_escaped_in_processing_and_caption(mock_db, monkeypatch, tmp_path):
+    """X-Device-Name is client-supplied text rendered in two HTML sends (the
+    'Received photo' notice and the Auto-Logged caption) — raw tags must not
+    survive into either."""
+    app, bot = _upload_app(monkeypatch, tmp_path, analysis="food")
+    resp = app.test_client().post(
+        "/upload",
+        headers={"X-API-Key": "test-upload-key",
+                 "X-Client-Platform": "android",
+                 "X-Device-Name": "<b>Pixel & Co</b>"},
+        data=JPEG_MAGIC + b"\xe0device-name-bytes",
+        content_type="image/jpeg",
+    )
+    assert resp.status_code == 200
+    all_texts = "\n".join(m["text"] for m in bot.sent)
+    assert "<b>Pixel & Co</b>" not in all_texts
+    assert "&lt;b&gt;Pixel &amp; Co&lt;/b&gt;" in all_texts
+    # Both send sites carried the escaped name.
+    assert any("Received photo from" in m["text"]
+               and "&lt;b&gt;Pixel &amp; Co&lt;/b&gt;" in m["text"] for m in bot.sent)
+    echoed = [m for m in bot.sent if m.get("photo_bytes")]
+    assert len(echoed) == 1
+    assert "Auto-Logged from &lt;b&gt;Pixel &amp; Co&lt;/b&gt;" in echoed[0]["text"]
+
+
+# ---- Kill-sequence model check of the poison-update state machine ----
+#
+# Replays main()'s exact per-update lifecycle (guard -> process -> clear,
+# batch confirmed only when a full pass survives to the next getUpdates)
+# against the REAL durable ledger, cutting the "process" at scripted kill
+# points. A kill is a BaseException: the loop's `except Exception` cannot
+# contain it, exactly like OOM/SIGKILL.
+
+class _KillSignal(BaseException):
+    pass
+
+
+class _PoisonLoopSim:
+    MAX_BOOTS = 30
+
+    def __init__(self, bot, batch, poison=()):
+        self.bot = bot
+        self.batch = list(batch)   # redelivered verbatim until confirmed
+        self.poison = set(poison)  # updates that always kill mid-process
+        self.processed = []
+        self.skipped = []          # poison skips (threshold crossed)
+        self.redelivered = []      # ring skips (already-processed redeliveries)
+        self.sightings = {}
+
+    def _attempts(self):
+        data = service_health.load(telegram_bot.SERVICE_HEALTH_PATH, warn=lambda m: None)
+        attempts = data.get("update_attempts", {})
+        if not isinstance(attempts, dict):
+            return {}
+        # Entries are {'n': count, 'at': timestamp}; unwrap to bare counts
+        # (legacy bare ints pass through).
+        return {k: (v.get("n", 0) if isinstance(v, dict) else v)
+                for k, v in attempts.items()}
+
+    def _processed_ring(self):
+        data = service_health.load(telegram_bot.SERVICE_HEALTH_PATH, warn=lambda m: None)
+        ring = data.get("processed_updates")
+        return set(ring) if isinstance(ring, list) else set()
+
+    def boot(self, kills=()):
+        """One process lifetime. kills: {(update_id, phase)} cut points, with
+        phase in pre_guard/post_guard/mid_process/pre_clear/post_clear."""
+        kills = set(kills)
+        try:
+            for uid in self.batch:
+                if (uid, "pre_guard") in kills:
+                    raise _KillSignal()
+                self.sightings[uid] = self.sightings.get(uid, 0) + 1
+                if telegram_bot._poison_update_should_skip(self.bot, uid):
+                    if str(uid) in self._processed_ring():
+                        # Redelivery of already-completed work: skipped
+                        # quietly, no attempt counted, no notice.
+                        self.redelivered.append(uid)
+                        continue
+                    # Cut-point invariant: a poison skip may only ever happen
+                    # above the documented fatal-attempt threshold.
+                    assert self._attempts().get(str(uid), 0) > telegram_bot.POISON_UPDATE_MAX_ATTEMPTS
+                    if uid not in self.skipped:
+                        # First skip comes after exactly MAX fatal attempts.
+                        assert self.sightings[uid] == telegram_bot.POISON_UPDATE_MAX_ATTEMPTS + 1
+                    self.skipped.append(uid)
+                    continue
+                if (uid, "post_guard") in kills:
+                    raise _KillSignal()
+                if uid in self.poison or (uid, "mid_process") in kills:
+                    raise _KillSignal()  # _process_update dies
+                self.processed.append(uid)
+                if (uid, "pre_clear") in kills:
+                    raise _KillSignal()
+                telegram_bot._poison_update_clear(uid)
+                if (uid, "post_clear") in kills:
+                    raise _KillSignal()
+        except _KillSignal:
+            self._invariants()
+            return "killed"      # offset never confirmed -> full redelivery
+        self._invariants()
+        self.batch = []          # next getUpdates confirms the offset
+        return "confirmed"
+
+    def run_to_confirmation(self, boot_kills=()):
+        script = list(boot_kills)
+        for n in range(self.MAX_BOOTS):
+            kills = script[n] if n < len(script) else ()
+            if self.boot(kills) == "confirmed":
+                return n + 1
+        raise AssertionError("batch never confirmed: the service is crash-looping")
+
+    def _invariants(self):
+        # The durable ledger stays bounded at every cut point.
+        assert len(self._attempts()) <= 20
+
+
+def _notices(bot):
+    return [m for m in bot.sent if "crashed me repeatedly" in m["text"]]
+
+
+_MAX = telegram_bot.POISON_UPDATE_MAX_ATTEMPTS
+
+
+@pytest.mark.parametrize("name,batch,poison,boot_kills,expect", [
+    # Two unrelated kills while a healthy update is in flight: still below
+    # the threshold, so the third boot processes it and clears the count.
+    ("healthy_survives_kills_below_threshold",
+     [101], (), [{(101, "post_guard")}, {(101, "mid_process")}],
+     {"boots": 3, "processed": [101], "skipped": [], "notices": 0,
+      "final_keys": set()}),
+    # Documented tradeoff pinned: the guard counts sightings, so an update
+    # repeatedly killed in the tiny post-process/pre-clear window is
+    # declared poison after MAX fatal-looking attempts (fail-safe beats a
+    # crash loop; the update's side effects DID complete each time).
+    ("kill_in_clear_window_hits_threshold_by_design",
+     [102], (), [{(102, "pre_clear")}] * _MAX,
+     {"boots": _MAX + 1, "processed": [102] * _MAX, "skipped": [102],
+      "notices": 1, "final_keys": {"102"}}),
+    # Kills AFTER the clear no longer re-run side effects: the durable
+    # processed ring recognizes the redelivery, skips it quietly (no
+    # attempt counted, no notice), and the batch confirms immediately.
+    ("post_clear_kills_never_accumulate",
+     [103], (), [{(103, "post_clear")}] * 5,
+     {"boots": 2, "processed": [103], "skipped": [], "notices": 0,
+      "final_keys": set(), "redelivered": [103]}),
+    # The 2026-07-16 incident shape: a lone poison update crash-loops MAX
+    # times, is skipped on the next delivery, and the user is told once.
+    ("poison_alone_skipped_after_max_attempts",
+     [201], {201}, [],
+     {"boots": _MAX + 1, "processed": [], "skipped": [201], "notices": 1,
+      "final_keys": {"201"}}),
+    # Healthy batch-mate BEFORE the poison: processed exactly once; its
+    # redeliveries during the poison crash loop are ring-skipped (the old
+    # at-least-once duplication is gone), never falsely declared poison.
+    ("healthy_then_poison",
+     [301, 302], {302}, [],
+     {"boots": _MAX + 1, "processed": [301], "skipped": [302],
+      "notices": 1, "final_keys": {"302"}, "redelivered": [301] * _MAX}),
+    # Healthy batch-mate AFTER the poison: starved during the crash loop,
+    # then processed exactly once as soon as the poison is skipped.
+    ("poison_then_healthy",
+     [401, 402], {401}, [],
+     {"boots": _MAX + 1, "processed": [402], "skipped": [401], "notices": 1,
+      "final_keys": {"401"}}),
+    # Two poisons in one batch resolve sequentially, one notice each.
+    ("two_poisons_resolve_sequentially",
+     [501, 502], {501, 502}, [],
+     {"boots": 2 * (_MAX + 1) - 1, "processed": [],
+      "skipped": [501] * (_MAX + 1) + [502], "notices": 2,
+      "final_keys": {"501", "502"}}),
+])
+def test_poison_kill_sequences(monkeypatch, tmp_path, name, batch, poison, boot_kills, expect):
+    _poison_setup(monkeypatch, tmp_path)
+    bot = FakeBot()
+    sim = _PoisonLoopSim(bot, batch, poison)
+
+    boots = sim.run_to_confirmation(boot_kills)
+
+    assert boots == expect["boots"]
+    assert sim.processed == expect["processed"]
+    assert sim.redelivered == expect.get("redelivered", [])
+    assert sorted(sim.skipped) == sorted(expect["skipped"])
+    # No update outside the expected set is ever skipped (healthy updates
+    # survive every scripted kill sequence).
+    assert set(sim.skipped) <= set(expect["skipped"])
+    assert len(_notices(bot)) == expect["notices"]
+    assert set(sim._attempts()) == expect["final_keys"]
+
+
+def test_poison_kill_sequences_batch_survives_full_cycle_after_resolution(monkeypatch, tmp_path):
+    """After a poison update is skipped and its batch confirmed, the NEXT
+    batch starts from a clean slate: fresh healthy updates process normally
+    and the stale poison entry alone remains in the bounded ledger."""
+    _poison_setup(monkeypatch, tmp_path)
+    bot = FakeBot()
+    sim = _PoisonLoopSim(bot, [601, 602], {601})
+    sim.run_to_confirmation()
+
+    follow_up = _PoisonLoopSim(bot, [603, 604])
+    follow_up.run_to_confirmation()
+    assert follow_up.processed == [603, 604]
+    assert follow_up.skipped == []
+    assert set(follow_up._attempts()) == {"601"}
+    assert len(_notices(bot)) == 1
+
+
+def test_poison_ledger_survives_update_id_reset(monkeypatch, tmp_path):
+    _poison_setup(monkeypatch, tmp_path)
+    bot = FakeBot()
+    # 20 stale entries from the pre-reset era (e.g. old skipped poisons),
+    # in the legacy bare-int format the recency pruner must tolerate.
+    service_health.save(
+        {"update_attempts": {str(900000000 + i): 4 for i in range(20)}},
+        tmp_path / "health.json")
+
+    # Post-reset ids restart small; this update kills the process on every
+    # delivery, so its count must eventually cross the threshold.
+    results = [telegram_bot._poison_update_should_skip(bot, 7) for _ in range(10)]
+    assert any(results)
+
+
+def test_redelivered_processed_update_is_skipped_quietly(monkeypatch, tmp_path):
+    """should_skip -> clear -> should_skip(same id): the durable processed
+    ring recognizes the redelivery (a kill landed after the clear but before
+    the offset was confirmed), skips it without counting an attempt, and
+    sends the user nothing."""
+    _poison_setup(monkeypatch, tmp_path)
+    bot = FakeBot()
+    assert telegram_bot._poison_update_should_skip(bot, 4242) is False
+    telegram_bot._poison_update_clear(4242)
+
+    assert telegram_bot._poison_update_should_skip(bot, 4242) is True
+    data = service_health.load(tmp_path / "health.json")
+    assert "4242" not in (data.get("update_attempts") or {})  # attempts untouched
+    assert "4242" in data["processed_updates"]
+    assert bot.sent == []                                     # no poison notice
+
+
+def test_processed_update_ring_prunes_to_newest_256(monkeypatch, tmp_path):
+    _poison_setup(monkeypatch, tmp_path)
+    for update_id in range(1000, 1300):
+        telegram_bot._poison_update_clear(update_id)
+    ring = service_health.load(tmp_path / "health.json")["processed_updates"]
+    assert len(ring) == 256
+    assert "1299" in ring and "1000" not in ring
+
+
+def test_clean_shutdown_stamp_consumed_exactly_once(monkeypatch, tmp_path):
+    """The stamp excuses exactly ONE boot: the boot that follows it consumes
+    it, and the next boot without a fresh stamp counts as a crash."""
+    _poison_setup(monkeypatch, tmp_path)
+    bot = FakeBot()
+    health = tmp_path / "health.json"
+
+    telegram_bot._record_clean_shutdown()
+    assert "last_clean_shutdown" in service_health.load(health)
+
+    telegram_bot._record_boot_and_maybe_alert(bot)  # boot 1: clean restart
+    data = service_health.load(health)
+    assert "last_clean_shutdown" not in data        # consumed
+    assert data["recent_crash_boots"] == []
+
+    telegram_bot._record_boot_and_maybe_alert(bot)  # boot 2: no stamp -> crash
+    assert len(service_health.load(health)["recent_crash_boots"]) == 1
+    assert bot.sent == []                           # 1 crash boot: no alert yet
+
+
+def test_poison_guard_fails_open_when_disk_is_full(monkeypatch, tmp_path):
+    """ENOSPC persisting the attempt count must never raise into the poll
+    loop and must fail OPEN (process, don't skip): a full disk may cost the
+    crash-loop protection, but it must not take the bot down."""
+    import pathlib
+    _poison_setup(monkeypatch, tmp_path)
+    bot = FakeBot()
+
+    def _enospc(self, *a, **k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(pathlib.Path, "write_text", _enospc)
+    for _ in range(telegram_bot.POISON_UPDATE_MAX_ATTEMPTS + 3):
+        assert telegram_bot._poison_update_should_skip(bot, 888) is False
+    telegram_bot._poison_update_clear(888)  # must not raise either
+    assert bot.sent == []
+
+
+def test_crash_boot_tripwire_sees_boot_sweep_crashes(monkeypatch, tmp_path):
+    _poison_setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(telegram_bot, "BOT_TOKEN", "t")
+    monkeypatch.setattr(telegram_bot, "GEMINI_API_KEY", "g")
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "k")
+    monkeypatch.setattr(telegram_bot, "TelegramBot", lambda token: FakeBot())
+    monkeypatch.setattr(telegram_bot, "genai", SimpleNamespace(Client=lambda api_key: object()))
+    monkeypatch.setattr(telegram_bot.signal, "signal", lambda *a, **k: None)
+
+    def _sweep_crash(bot):
+        raise RuntimeError("boot sweep crash")
+
+    monkeypatch.setattr(telegram_bot, "_sweep_stranded_pending_uploads", _sweep_crash)
+
+    for _ in range(3):  # systemd Restart=always: rapid crash-boot loop
+        with pytest.raises(RuntimeError):
+            telegram_bot.main()
+
+    boots = service_health.load(tmp_path / "health.json").get("recent_crash_boots") or []
+    assert len(boots) == 3  # the tripwire must see boot-time crash loops
+
+
+# ─── Outbound-call hang hardening (hunter 6) ──────────────────────────
+
+def test_gemini_hanging_call_cannot_block_past_the_deadline(monkeypatch):
+    """google-genai 0.3.0 sends every Gemini HTTP request with NO socket
+    timeout, and handle_text_message runs on the MAIN polling thread — a
+    black-holed connection used to freeze the whole bot forever (systemd
+    Restart=always never fires because the process stays alive). The
+    deadline wrapper must abandon a hanging generate_content and raise a
+    retryable timeout error instead."""
+    import threading as real_threading
+    import time as real_time
+
+    monkeypatch.setattr(telegram_bot, "GEMINI_HTTP_DEADLINE_SECONDS", 1)
+    release = real_threading.Event()
+
+    class HangingModels:
+        def generate_content(self, **kwargs):
+            release.wait()  # a black-holed socket: never returns on its own
+            return SimpleNamespace(text="{}")
+
+    client = SimpleNamespace(models=HangingModels())
+    start = real_time.monotonic()
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            telegram_bot._generate_content_with_deadline(
+                client, model="m", contents=["x"])
+        elapsed = real_time.monotonic() - start
+    finally:
+        release.set()  # unstick the abandoned daemon worker for a clean exit
+
+    assert elapsed < 5, f"caller was blocked {elapsed:.1f}s past a 1s deadline"
+    assert "timeout" in str(excinfo.value).lower()
+    # The existing retry machinery must see this as retryable network trouble.
+    assert telegram_bot._classify_gemini_error(excinfo.value) == "network_service"
+
+
+def test_every_generate_content_call_routes_through_the_deadline_wrapper():
+    """No call site may bypass the deadline: any bare client.models
+    .generate_content outside the wrapper would reintroduce the unbounded
+    hang on that path."""
+    import ast
+    import inspect
+
+    source = inspect.getsource(telegram_bot)
+    tree = ast.parse(source)
+    wrapper_lines = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_generate_content_with_deadline":
+            wrapper_lines = set(range(node.lineno, node.end_lineno + 1))
+    assert wrapper_lines, "expected the _generate_content_with_deadline wrapper to exist"
+    offenders = [
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute) and node.func.attr == "generate_content"
+        and node.lineno not in wrapper_lines
+    ]
+    assert offenders == [], f"generate_content called outside the deadline wrapper at lines {offenders}"
+
+
+def test_get_updates_timeout_takes_the_quiet_branch(monkeypatch):
+    import requests
+
+    bot = telegram_bot.TelegramBot("test-token")
+
+    def raise_timeout(*args, **kwargs):
+        raise requests.exceptions.ConnectTimeout("connect timed out")
+
+    monkeypatch.setattr(bot.session, "post", raise_timeout)
+    slept = []
+    monkeypatch.setattr(telegram_bot.time, "sleep", lambda s: slept.append(s))
+
+    assert bot.get_updates(timeout=1) == []
+    assert slept == []  # the quiet-timeout branch, not the 5s penalty path
+
+
+def test_get_updates_contains_network_errors_without_advancing_offset(monkeypatch):
+    """Pins today's containment: a hard network error returns [] (after the
+    fixed 5s backoff sleep), never raises, and never advances the long-poll
+    offset — so the failed batch is re-polled, not silently skipped."""
+    import requests
+
+    bot = telegram_bot.TelegramBot("test-token")
+    bot.offset = 41
+
+    def raise_err(*args, **kwargs):
+        raise requests.exceptions.ConnectionError("network down")
+
+    monkeypatch.setattr(bot.session, "post", raise_err)
+    slept = []
+    monkeypatch.setattr(telegram_bot.time, "sleep", lambda s: slept.append(s))
+
+    assert bot.get_updates() == []
+    assert bot.offset == 41
+    assert slept == [5]  # fixed 5s today — no exponential backoff (see hunter 6 proposal)
+
+
+# ─── Telegram update-shape fuzzing: _process_update / handle_callback_query (hunter 3) ───
+
+
+class ShapeBot(FakeBot):
+    """FakeBot + per-file_id photo bytes so distinct fuzz photos hash apart."""
+
+    def get_file(self, file_id):
+        return ("shape-bytes-" + str(file_id)).encode()
+
+    def _redact(self, value):
+        return str(value)
+
+
+def _shape_setup(monkeypatch, tmp_path):
+    """Route every _process_update side effect at test doubles.
+
+    Returns the list that records (chat_id, text) calls into the (stubbed)
+    NL text handler, so tests can assert what did/didn't reach it.
+    """
+    text_calls = []
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(database, "get_android_timezone", lambda *a, **k: "+0800")
+    monkeypatch.setattr(telegram_bot, "threading", SimpleNamespace(Thread=ImmediateThread))
+    monkeypatch.setattr(
+        telegram_bot, "analyze_food_photo",
+        lambda client, image_bytes: {"is_food": True, "meal_description": "Shape meal",
+                                     "total_calories": 111},
+    )
+    monkeypatch.setattr(
+        telegram_bot, "handle_text_message_safe",
+        lambda gemini_client, bot, chat_id, text: text_calls.append((chat_id, text)),
+    )
+    # Fresh per-test dict (auto-restored) so stashed pendings never leak
+    # into other tests via the module global.
+    monkeypatch.setattr(telegram_bot, "_pending_nl_deletes", {})
+    return text_calls
+
+
+@pytest.mark.parametrize("update", [
+    {"update_id": 1, "edited_message": {"chat": {"id": 12345}, "text": "edited food text"}},
+    {"update_id": 2, "channel_post": {"chat": {"id": -1001}, "text": "post"}},
+    {"update_id": 3, "my_chat_member": {"chat": {"id": 12345}}},
+    {"update_id": 4, "message_reaction": {"chat": {"id": 12345}}},
+    {},
+], ids=["edited_message", "channel_post", "my_chat_member", "message_reaction", "empty-update"])
+def test_process_update_ignores_non_message_update_kinds(monkeypatch, tmp_path, update):
+    """Design pin: updates carrying no message/callback_query are silently
+    ignored — including edited_message, so editing a food text does NOT
+    re-process it (design note, not a crash)."""
+    text_calls = _shape_setup(monkeypatch, tmp_path)
+    bot = ShapeBot()
+    telegram_bot._process_update(object(), bot, update)
+    assert bot.sent == [] and bot.answered == [] and text_calls == []
+
+
+def test_process_update_string_chat_id_is_unauthorized_and_inert(monkeypatch, tmp_path):
+    """chat.id "12345" (str) != 12345 (int) fails closed: refused with the
+    not-authorized reply, the text never reaches the NL handler, and the
+    attached photo is never downloaded (FakeBot has no get_file, so touching
+    the photo path would raise)."""
+    text_calls = _shape_setup(monkeypatch, tmp_path)
+    bot = FakeBot()
+    telegram_bot._process_update(object(), bot, {
+        "update_id": 7,
+        "message": {"chat": {"id": "12345"}, "from": {"first_name": "Stringy"},
+                    "text": "hi", "photo": [{"file_id": "px-1"}]},
+    })
+    assert len(bot.sent) == 1 and "not authorized" in bot.sent[0]["text"]
+    assert text_calls == []
+
+
+@pytest.mark.parametrize("payload", [
+    {"sticker": {"file_id": "s1"}},
+    {"voice": {"file_id": "v1", "duration": 2}},
+    {"video_note": {"file_id": "vn1"}},
+    {"location": {"latitude": 1.0, "longitude": 2.0}},
+    {"contact": {"phone_number": "+15550100", "first_name": "A"}},
+    {"poll": {"id": "p1", "question": "lunch?"}},
+    {"entities": [{"type": "bold", "offset": 0, "length": 2}]},
+    {"document": {"file_id": "d1"}},
+    {"document": {"file_id": "d2", "mime_type": "application/pdf"}},
+    {"photo": []},
+], ids=["sticker", "voice", "video_note", "location", "contact", "poll",
+        "entities-no-text", "document-no-mime", "document-non-image", "photo-empty-list"])
+def test_process_update_silently_ignores_non_text_non_image_messages(monkeypatch, tmp_path, payload):
+    """Every content type the bot doesn't handle is explicitly ignored: no
+    reply, no NL call, no raise. Includes document without mime_type and an
+    empty photo array (neither counts as an image)."""
+    text_calls = _shape_setup(monkeypatch, tmp_path)
+    bot = ShapeBot()
+    message = {"chat": {"id": 12345}, "from": {"first_name": "U"}}
+    message.update(payload)
+    telegram_bot._process_update(object(), bot, {"update_id": 10, "message": message})
+    assert bot.sent == [] and text_calls == []
+
+
+def test_photo_caption_is_silently_dropped_design_pin(mock_db, monkeypatch, tmp_path):
+    """DESIGN NOTE (pin): a photo's caption is ignored end-to-end. Users
+    naturally caption food photos ("half portion, no rice"); today the photo
+    is analyzed WITHOUT that context, the caption never reaches the NL text
+    handler, and nothing echoes it back. If captions ever get wired in,
+    this pin should be updated deliberately."""
+    text_calls = _shape_setup(monkeypatch, tmp_path)
+    bot = ShapeBot()
+    telegram_bot._process_update(object(), bot, {
+        "update_id": 16,
+        "message": {"chat": {"id": 12345}, "from": {"first_name": "U"},
+                    "photo": [{"file_id": "cap-1"}],
+                    "caption": "half portion, no rice"},
+    })
+    assert len(_wide_recent_meals(12345)) == 1   # the photo itself was processed
+    assert text_calls == []                       # caption never reached the NL handler
+    assert all("half portion" not in m["text"] for m in bot.sent)
+
+
+def test_photo_caption_cannot_execute_commands(mock_db, monkeypatch, tmp_path):
+    """Security-relevant corollary of the caption drop: a caption that LOOKS
+    like a command ("/clear_failed latest confirm") is not dispatched as one —
+    the message is handled purely as a photo."""
+    text_calls = _shape_setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(telegram_bot, "clear_failed_uploads",
+                        lambda *a, **k: pytest.fail("caption must not reach command dispatch"))
+    bot = ShapeBot()
+    telegram_bot._process_update(object(), bot, {
+        "update_id": 25,
+        "message": {"chat": {"id": 12345},
+                    "photo": [{"file_id": "cap-cmd"}],
+                    "caption": "/clear_failed latest confirm"},
+    })
+    assert len(_wide_recent_meals(12345)) == 1
+    assert text_calls == []
+
+
+def test_photo_wins_over_text_when_both_present(mock_db, monkeypatch, tmp_path):
+    """The real API never sends text and photo together, but pin dispatch
+    precedence anyway: the photo is processed and the text is dropped."""
+    text_calls = _shape_setup(monkeypatch, tmp_path)
+    bot = ShapeBot()
+    telegram_bot._process_update(object(), bot, {
+        "update_id": 15,
+        "message": {"chat": {"id": 12345}, "photo": [{"file_id": "both-1"}],
+                    "text": "I also typed this"},
+    })
+    assert len(_wide_recent_meals(12345)) == 1
+    assert text_calls == []
+
+
+@pytest.mark.parametrize("message", [
+    pytest.param({"text": "hi"}, id="chat-missing"),
+    pytest.param({"chat": None, "text": "hi"}, id="chat-none"),
+    pytest.param({"chat": {"id": 12345}, "text": None}, id="text-none"),
+    pytest.param({"chat": {"id": 12345}, "text": 42}, id="text-int"),
+])
+def test_process_update_tolerates_malformed_chat_and_text_fields(monkeypatch, tmp_path, message):
+    _shape_setup(monkeypatch, tmp_path)
+    bot = ShapeBot()
+    # Contract: structurally invalid messages should be IGNORED, not raised.
+    telegram_bot._process_update(object(), bot, {"update_id": 90, "message": message})
+
+
+@pytest.mark.parametrize("payload", [
+    pytest.param({"photo": {"file_id": "not-a-list"}}, id="photo-dict-not-list"),
+    pytest.param({"photo": [{}]}, id="photo-entry-missing-file_id"),
+])
+def test_malformed_photo_fields_reach_photo_error_containment(mock_db, monkeypatch, tmp_path, payload):
+    _shape_setup(monkeypatch, tmp_path)
+    bot = ShapeBot()
+    message = {"chat": {"id": 12345}}
+    message.update(payload)
+    # Contract: either explicitly ignored or answered — never a raise.
+    telegram_bot._process_update(object(), bot, {"update_id": 91, "message": message})
+
+
+def test_callback_query_with_null_data_is_answered(monkeypatch, tmp_path):
+    _shape_setup(monkeypatch, tmp_path)
+    bot = ShapeBot()
+    telegram_bot.handle_callback_query(object(), bot, {
+        "id": "cb-null", "data": None, "message": {"chat": {"id": 12345}}})
+    assert bot.answered  # post-fix expectation: answered (e.g. "Unknown action.")
+
+
+def test_callback_unauthorized_answers_but_never_executes(mock_db, monkeypatch, tmp_path):
+    """A callback from a non-allowed presser (no message context, from.id
+    unauthorized) is answered 'Not authorized.' and must not delete meals,
+    consume the pending confirmation, send chat messages, or run
+    clear_failed_uploads — even with a VALID confirm token."""
+    _shape_setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(telegram_bot, "clear_failed_uploads",
+                        lambda *a, **k: pytest.fail("unauthorized callback must not clear uploads"))
+    today = database.user_local_now().date().isoformat()
+    database.save_meal(12345, today, "12:00", datetime.now().isoformat(), "t", "h-auth", "f-auth",
+                       {"is_food": True, "meal_description": "Guarded meal", "total_calories": 100})
+    meal_id = _wide_recent_meals(12345)[0]["id"]
+    telegram_bot._pending_nl_deletes[12345] = {
+        "ids": [meal_id], "labels": ["Guarded meal"], "at": datetime.now(), "token": "tok-auth1"}
+
+    bot = ShapeBot()
+    for data in ("nl_delete_confirm:tok-auth1", "quota_discard:latest", "nl_delete_cancel:tok-auth1"):
+        handled = telegram_bot.handle_callback_query(object(), bot, {
+            "id": "cb-%s" % data.split(":", 1)[0], "data": data, "from": {"id": 666}})
+        assert handled is True
+
+    assert [text for _, text in bot.answered] == ["Not authorized."] * 3
+    assert bot.sent == []
+    assert len(_wide_recent_meals(12345)) == 1
+    assert telegram_bot._pending_nl_deletes[12345]["token"] == "tok-auth1"
+
+
+@pytest.mark.parametrize("data", [
+    "nl_delete_confirm", "nl_delete_confirm:", "nl_delete_cancel", "nl_delete_cancel:",
+    "nl_delete_confirm:wrong-token", ":", "bogus:stuff", "x" * 100000,
+    "nl_delete_confirm:中文\U0001f35c",
+], ids=["confirm-no-colon", "confirm-empty-token", "cancel-no-colon", "cancel-empty-token",
+        "confirm-wrong-token", "colon-only", "wrong-prefix", "huge-data", "unicode-token"])
+def test_callback_garbage_data_never_deletes_or_raises(mock_db, monkeypatch, tmp_path, data):
+    """With a live pending delete, every garbage callback data shape is
+    answered without deleting anything and without consuming the pending
+    confirmation (its own real buttons must keep working)."""
+    _shape_setup(monkeypatch, tmp_path)
+    today = database.user_local_now().date().isoformat()
+    database.save_meal(12345, today, "12:00", datetime.now().isoformat(), "t", "h-garb", "f-garb",
+                       {"is_food": True, "meal_description": "Sturdy meal", "total_calories": 100})
+    meal_id = _wide_recent_meals(12345)[0]["id"]
+    telegram_bot._pending_nl_deletes[12345] = {
+        "ids": [meal_id], "labels": ["Sturdy meal"], "at": datetime.now(), "token": "tokgarb1"}
+
+    bot = ShapeBot()
+    handled = telegram_bot.handle_callback_query(object(), bot, {
+        "id": "cb-garbage", "data": data, "message": {"chat": {"id": 12345}}})
+
+    assert isinstance(handled, bool)
+    assert len(bot.answered) == 1  # always acknowledged, spinner never hangs
+    assert len(_wide_recent_meals(12345)) == 1
+    assert telegram_bot._pending_nl_deletes[12345]["token"] == "tokgarb1"
+
+
+def test_replayed_confirm_token_cannot_double_delete(mock_db, monkeypatch, tmp_path):
+    """Pressing the same Delete button twice deletes once: the second press
+    finds no pending confirmation and answers 'Nothing to delete.'"""
+    _shape_setup(monkeypatch, tmp_path)
+    today = database.user_local_now().date().isoformat()
+    now_iso = datetime.now().isoformat()
+    database.save_meal(12345, today, "12:00", now_iso, "t", "h-r1", "f-r1",
+                       {"is_food": True, "meal_description": "Doomed meal", "total_calories": 100})
+    database.save_meal(12345, today, "13:00", now_iso, "t", "h-r2", "f-r2",
+                       {"is_food": True, "meal_description": "Safe meal", "total_calories": 200})
+    doomed = next(m for m in _wide_recent_meals(12345)
+                  if m["analysis"]["meal_description"] == "Doomed meal")
+    telegram_bot._pending_nl_deletes[12345] = {
+        "ids": [doomed["id"]], "labels": ["Doomed meal"], "at": datetime.now(), "token": "tok-replay1"}
+    cb = {"id": "cb-replay", "data": "nl_delete_confirm:tok-replay1",
+          "message": {"chat": {"id": 12345}}}
+
+    bot = ShapeBot()
+    telegram_bot.handle_callback_query(object(), bot, cb)
+    assert [m["analysis"]["meal_description"] for m in _wide_recent_meals(12345)] == ["Safe meal"]
+
+    telegram_bot.handle_callback_query(object(), bot, dict(cb))  # replay
+    assert bot.answered[-1][1] == "Nothing to delete."
+    assert [m["analysis"]["meal_description"] for m in _wide_recent_meals(12345)] == ["Safe meal"]
+
+
+def test_stale_buttons_cannot_fire_or_cancel_newer_pending(mock_db, monkeypatch, tmp_path):
+    """Buttons from an older confirmation (stale token) neither execute nor
+    discard the newer pending set; only the matching token cancels it."""
+    _shape_setup(monkeypatch, tmp_path)
+    today = database.user_local_now().date().isoformat()
+    database.save_meal(12345, today, "12:00", datetime.now().isoformat(), "t", "h-s1", "f-s1",
+                       {"is_food": True, "meal_description": "Kept meal", "total_calories": 100})
+    meal_id = _wide_recent_meals(12345)[0]["id"]
+    telegram_bot._pending_nl_deletes[12345] = {
+        "ids": [meal_id], "labels": ["Kept meal"], "at": datetime.now(), "token": "new-tok-1"}
+    bot = ShapeBot()
+
+    telegram_bot.handle_callback_query(object(), bot, {
+        "id": "cb-old-c", "data": "nl_delete_confirm:old-tok-0",
+        "message": {"chat": {"id": 12345}}})
+    assert "superseded" in bot.answered[-1][1]
+    assert len(_wide_recent_meals(12345)) == 1
+    assert telegram_bot._pending_nl_deletes[12345]["token"] == "new-tok-1"
+
+    telegram_bot.handle_callback_query(object(), bot, {
+        "id": "cb-old-x", "data": "nl_delete_cancel:old-tok-0",
+        "message": {"chat": {"id": 12345}}})
+    assert telegram_bot._pending_nl_deletes[12345]["token"] == "new-tok-1"
+
+    telegram_bot.handle_callback_query(object(), bot, {
+        "id": "cb-new-x", "data": "nl_delete_cancel:new-tok-1",
+        "message": {"chat": {"id": 12345}}})
+    assert 12345 not in telegram_bot._pending_nl_deletes
+    assert len(_wide_recent_meals(12345)) == 1
+
+
+def test_expired_confirm_is_discarded_without_deleting(mock_db, monkeypatch, tmp_path):
+    """A confirm pressed after the TTL (even with the CORRECT token) deletes
+    nothing and drops the pending set."""
+    _shape_setup(monkeypatch, tmp_path)
+    today = database.user_local_now().date().isoformat()
+    database.save_meal(12345, today, "12:00", datetime.now().isoformat(), "t", "h-e1", "f-e1",
+                       {"is_food": True, "meal_description": "Aged meal", "total_calories": 100})
+    meal_id = _wide_recent_meals(12345)[0]["id"]
+    stale_at = datetime.now() - timedelta(seconds=telegram_bot.NL_DELETE_CONFIRM_TTL_SECONDS + 1)
+    telegram_bot._pending_nl_deletes[12345] = {
+        "ids": [meal_id], "labels": ["Aged meal"], "at": stale_at, "token": "tok-exp1"}
+
+    bot = ShapeBot()
+    telegram_bot.handle_callback_query(object(), bot, {
+        "id": "cb-exp", "data": "nl_delete_confirm:tok-exp1",
+        "message": {"chat": {"id": 12345}}})
+
+    assert len(_wide_recent_meals(12345)) == 1
+    assert 12345 not in telegram_bot._pending_nl_deletes
+    assert any("expired" in m["text"] for m in bot.sent)
+
+
+def _build_shape_corpus(seed, n):
+    """Deterministic fuzz corpus over realistic Telegram update shapes.
+
+    Replay a failure with: update, meta = _build_shape_corpus(seed, n)[i]
+    (seed, n, and i are printed in the assertion message).
+    Returns (update_dict, meta) pairs; meta drives the invariant checks.
+    """
+    import random
+    rng = random.Random(seed)
+    allowed, outsider = 12345, 999999
+    texts = ["hello", "ate rice 好吃 \U0001f35a", "   x   ", "/", "/nonexistent",
+             "/today", "/recent abc", "a" * 4096, "\u200b\u202enoodles", "42"]
+    file_ids = ["fz-%d" % k for k in range(6)]
+    cb_data = ["quota_keep:latest", "quota_discard:latest", "nl_delete_confirm:deadbeef",
+               "nl_delete_cancel:deadbeef", "nl_delete_confirm:", "nl_delete_confirm",
+               "bogus", "y" * 4096, "nl_delete_confirm:中文\U0001f35c", ""]
+    kinds = ["text", "photo", "photo_caption", "document_image", "document_other",
+             "sticker", "voice", "location", "contact", "poll", "entities",
+             "edited_message", "channel_post", "my_chat_member", "message_reaction",
+             "callback"]
+    corpus = []
+    for i in range(n):
+        chat_id = allowed if rng.random() < 0.7 else outsider
+        kind = rng.choice(kinds)
+        update = {}
+        if rng.random() < 0.9:
+            update["update_id"] = 100000 + i
+        meta = {"kind": kind, "authorized": chat_id == allowed,
+                "is_callback": False, "is_message": False, "photo_bearing": False}
+        if kind == "callback":
+            cb = {"id": "cb-%d" % i, "data": rng.choice(cb_data)}
+            if rng.random() < 0.5:
+                cb["message"] = {"chat": {"id": chat_id}}
+            else:
+                cb["from"] = {"id": chat_id}
+            update["callback_query"] = cb
+            meta["is_callback"] = True
+        elif kind in ("edited_message", "channel_post", "my_chat_member", "message_reaction"):
+            update[kind] = {"chat": {"id": chat_id}, "text": rng.choice(texts)}
+        else:
+            message = {"chat": {"id": chat_id}}
+            if rng.random() < 0.8:
+                message["from"] = {"id": chat_id, "first_name": "Fuzz"}
+            if rng.random() < 0.2:
+                message["forward_origin"] = {"type": "user"}
+            if kind == "text":
+                message["text"] = rng.choice(texts)
+            elif kind in ("photo", "photo_caption"):
+                message["photo"] = [{"file_id": rng.choice(file_ids),
+                                     "width": 90 * (j + 1), "height": 90 * (j + 1)}
+                                    for j in range(rng.randint(1, 3))]
+                if kind == "photo_caption":
+                    message["caption"] = rng.choice(texts)
+                meta["photo_bearing"] = True
+            elif kind == "document_image":
+                message["document"] = {"file_id": rng.choice(file_ids), "mime_type": "image/jpeg"}
+                meta["photo_bearing"] = True
+            elif kind == "document_other":
+                message["document"] = {"file_id": rng.choice(file_ids),
+                                       "mime_type": rng.choice(["application/pdf", ""])}
+            elif kind == "sticker":
+                message["sticker"] = {"file_id": "st-%d" % i}
+            elif kind == "voice":
+                message["voice"] = {"file_id": "vc-%d" % i, "duration": 3}
+            elif kind == "location":
+                message["location"] = {"latitude": 1.5, "longitude": 2.5}
+            elif kind == "contact":
+                message["contact"] = {"phone_number": "+15550100"}
+            elif kind == "poll":
+                message["poll"] = {"id": "p-%d" % i, "question": "lunch?"}
+            elif kind == "entities":
+                message["entities"] = [{"type": "bold", "offset": 0, "length": 2}]
+            update["message"] = message
+            meta["is_message"] = True
+        corpus.append((update, meta))
+    return corpus
+
+
+def test_update_shape_fuzz_realistic_shapes_hold_invariants(mock_db, monkeypatch, tmp_path):
+    """Seeded fuzz over realistic Telegram update shapes. Invariants:
+    (1) _process_update never raises for shapes the real API can send;
+    (2) an unauthorized chat gets exactly the not-authorized reply and its
+        text/photos never reach the NL handler or the database;
+    (3) every authorized photo-bearing message produces at least one reply
+        (processed, duplicate notice, or already-logged notice);
+    (4) every callback query is answered exactly once;
+    (5) non-message update kinds are complete no-ops."""
+    seed, n = 20260716, 250
+    text_calls = _shape_setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(telegram_bot, "clear_failed_uploads",
+                        lambda selector, confirmed=False: "cleared (fuzz stub)")
+    corpus = _build_shape_corpus(seed, n)
+    for i, (update, meta) in enumerate(corpus):
+        bot = ShapeBot()
+        calls_before = len(text_calls)
+        try:
+            telegram_bot._process_update(object(), bot, update)
+        except Exception as e:
+            pytest.fail("update-shape fuzz raised %r; replay with "
+                        "_build_shape_corpus(%d, %d)[%d]; update=%r" % (e, seed, n, i, update))
+        context = (seed, i, update)
+        if meta["is_callback"]:
+            assert len(bot.answered) == 1, context
+        elif not meta["is_message"]:
+            assert bot.sent == [] and bot.answered == [], context
+            assert len(text_calls) == calls_before, context
+        elif not meta["authorized"]:
+            assert len(bot.sent) == 1 and "not authorized" in bot.sent[0]["text"], context
+            assert len(text_calls) == calls_before, context
+        elif meta["photo_bearing"]:
+            assert bot.sent, context
+    assert _wide_recent_meals(999999) == []          # outsider never wrote a meal
+    assert all(chat == 12345 for chat, _ in text_calls)
+
+
+def test_poison_ledger_helpers_tolerate_missing_update_id(monkeypatch, tmp_path):
+    """An update without update_id is processed normally: the poison guard
+    passes it through and the post-survival clear is a no-op, not a crash."""
+    _poison_setup(monkeypatch, tmp_path)
+    bot = FakeBot()
+    assert telegram_bot._poison_update_should_skip(bot, None) is False
+    telegram_bot._poison_update_clear(None)
+    assert service_health.load(tmp_path / "health.json").get("update_attempts") in (None, {})
+    assert bot.sent == []
+
+
+# ═══ Hunter 2: adversarial NL-pipeline fuzzing ══════════════════════
+# Seeded random corpus of malformed Gemini responses driven through
+# handle_text_message, plus targeted probes. Replay a failing corpus
+# entry deterministically: payload = _nl_fuzz_payloads()[<index>].
+import random
+
+_NL_FUZZ_SEED = 0x5EED2026
+_NL_FUZZ_RANDOM_COUNT = 200
+
+
+def _nl_fuzz_scalar(rng):
+    """One JSON-serializable hostile value (json.dumps round-trips them all)."""
+    pool = [
+        None, True, False, 0, 1, -1, 2, 999999, -999999, 10 ** 400, -(10 ** 400),
+        1.5, -2.75, 1e308, float("inf"), float("-inf"), float("nan"),
+        "", "0", "2", "1.5", "-1", "999999999999", "abc",
+        "<b>粗体</b>", "🍜🍜🍜", "\u200d\u200d\u200d", "\u202egnp.stluser",
+        "多" * 64, [], {}, [[]], [0, "1", None], {"名": 1}, [{"a": 1}],
+    ]
+    return rng.choice(pool)
+
+
+def _nl_fuzz_analysis(rng):
+    if rng.random() < 0.3:
+        return _nl_fuzz_scalar(rng)          # analysis as scalar/list/None
+    analysis = {"is_food": rng.choice([True, True, False, "yes", 1, None, [True]])}
+    if rng.random() < 0.8:
+        analysis["meal_description"] = rng.choice(
+            ["fuzz 餐", "<i>x</i>", "🍔" * 20, "", 42, None, {"d": 1}])
+    if rng.random() < 0.8:
+        analysis["total_calories"] = _nl_fuzz_scalar(rng)
+    if rng.random() < 0.7:
+        analysis["food_items"] = rng.choice([
+            "chips", 7, {"name": "x"},
+            [{"name": "面", "estimated_calories": _nl_fuzz_scalar(rng)}],
+            ["a", {"name": None}, 3],
+            [{"name": "x", "estimated_calories": 5}] * 40,
+        ])
+    return analysis
+
+
+_NL_FUZZ_INTENTS = [
+    "correction", "delete", "new_meal", "log_weight", "log_activity", "chat",
+    "multi", "", "CORRECTION", "意图", None, 3, ["delete"], {"i": 1}, True,
+]
+
+
+def _nl_fuzz_action(rng, depth):
+    action = {"intent": rng.choice(_NL_FUZZ_INTENTS)}
+    if rng.random() < 0.7:
+        action["meal_index"] = _nl_fuzz_scalar(rng)
+    if rng.random() < 0.7:
+        action["meal_indices"] = rng.choice([
+            _nl_fuzz_scalar(rng),
+            [_nl_fuzz_scalar(rng) for _ in range(rng.randint(0, 4))],
+            [0, 0, 0], [{"i": 0}], [True, False],
+        ])
+    if rng.random() < 0.7:
+        action["analysis"] = _nl_fuzz_analysis(rng)
+    if rng.random() < 0.5:
+        action["reason"] = _nl_fuzz_scalar(rng)
+    if rng.random() < 0.5:
+        action["reply"] = rng.choice(["ok 好", "", None, {"r": 1}, ["a"], 42])
+    for key in ("weight_kg", "active_calories", "steps", "distance_km"):
+        if rng.random() < 0.4:
+            action[key] = _nl_fuzz_scalar(rng)
+    # actions nested up to 3 deep — the executor must not recurse/explode.
+    if depth < 3 and rng.random() < 0.35:
+        action["actions"] = [
+            _nl_fuzz_action(rng, depth + 1) if rng.random() < 0.7 else _nl_fuzz_scalar(rng)
+            for _ in range(rng.randint(0, 6))
+        ]
+    if rng.random() < 0.1:
+        action["键%d" % rng.randint(0, 9)] = _nl_fuzz_scalar(rng)   # unicode keys
+    return action
+
+
+def _nl_fuzz_payloads(seed=_NL_FUZZ_SEED, count=_NL_FUZZ_RANDOM_COUNT):
+    """Deterministic corpus: handcrafted probes first, then `count` seeded
+    random payloads. Same seed → identical corpus, so any failure reproduces
+    by index."""
+    handcrafted = [
+        {"intent": ["correction"], "meal_index": 0},                    # intent as list
+        {"intent": {"i": 1}},                                           # intent as dict
+        {"intent": 3},                                                  # intent as int
+        {"intent": "correction", "meal_index": True,
+         "analysis": {"is_food": True, "total_calories": 9}},           # bool index
+        {"intent": "correction", "meal_index": "999999999999999999",
+         "analysis": {"is_food": True, "total_calories": 9}},           # huge str index
+        {"intent": "correction", "meal_index": 0,
+         "analysis": {"is_food": True, "total_calories": "780"}},       # str calories
+        {"intent": "correction", "meal_index": "<i>9</i>",
+         "analysis": {"is_food": True, "total_calories": 9}},           # HTML junk index
+        {"intent": "delete", "meal_indices": [{"i": 0}, {"j": 1}]},     # dict indices
+        {"intent": "delete", "meal_indices": [0, 0, 0]},                # triplicate index
+        {"intent": "multi", "actions": [{"intent": "multi", "actions": [
+            {"intent": "multi", "actions": [{"intent": "chat", "reply": "deep"}]}]}]},
+        {"intent": "log_weight", "weight_kg": "72.5"},                  # str weight
+        {"intent": "log_weight", "weight_kg": [72.5]},                  # list weight
+        {"intent": "chat", "reply": {"text": "hi"}},                    # reply as dict
+        {"intent": "multi", "actions": [                                # duplicate intents
+            {"intent": "log_weight", "weight_kg": 72.5},
+            {"intent": "log_weight", "weight_kg": 73.5}]},
+        [{"intent": "correction", "meal_index": 0,                      # mixed valid+junk
+          "analysis": {"is_food": True, "total_calories": 123,
+                       "meal_description": "ok"}}, "junk", 42],
+    ]
+    rng = random.Random(seed)
+    payloads = list(handcrafted)
+    for _ in range(count):
+        roll = rng.random()
+        if roll < 0.15:
+            payloads.append(_nl_fuzz_scalar(rng))            # junk top-level type
+        elif roll < 0.35:
+            payloads.append([                                 # bare JSON array
+                _nl_fuzz_action(rng, 1) if rng.random() < 0.8 else _nl_fuzz_scalar(rng)
+                for _ in range(rng.randint(0, 6))
+            ])
+        else:
+            payloads.append(_nl_fuzz_action(rng, 0))          # single/multi object
+    return payloads
+
+
+def _count_new_meal_dicts(node):
+    """Upper bound on rows _nl_new_meal could insert for this payload."""
+    if isinstance(node, dict):
+        own = 1 if node.get("intent") == "new_meal" else 0
+        return own + sum(_count_new_meal_dicts(v) for v in node.values())
+    if isinstance(node, list):
+        return sum(_count_new_meal_dicts(v) for v in node)
+    return 0
+
+
+def test_nl_pipeline_seeded_fuzz_never_crashes_and_guards_the_db(mock_db, monkeypatch, tmp_path):
+    """~215 malformed Gemini responses (wrong types at every key, nested
+    actions, mixed valid+invalid) must each: never raise out of
+    handle_text_message, always send the user SOMETHING, never delete meal
+    rows (deletes require confirmation), and only grow the meals table via
+    new_meal actions. DB state is re-seeded per corpus entry so every entry
+    replays standalone: _nl_fuzz_payloads()[<failing index>]."""
+    _compound_nl_setup(monkeypatch, tmp_path)
+    failures = []
+    for i, payload in enumerate(_nl_fuzz_payloads()):
+        with database._connect() as conn:
+            conn.execute("DELETE FROM meals")
+            conn.commit()
+        telegram_bot._pending_nl_deletes.clear()
+        _seed_three_meals()
+        before = len(database.get_meals(CHAT, "1970-01-01", "9999-12-31"))
+
+        bot = PhotoBot()  # the executor's per-action failure path uses bot._redact
+        try:
+            telegram_bot.handle_text_message(
+                _intent_client(payload), bot, CHAT, "fuzz probe %d" % i)
+        except Exception as e:  # noqa: BLE001 - the invariant under test
+            failures.append((i, "raised %s: %s" % (type(e).__name__, e), payload))
+            continue
+
+        after = len(database.get_meals(CHAT, "1970-01-01", "9999-12-31"))
+        if not bot.sent:
+            failures.append((i, "sent nothing to the user", payload))
+        if after < before:
+            failures.append((i, "rows deleted without confirmation (%d -> %d)"
+                             % (before, after), payload))
+        allowed = min(_count_new_meal_dicts(payload), telegram_bot.NL_MAX_ACTIONS)
+        if after - before > allowed:
+            failures.append((i, "rows grew by %d but only %d new_meal action(s) present"
+                             % (after - before, allowed), payload))
+        if len(telegram_bot._pending_nl_deletes) > 1:
+            failures.append((i, "more than one pending-delete slot", payload))
+
+    detail = "; ".join("[corpus %d] %s payload=%r" % (i, why, p)
+                       for i, why, p in failures[:5])
+    assert not failures, ("%d corpus entries violated invariants "
+                          "(replay: _nl_fuzz_payloads()[i]): %s"
+                          % (len(failures), detail))
+
+
+# ── Targeted probes: correct behavior pinned as passing tests ────────
+
+def test_nl_delete_triplicate_index_dedupes_to_one_meal(mock_db, monkeypatch, tmp_path):
+    """meal_indices [0, 0, 0] must stage exactly ONE meal for deletion (the
+    handler dedupes via a set), with a single confirmation prompt and no row
+    touched before confirm."""
+    _compound_nl_setup(monkeypatch, tmp_path)
+    snapshot = _seed_three_meals()
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(
+        {"intent": "delete", "meal_indices": [0, 0, 0], "reason": "dup"}),
+        bot, 12345, "delete the first meal")
+
+    pending = telegram_bot._pending_nl_deletes[12345]
+    assert pending["ids"] == [snapshot[0]["id"]]
+    confirms = [m for m in bot.sent if m.get("reply_markup")]
+    assert len(confirms) == 1
+    assert "Delete 1 meal(s)?" in confirms[0]["text"]
+    assert len(_wide_recent_meals(12345)) == 3
+
+
+def test_nl_compound_five_corrections_same_meal_last_wins(mock_db, monkeypatch, tmp_path):
+    """Five corrections aimed at the SAME meal all execute in order (each
+    with its own reply); the row ends at the last correction's values."""
+    _compound_nl_setup(monkeypatch, tmp_path)
+    snapshot = _seed_three_meals()
+    actions = [
+        {"intent": "correction", "meal_index": 0,
+         "analysis": {"is_food": True, "meal_description": "v%d" % i,
+                      "total_calories": 200 + i}}
+        for i in range(5)
+    ]
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(
+        {"intent": "multi", "actions": actions}), bot, 12345, "fix meal 1 five ways")
+
+    after = {m["id"]: m for m in _wide_recent_meals(12345)}
+    assert len(after) == 3
+    assert after[snapshot[0]["id"]]["analysis"]["meal_description"] == "v4"
+    assert after[snapshot[0]["id"]]["analysis"]["total_calories"] == 204
+    assert sum("Corrected meal 1" in m["text"] for m in bot.sent) == 5
+    assert not any("failed" in m["text"] for m in bot.sent)
+
+
+def test_nl_nested_multi_does_not_recurse_or_execute_inner_actions(mock_db, monkeypatch, tmp_path):
+    """{"intent":"multi","actions":[{"intent":"multi",...}]} must not recurse:
+    the inner wrapper falls through to the chat fallback (its nested actions
+    are NOT executed), something is sent, and no rows change."""
+    _compound_nl_setup(monkeypatch, tmp_path)
+    _seed_three_meals()
+    payload = {"intent": "multi", "actions": [
+        {"intent": "multi", "actions": [
+            {"intent": "multi", "actions": [
+                {"intent": "new_meal",
+                 "analysis": {"is_food": True, "meal_description": "deep burger",
+                              "total_calories": 900}},
+                {"intent": "chat", "reply": "deep"},
+            ]}]}]}
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(payload), bot, 12345, "nested request")
+
+    assert bot.sent, "the user must still get a reply"
+    assert not any("deep" in m["text"] for m in bot.sent), \
+        "actions nested below one wrapper level must not execute"
+    assert len(_wide_recent_meals(12345)) == 3
+    assert 12345 not in telegram_bot._pending_nl_deletes
+
+
+def test_nl_correction_reply_escapes_hostile_description(mock_db, monkeypatch, tmp_path):
+    """A corrected meal_description carrying HTML/emoji/RTL/zero-width chars
+    is stored verbatim but always HTML-escaped in the Telegram reply."""
+    _compound_nl_setup(monkeypatch, tmp_path)
+    snapshot = _seed_three_meals()
+    evil = "<script>alert(1)</script>\u200d\u202e\U0001F35C"
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(
+        {"intent": "correction", "meal_index": 0,
+         "analysis": {"is_food": True, "meal_description": evil,
+                      "total_calories": 300}}), bot, 12345, "fix meal 1")
+
+    assert not any("<script>" in m["text"] for m in bot.sent)
+    assert any("&lt;script&gt;" in m["text"] for m in bot.sent)
+    after = {m["id"]: m for m in _wide_recent_meals(12345)}
+    assert after[snapshot[0]["id"]]["analysis"]["meal_description"] == evil
+
+
+def test_nl_new_meal_ten_thousand_food_items_completes(mock_db, monkeypatch, tmp_path):
+    """A hallucinated 10k-item food_items list must neither crash nor hang:
+    the meal saves and the (huge) confirmation is produced — the real
+    send_message truncates it to Telegram's limit."""
+    _compound_nl_setup(monkeypatch, tmp_path)
+    items = [{"name": "item%d" % i, "estimated_calories": 1,
+              "protein_g": 0, "carbs_g": 0, "fat_g": 0} for i in range(10000)]
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(
+        {"intent": "new_meal",
+         "analysis": {"is_food": True, "meal_description": "mega buffet",
+                      "total_calories": 10000, "food_items": items}}),
+        bot, 12345, "logged a buffet")
+
+    assert len(_wide_recent_meals(12345)) == 1
+    assert any("Added new manual meal" in m["text"] for m in bot.sent)
+
+
+@pytest.mark.parametrize("weird_text", [
+    "／today",                       # fullwidth-slash command lookalike
+    "饭" * 4096,                     # 4096-char CJK message
+    "\u200d" * 16,                  # nothing but zero-width joiners
+    "<b>bold</b> & [link](x) 100%",  # Telegram HTML/markdown metacharacters
+])
+def test_process_update_routes_weird_texts_to_nl_pipeline(mock_db, monkeypatch, tmp_path, weird_text):
+    """Command lookalikes and hostile plain text are NOT commands: they take
+    exactly one trip through the Gemini NL pipeline and get a reply."""
+    _compound_nl_setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    client, calls = _counting_client({"intent": "chat", "reply": "回复 ok"})
+
+    bot = FakeBot()
+    telegram_bot._process_update(client, bot, {"message": {
+        "chat": {"id": 12345}, "from": {"first_name": "R"}, "text": weird_text}})
+
+    assert len(calls) == 1, "expected exactly one Gemini classification"
+    assert any("回复 ok" in m["text"] for m in bot.sent)
+
+
+# ── Hunter-confirmed defects, fixed in C2 and pinned as regressions ──
+
+@pytest.mark.parametrize("hostile_items", [
+    "chips", ["a", "b"], [{"name": 123}], {"name": "x"}, 7,
+])
+def test_nl_saved_hostile_food_items_must_not_poison_every_later_text(
+        mock_db, monkeypatch, tmp_path, hostile_items):
+    _compound_nl_setup(monkeypatch, tmp_path)
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(
+        {"intent": "new_meal",
+         "analysis": {"is_food": True, "meal_description": "fuzz snack",
+                      "food_items": hostile_items}}), bot, 12345, "ate a snack")
+    assert bot.sent
+
+    bot2 = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(
+        {"intent": "chat", "reply": "still alive"}), bot2, 12345, "hello again")
+    assert any("still alive" in m["text"] for m in bot2.sent)
+
+
+def test_nl_correction_hostile_food_items_must_not_poison_every_later_text(
+        mock_db, monkeypatch, tmp_path):
+    _compound_nl_setup(monkeypatch, tmp_path)
+    _seed_three_meals()
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(
+        {"intent": "correction", "meal_index": 0,
+         "analysis": {"is_food": True, "meal_description": "corrected",
+                      "total_calories": 500, "food_items": "just soup"}}),
+        bot, 12345, "meal 1 was soup")
+    assert bot.sent
+
+    bot2 = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(
+        {"intent": "chat", "reply": "still alive"}), bot2, 12345, "hello again")
+    assert any("still alive" in m["text"] for m in bot2.sent)
+
+
+def test_nl_correction_string_calories_must_not_claim_failure_after_writing(
+        mock_db, monkeypatch, tmp_path):
+    _compound_nl_setup(monkeypatch, tmp_path)
+    snapshot = _seed_three_meals()
+    original = snapshot[0]["analysis"]["total_calories"]
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(
+        {"intent": "correction", "meal_index": 0,
+         "analysis": {"is_food": True, "meal_description": "烧鸭饭",
+                      "total_calories": "780"}}), bot, 12345, "meal 1 was 780 kcal duck")
+
+    after = {m["id"]: m for m in _wide_recent_meals(12345)}
+    row_changed = after[snapshot[0]["id"]]["analysis"].get("total_calories") != original
+    told_failed = any("That request failed" in m["text"] for m in bot.sent)
+    assert not (row_changed and told_failed), \
+        "the row was rewritten yet the user was told the request failed"
+
+
+@pytest.mark.parametrize("empty_reply", [None, ""])
+def test_nl_chat_null_or_empty_reply_must_still_say_something(
+        mock_db, monkeypatch, tmp_path, empty_reply):
+    _compound_nl_setup(monkeypatch, tmp_path)
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(
+        {"intent": "chat", "reply": empty_reply}), bot, 12345, "hello there")
+
+    assert bot.sent and all(m["text"].strip() for m in bot.sent), \
+        "an empty-text message is unsendable on real Telegram - the user hears nothing"
+
+
+def test_nl_invalid_index_reply_escapes_model_supplied_value(mock_db, monkeypatch, tmp_path):
+    _compound_nl_setup(monkeypatch, tmp_path)
+    _seed_three_meals()
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(
+        {"intent": "correction", "meal_index": "<i>9</i>",
+         "analysis": {"is_food": True, "total_calories": 9}}), bot, 12345, "fix meal 9")
+
+    assert any("Invalid meal index" in m["text"] for m in bot.sent)
+    assert not any("<i>9</i>" in m["text"] for m in bot.sent), \
+        "raw model output must be HTML-escaped before interpolation"
+
+
+def test_nl_delete_scalar_string_indices_must_not_explode_per_character(
+        mock_db, monkeypatch, tmp_path):
+    _compound_nl_setup(monkeypatch, tmp_path)
+    _seed_three_meals()
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(
+        {"intent": "delete", "meal_indices": "12", "reason": "remove meal 12"}),
+        bot, 12345, "delete meal 12")
+
+    assert 12345 not in telegram_bot._pending_nl_deletes, \
+        "a scalar '12' must not stage meals 1 and 2 for deletion"
+
+
+# ─── Loops, livelocks & admission control (hunter 1) ─────────────────
+
+
+def test_get_updates_persistent_conflict_backs_off_with_a_cap(monkeypatch):
+    import requests
+
+    bot = telegram_bot.TelegramBot("test-token")
+
+    class Conflict:
+        status_code = 409
+
+        def raise_for_status(self):
+            raise requests.HTTPError("409 Conflict", response=self)
+
+    monkeypatch.setattr(bot.session, "post", lambda *a, **k: Conflict())
+    slept = []
+    monkeypatch.setattr(telegram_bot.time, "sleep", lambda s: slept.append(s))
+
+    for _ in range(12):
+        assert bot.get_updates(timeout=1) == []  # containment must stay
+
+    assert len(slept) == 12
+    assert slept == sorted(slept), "backoff must grow monotonically to its cap"
+    assert max(slept) >= 60, f"12 consecutive failures never escalated: {slept}"
+    assert max(slept) <= 300, "backoff must stay capped (~5 min) so recovery is quick"
+
+
+def test_gemini_retry_loop_is_bounded_with_clamped_sleeps(monkeypatch, tmp_path):
+    """Pins that the Gemini retry machinery cannot spin: a persistently
+    retryable 429 runs exactly max_attempts attempts, and a hostile/huge
+    server-advertised retryDelay is clamped to GEMINI_RETRY_MAX_DELAY_SECONDS
+    per sleep (the background thread holds the photo bytes during these
+    sleeps, so the total stall is bounded too)."""
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot.claude_analyzer, "is_configured", lambda: False)
+
+    attempts = []
+
+    def always_429(client, image_bytes):
+        attempts.append(1)
+        raise RuntimeError("429 RESOURCE_EXHAUSTED; retryDelay: '86400s'")
+
+    monkeypatch.setattr(telegram_bot, "_analyze_food_photo_once", always_429)
+    slept = []
+    monkeypatch.setattr(telegram_bot.time, "sleep", lambda s: slept.append(s))
+
+    result = telegram_bot.analyze_food_photo_with_retries(object(), b"img", max_attempts=3)
+
+    assert result is None
+    assert len(attempts) == 3  # bounded: no infinite retry
+    assert slept == [telegram_bot.GEMINI_RETRY_MAX_DELAY_SECONDS] * 2  # 86400s clamped
+
+
+def _photo_fanout_rig(monkeypatch):
+    """Telegram-photo fan-out rig with REAL (recorded) threads and a gated
+    analyzer, so tests can observe how many analyses are in flight at once."""
+    import threading as real_threading
+
+    state = {"inflight": 0, "peak": 0, "entered": 0}
+    lock = real_threading.Lock()
+    gate = real_threading.Event()
+    spawned = []
+
+    class RecordingThread(real_threading.Thread):
+        def start(self):
+            spawned.append(self)
+            super().start()
+
+    def gated_analyze(client, image_bytes):
+        with lock:
+            state["inflight"] += 1
+            state["entered"] += 1
+            state["peak"] = max(state["peak"], state["inflight"])
+        gate.wait(timeout=15)  # simulates the _CLI_LOCK convoy / a slow CLI run
+        with lock:
+            state["inflight"] -= 1
+        return {"is_food": False}
+
+    marks = []
+    monkeypatch.setattr(telegram_bot, "threading",
+                        SimpleNamespace(Thread=RecordingThread))
+    monkeypatch.setattr(telegram_bot, "analyze_food_photo", gated_analyze)
+    monkeypatch.setattr(telegram_bot, "is_duplicate_photo", lambda *a: False)
+    monkeypatch.setattr(telegram_bot, "_stage_api_upload", lambda *a, **k: None)
+    monkeypatch.setattr(database, "reserve_photo_hash", lambda *a, **k: True)
+    monkeypatch.setattr(database, "release_photo_hash", lambda *a, **k: None)
+    monkeypatch.setattr(database, "mark_photo_hash_status",
+                        lambda *a, **k: marks.append(a))
+
+    class AlbumBot(FakeBot):
+        def get_file(self, file_id):
+            return b"\xff\xd8\xff" + file_id.encode()
+
+    return AlbumBot(), state, gate, spawned, marks
+
+
+def _wait_until(predicate, deadline_seconds=5.0):
+    import time as real_time
+
+    end = real_time.monotonic() + deadline_seconds
+    while real_time.monotonic() < end:
+        if predicate():
+            return True
+        real_time.sleep(0.01)
+    return predicate()
+
+
+def test_photo_message_returns_before_analysis_completes(monkeypatch):
+    """Pins the non-blocking design: handle_photo_message returns as soon as
+    the analysis thread is spawned, so a slow Claude/Gemini run can never
+    stall the long-poll loop; the background thread finishes the job."""
+    bot, state, gate, spawned, marks = _photo_fanout_rig(monkeypatch)
+    try:
+        handled = telegram_bot.handle_photo_message(
+            object(), bot, 12345, {"photo": [{"file_id": "p0"}]})
+        assert handled is True                       # returned while gated
+        assert _wait_until(lambda: state["entered"] == 1)
+        assert state["inflight"] == 1                # analysis still in flight
+    finally:
+        gate.set()
+        for t in spawned:
+            t.join(timeout=10)
+    assert not any(t.is_alive() for t in spawned)
+    assert any(m[2] == "skipped" for m in marks)     # background path completed
+
+
+def test_photo_fanout_concurrency_is_capped(monkeypatch):
+    bot, state, gate, spawned, _marks = _photo_fanout_rig(monkeypatch)
+    try:
+        for i in range(10):
+            telegram_bot.handle_photo_message(
+                object(), bot, 12345, {"photo": [{"file_id": f"album{i}"}]})
+        # Wait for the fan-out to settle: either all 10 enter (today's
+        # unbounded behavior) or a capped pool stalls the rest at the gate.
+        _wait_until(lambda: state["entered"] == 10, deadline_seconds=3.0)
+        peak = state["peak"]
+    finally:
+        gate.set()
+        for t in spawned:
+            t.join(timeout=10)
+    assert not any(t.is_alive() for t in spawned)
+    assert peak <= 4, (
+        f"{peak} photo analyses were in flight at once, each pinning its full "
+        f"image bytes on a 1GB host — fan-out must be admission-controlled"
+    )
+
+
+def test_upload_raw_body_chunked_buffering_is_capped(mock_db, monkeypatch, tmp_path):
+    class CountingBody(io.RawIOBase):
+        """Counts how much of the body the server actually pulls into memory."""
+
+        def __init__(self, total):
+            self.total = total
+            self.pos = 0
+
+        def readable(self):
+            return True
+
+        def readinto(self, b):
+            n = min(len(b), self.total - self.pos)
+            if n <= 0:
+                return 0
+            head = b"\xff\xd8\xff" if self.pos == 0 else b""
+            b[:n] = (head + b"A" * n)[:n]
+            self.pos += n
+            return n
+
+    app, bot = _upload_app(monkeypatch, tmp_path, analysis="forbidden")
+    monkeypatch.setattr(telegram_bot, "MAX_API_UPLOAD_BYTES", 8192)
+
+    builder = _EnvironBuilder(path="/upload", method="POST", data=b"",
+                              content_type="application/octet-stream",
+                              headers={"X-API-Key": "test-upload-key",
+                                       "Transfer-Encoding": "chunked"})
+    environ = builder.get_environ()
+    environ.pop("CONTENT_LENGTH", None)
+    environ.pop("HTTP_CONTENT_LENGTH", None)
+    environ["wsgi.input_terminated"] = True
+    body = CountingBody(1024 * 1024)  # 1MB body against an 8KB cap
+    environ["wsgi.input"] = io.BufferedReader(body)
+
+    app_iter, status, _headers = _run_wsgi_app(app, environ, buffered=True)
+    payload = json.loads(b"".join(app_iter))
+
+    assert int(status.split()[0]) == 413            # the OUTCOME is already right
+    assert payload == {"error": "Photo too large"}
+    assert bot.sent == []
+    # ... but the whole body was pulled into RAM first. Allow generous
+    # BufferedReader slack over MAX+1; 1MB read means unbounded buffering.
+    assert body.pos <= 3 * 8192, (
+        f"server buffered {body.pos} bytes of a chunked body against an "
+        f"8192-byte cap — reads must be capped, not sliced after the fact"
+    )
+
+
+# ── Hunter 2 (continued): defect found BY the seeded fuzzer ──────────
+
+@pytest.mark.parametrize("unhashable_intent", [["delete"], {"i": 1}])
+def test_nl_unhashable_intent_with_actions_must_not_raise(
+        mock_db, monkeypatch, tmp_path, unhashable_intent):
+    _compound_nl_setup(monkeypatch, tmp_path)
+    _seed_three_meals()
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(
+        {"intent": unhashable_intent,
+         "actions": [{"intent": "chat", "reply": "compound ok"}]}),
+        bot, 12345, "please do both things")
+
+    # Fix-agnostic core invariant: no exception, and the user hears back.
+    # (Design intent: an unrecognized wrapper intent defers to its actions,
+    # so ideally the chat action's "compound ok" is what gets sent.)
+    assert bot.sent, "the user must receive a reply, not a contained crash"

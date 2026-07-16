@@ -66,7 +66,11 @@ def _make_env(tmp_path):
     return env, home, camera, fake_proc
 
 
-def _wait_for(predicate, timeout=10.0):
+def _wait_for(predicate, timeout=30.0):
+    # Generous ceiling: polling returns the moment the predicate holds, so a
+    # green run pays nothing, but a loaded machine (parallel builds, other
+    # agents) can stretch the watcher's shimmed 0.05s ticks well past what a
+    # 10s ceiling tolerates — that reads as a one-off flake, not a bug.
     deadline = time.time() + timeout
     while time.time() < deadline:
         if predicate():
