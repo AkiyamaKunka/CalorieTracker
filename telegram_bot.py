@@ -275,8 +275,16 @@ class TelegramBot:
         self.session = requests.Session()
 
     def _redact(self, value) -> str:
-        """Strip the bot token from text destined for logs or user messages."""
-        text = str(value)
+        """Strip the bot token from text destined for logs or user messages.
+
+        Total by design: several callers invoke this inside last-line-of-
+        defense except blocks, so a pathological value whose __str__ raises
+        must not turn containment into a new crash.
+        """
+        try:
+            text = str(value)
+        except Exception:
+            return f"<unprintable {type(value).__name__}>"
         return text.replace(self.token, "<token>") if self.token else text
 
     def _call(self, method: str, **kwargs) -> dict:
@@ -3358,6 +3366,17 @@ def _nl_correction(bot: TelegramBot, chat_id: int, text: str, meals: List[Dict],
         bot.send_message(chat_id, f"❌ Invalid meal index ({result.get('meal_index')}). You have {len(meals)} recent meals.")
         return
 
+    # An empty or non-food analysis would overwrite the meal into a row every
+    # is_food view filters out — a silent delete wearing a "Corrected!" reply,
+    # bypassing the confirmation the real delete path requires. Refuse it.
+    if not isinstance(new_analysis, dict) or not new_analysis.get("is_food"):
+        bot.send_message(
+            chat_id,
+            "❌ That correction didn't include a usable updated analysis, so I left "
+            "the meal unchanged. Try restating it, e.g. “meal 2 was roast duck rice, ~780 kcal”.",
+        )
+        return
+
     # Get old values for the diff
     old_analysis = meals[meal_index]["analysis"]
     old_cal = old_analysis.get("total_calories") or 0
@@ -3532,7 +3551,15 @@ def _normalize_nl_actions(result) -> List[Dict]:
     """
     if isinstance(result, dict):
         actions = result.get("actions")
-        items = actions if isinstance(actions, list) and actions else [result]
+        # Only honor "actions" when the wrapper is the designed multi shape
+        # or has no recognized single intent of its own — a real single
+        # intent carrying a hallucinated decomposition list must win.
+        use_actions = (
+            isinstance(actions, list)
+            and actions
+            and (result.get("intent") == "multi" or result.get("intent") not in _NL_INTENT_HANDLERS)
+        )
+        items = actions if use_actions else [result]
     elif isinstance(result, list):
         items = result
     else:
@@ -3545,6 +3572,20 @@ def _normalize_nl_actions(result) -> List[Dict]:
     if len(usable) > NL_MAX_ACTIONS:
         log.warning(f"  Capping NL actions at {NL_MAX_ACTIONS} (model returned {len(usable)}).")
         usable = usable[:NL_MAX_ACTIONS]
+
+    # _pending_nl_deletes holds ONE confirmation per chat, so a second delete
+    # action would dead-end the first prompt's buttons. The prompt says to
+    # merge deletions; enforce it here for models that don't.
+    deletes = [a for a in usable if a.get("intent") == "delete"]
+    if len(deletes) > 1:
+        merged: List = []
+        for a in deletes:
+            indices = a.get("meal_indices")
+            if isinstance(indices, list):
+                merged.extend(indices)
+        deletes[0]["meal_indices"] = merged
+        usable = [a for a in usable if a.get("intent") != "delete" or a is deletes[0]]
+        log.info(f"  Merged {len(deletes)} delete actions into one ({len(merged)} indices).")
     return usable
 
 
@@ -3644,13 +3685,18 @@ def handle_text_message(
             # One malformed action must not abort its siblings (or the bot).
             failures += 1
             log.error(f"  NL action {intent!r} failed: {bot._redact(e)}")
-    if failures:
+    if failures == len(actions):
         note = (
             "❌ That request failed. Please try again."
-            if failures == len(actions) == 1
-            else f"⚠️ {failures} of {len(actions)} requested action(s) failed — the rest were applied."
+            if failures == 1
+            else f"❌ All {failures} requested actions failed. Please try again."
         )
         bot.send_message(chat_id, note)
+    elif failures:
+        bot.send_message(
+            chat_id,
+            f"⚠️ {failures} of {len(actions)} requested action(s) failed — the rest were applied.",
+        )
 
 
 def handle_text_message_safe(gemini_client, bot: TelegramBot, chat_id: int, text: str):

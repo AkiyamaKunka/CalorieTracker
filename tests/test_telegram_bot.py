@@ -2960,3 +2960,102 @@ def test_handle_text_message_safe_survives_notify_failure(monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(OSError("telegram down")))
 
     telegram_bot.handle_text_message_safe(object(), bot, 12345, "anything")  # must not raise
+
+
+# ---- Pre-deploy adversarial review fixes (compound NL hardening) -----
+
+def test_nl_correction_refuses_empty_or_nonfood_analysis(mock_db, monkeypatch, tmp_path):
+    """A correction whose analysis is {} / missing / non-food must NOT be
+    written: it would hide the meal from every is_food view — a silent
+    delete wearing a success reply, without the delete path's confirmation."""
+    _compound_nl_setup(monkeypatch, tmp_path)
+    snapshot = _seed_three_meals()
+    lunch = next(m for m in snapshot if m["analysis"]["meal_description"] == "面条")
+    lunch_idx = snapshot.index(lunch)
+
+    for bad_analysis in [{}, {"is_food": False, "meal_description": "x"}, None]:
+        payload = {"intent": "correction", "meal_index": lunch_idx, "analysis": bad_analysis}
+        bot = PhotoBot()
+        telegram_bot.handle_text_message(_intent_client(payload), bot, 12345, "改一下第二顿")
+        assert "left the meal unchanged" in bot.sent[-1]["text"] or "unchanged" in bot.sent[-1]["text"]
+
+    after = {m["id"]: m for m in _wide_recent_meals(12345)}
+    assert after[lunch["id"]]["analysis"]["meal_description"] == "面条"
+    assert after[lunch["id"]]["analysis"]["total_calories"] == 550
+
+
+def test_nl_compound_all_failed_wording_never_claims_partial_success(mock_db, monkeypatch, tmp_path):
+    """When every action fails, the note must not say 'the rest were applied'."""
+    _compound_nl_setup(monkeypatch, tmp_path)
+
+    def explode(bot, chat_id, text, meals, result):
+        raise RuntimeError("boom")
+
+    monkeypatch.setitem(telegram_bot._NL_INTENT_HANDLERS, "correction", explode)
+    monkeypatch.setitem(telegram_bot._NL_INTENT_HANDLERS, "delete", explode)
+    payload = {"intent": "multi", "actions": [
+        {"intent": "correction", "meal_index": 0, "analysis": ROAST_DUCK_ANALYSIS},
+        {"intent": "delete", "meal_indices": [1]},
+    ]}
+
+    bot = PhotoBot()
+    telegram_bot.handle_text_message(_intent_client(payload), bot, 12345, "fix and delete")
+
+    final = bot.sent[-1]["text"]
+    assert "All 2 requested actions failed" in final
+    assert "the rest were applied" not in final
+
+
+def test_nl_compound_duplicate_delete_actions_merge_into_one(mock_db, monkeypatch, tmp_path):
+    """Two delete actions would dead-end the first confirmation's buttons
+    (_pending_nl_deletes is one slot per chat) — the normalizer merges them."""
+    _compound_nl_setup(monkeypatch, tmp_path)
+    snapshot = _seed_three_meals()
+    payload = {"intent": "multi", "actions": [
+        {"intent": "delete", "meal_indices": [0], "reason": "第一顿"},
+        {"intent": "delete", "meal_indices": [2], "reason": "第三顿"},
+    ]}
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(payload), bot, 12345, "删除第一顿和第三顿")
+
+    pending = telegram_bot._pending_nl_deletes[12345]
+    assert sorted(pending["ids"]) == sorted([snapshot[0]["id"], snapshot[2]["id"]])
+    confirms = [m for m in bot.sent if m.get("reply_markup")]
+    assert len(confirms) == 1, "exactly one confirmation prompt, holding both meals"
+    assert len(_wide_recent_meals(12345)) == 3  # nothing deleted before confirm
+
+
+def test_nl_single_intent_wins_over_hallucinated_actions(mock_db, monkeypatch, tmp_path):
+    """A real single intent carrying a decomposition-style 'actions' list must
+    execute its own intent, not the unknown sub-steps."""
+    _compound_nl_setup(monkeypatch, tmp_path)
+    snapshot = _seed_three_meals()
+    lunch_idx = next(i for i, m in enumerate(snapshot)
+                     if m["analysis"]["meal_description"] == "面条")
+    payload = {
+        "intent": "correction", "meal_index": lunch_idx, "analysis": ROAST_DUCK_ANALYSIS,
+        "actions": [{"step": "recalculate"}, {"step": "update"}],
+    }
+
+    bot = FakeBot()
+    telegram_bot.handle_text_message(_intent_client(payload), bot, 12345, "第二顿是烧鸭饭")
+
+    after = {m["id"]: m for m in _wide_recent_meals(12345)}
+    lunch_id = snapshot[lunch_idx]["id"]
+    assert after[lunch_id]["analysis"]["meal_description"] == "烧鸭饭"
+    assert not any("not sure what you mean" in m["text"] for m in bot.sent)
+
+
+def test_redact_is_total_for_unprintable_values():
+    """_redact is called inside last-line-of-defense except blocks; a value
+    whose __str__ raises must yield a placeholder, not a new exception."""
+    bot = telegram_bot.TelegramBot("123:abc")
+
+    class BadStr(Exception):
+        def __str__(self):
+            raise ValueError("even __str__ is broken")
+
+    assert telegram_bot.TelegramBot._redact(bot, BadStr()) == "<unprintable BadStr>"
+    # Normal-path behavior unchanged: the raw token is still scrubbed.
+    assert telegram_bot.TelegramBot._redact(bot, "plain 123:abc text") == "plain <token> text"
