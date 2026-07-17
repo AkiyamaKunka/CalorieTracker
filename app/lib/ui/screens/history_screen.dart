@@ -13,10 +13,14 @@ class HistoryScreen extends StatefulWidget {
   const HistoryScreen({super.key, required this.dao, this.days = 30});
 
   @override
-  State<HistoryScreen> createState() => _HistoryScreenState();
+  State<HistoryScreen> createState() => HistoryScreenState();
 }
 
-class _HistoryScreenState extends State<HistoryScreen> {
+/// Public so the shell can trigger [reload] when the tab is (re)selected:
+/// this screen lives in an IndexedStack, so initState runs once at app
+/// launch — without an external reload it would show launch-time data
+/// forever (and the empty state has no RefreshIndicator to recover with).
+class HistoryScreenState extends State<HistoryScreen> {
   bool _loading = true;
   String? _error;
   Map<String, num> _perDay = const {};
@@ -24,10 +28,10 @@ class _HistoryScreenState extends State<HistoryScreen> {
   @override
   void initState() {
     super.initState();
-    _reload();
+    reload();
   }
 
-  Future<void> _reload() async {
+  Future<void> reload() async {
     final now = DateTime.now();
     try {
       final meals = await widget.dao.mealsBetween(
@@ -61,7 +65,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
             children: [
               Text(_error!, textAlign: TextAlign.center),
               const SizedBox(height: 12),
-              FilledButton(onPressed: _reload, child: const Text('Retry')),
+              FilledButton(onPressed: reload, child: const Text('Retry')),
             ],
           ),
         ),
@@ -78,7 +82,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
     final sum = _perDay.values.fold<num>(0, (a, b) => a + b);
     final avg = (sum / _perDay.length).truncate();
     return RefreshIndicator(
-      onRefresh: _reload,
+      onRefresh: reload,
       child: ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         children: [

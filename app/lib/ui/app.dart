@@ -45,6 +45,11 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   late int _index;
   final GlobalKey<TodayScreenState> _todayKey = GlobalKey<TodayScreenState>();
+  // History sits in the IndexedStack, so its initState runs once at app
+  // launch; reload it on tab selection or it shows launch-time data forever
+  // (bug found by the e2e flow: meals logged after launch never appeared).
+  final GlobalKey<HistoryScreenState> _historyKey =
+      GlobalKey<HistoryScreenState>();
 
   @override
   void initState() {
@@ -64,7 +69,7 @@ class _HomeShellState extends State<HomeShell> {
         index: _index,
         children: [
           TodayScreen(key: _todayKey, dao: s.dao, executor: s.executor),
-          HistoryScreen(dao: s.dao),
+          HistoryScreen(key: _historyKey, dao: s.dao),
           SettingsScreen(
             settings: s.settings,
             analyzer: s.analyzer,
@@ -84,7 +89,10 @@ class _HomeShellState extends State<HomeShell> {
           : null,
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
-        onDestinationSelected: (i) => setState(() => _index = i),
+        onDestinationSelected: (i) {
+          setState(() => _index = i);
+          if (i == 1) _historyKey.currentState?.reload();
+        },
         destinations: const [
           NavigationDestination(
               icon: Icon(Icons.today_outlined),
