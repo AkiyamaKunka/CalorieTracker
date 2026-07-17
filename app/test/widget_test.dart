@@ -1,30 +1,29 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
+/// App-shell smoke test with in-memory fakes (real wiring lives in
+/// ui/di.dart and is exercised at integration time).
+library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:calorie_tracker/main.dart';
+import 'package:calorie_tracker/ui/app.dart';
+
+import 'ui/fakes.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  testWidgets('shell boots to Today with an API key configured',
+      (tester) async {
+    await tester.pumpWidget(
+        CalorieTrackerApp(services: makeServices(settings: FakeSettings())));
+    await tester.pumpAndSettle();
+    expect(find.text('Today'), findsWidgets);
+    expect(find.byKey(const Key('addMealFab')), findsOneWidget);
+  });
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
-
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
-
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+  testWidgets('shell boots to Settings when no API key is set (onboarding)',
+      (tester) async {
+    await tester.pumpWidget(CalorieTrackerApp(
+        services: makeServices(settings: FakeSettings(apiKey: ''))));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('apiKeyField')), findsOneWidget);
   });
 }

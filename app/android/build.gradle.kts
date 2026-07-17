@@ -1,5 +1,8 @@
 allprojects {
     repositories {
+        // Aliyun mirrors first — see settings.gradle.kts (mainland-China TLS).
+        maven { url = uri("https://maven.aliyun.com/repository/public") }
+        maven { url = uri("https://maven.aliyun.com/repository/google") }
         google()
         mavenCentral()
     }
