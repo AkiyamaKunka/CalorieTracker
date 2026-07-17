@@ -1,0 +1,594 @@
+{
+  "generator": "scripts/generate_shared_vectors.py",
+  "encoding": "Inputs/outputs are plain JSON except: {\"__special__\": \"nan\"|\"inf\"|\"-inf\"} encodes a non-JSON float, and an expected of {\"__raises__\": true} means the call raises. Decode specials before calling the implementation.",
+  "cases": [
+    {
+      "id": "safe_number_int",
+      "fn": "safe_number",
+      "input": 500,
+      "expected": 500
+    },
+    {
+      "id": "safe_number_zero",
+      "fn": "safe_number",
+      "input": 0,
+      "expected": 0
+    },
+    {
+      "id": "safe_number_negative_int",
+      "fn": "safe_number",
+      "input": -1,
+      "expected": -1
+    },
+    {
+      "id": "safe_number_float",
+      "fn": "safe_number",
+      "input": 12.5,
+      "expected": 12.5
+    },
+    {
+      "id": "safe_number_negative_float",
+      "fn": "safe_number",
+      "input": -0.25,
+      "expected": -0.25
+    },
+    {
+      "id": "safe_number_bool_true",
+      "fn": "safe_number",
+      "input": true,
+      "expected": 0
+    },
+    {
+      "id": "safe_number_bool_false",
+      "fn": "safe_number",
+      "input": false,
+      "expected": 0
+    },
+    {
+      "id": "safe_number_numeric_string",
+      "fn": "safe_number",
+      "input": "500",
+      "expected": 0
+    },
+    {
+      "id": "safe_number_float_string",
+      "fn": "safe_number",
+      "input": "12.5",
+      "expected": 0
+    },
+    {
+      "id": "safe_number_none",
+      "fn": "safe_number",
+      "input": null,
+      "expected": 0
+    },
+    {
+      "id": "safe_number_list",
+      "fn": "safe_number",
+      "input": [
+        500
+      ],
+      "expected": 0
+    },
+    {
+      "id": "safe_number_dict",
+      "fn": "safe_number",
+      "input": {
+        "value": 500
+      },
+      "expected": 0
+    },
+    {
+      "id": "safe_number_magnitude_upper_bound_exact",
+      "fn": "safe_number",
+      "input": 1000000000,
+      "expected": 0
+    },
+    {
+      "id": "safe_number_magnitude_upper_bound_float",
+      "fn": "safe_number",
+      "input": 1000000000.0,
+      "expected": 0
+    },
+    {
+      "id": "safe_number_magnitude_just_under_upper",
+      "fn": "safe_number",
+      "input": 999999999,
+      "expected": 999999999
+    },
+    {
+      "id": "safe_number_magnitude_lower_bound_exact",
+      "fn": "safe_number",
+      "input": -1000000000,
+      "expected": 0
+    },
+    {
+      "id": "safe_number_magnitude_just_over_lower",
+      "fn": "safe_number",
+      "input": -999999999,
+      "expected": -999999999
+    },
+    {
+      "id": "safe_number_huge_int",
+      "fn": "safe_number",
+      "input": 1000000000000000000,
+      "expected": 0
+    },
+    {
+      "id": "safe_number_huge_float",
+      "fn": "safe_number",
+      "input": 1e+18,
+      "expected": 0
+    },
+    {
+      "id": "safe_number_inf",
+      "fn": "safe_number",
+      "input": {
+        "__special__": "inf"
+      },
+      "expected": 0
+    },
+    {
+      "id": "safe_number_neg_inf",
+      "fn": "safe_number",
+      "input": {
+        "__special__": "-inf"
+      },
+      "expected": 0
+    },
+    {
+      "id": "safe_number_nan",
+      "fn": "safe_number",
+      "input": {
+        "__special__": "nan"
+      },
+      "expected": 0
+    },
+    {
+      "id": "safe_number_none_with_default",
+      "fn": "safe_number",
+      "input": null,
+      "expected": 7,
+      "default": 7
+    },
+    {
+      "id": "safe_number_string_with_none_default",
+      "fn": "safe_number",
+      "input": "500",
+      "expected": null,
+      "default": null
+    },
+    {
+      "id": "safe_number_bool_with_default",
+      "fn": "safe_number",
+      "input": true,
+      "expected": -1,
+      "default": -1
+    },
+    {
+      "id": "safe_number_valid_ignores_default",
+      "fn": "safe_number",
+      "input": 250,
+      "expected": 250,
+      "default": 99
+    },
+    {
+      "id": "parse_boolish_one_str",
+      "fn": "parse_boolish",
+      "input": "1",
+      "expected": true
+    },
+    {
+      "id": "parse_boolish_true_str",
+      "fn": "parse_boolish",
+      "input": "true",
+      "expected": true
+    },
+    {
+      "id": "parse_boolish_true_upper",
+      "fn": "parse_boolish",
+      "input": "TRUE",
+      "expected": true
+    },
+    {
+      "id": "parse_boolish_yes_padded",
+      "fn": "parse_boolish",
+      "input": "  yes  ",
+      "expected": true
+    },
+    {
+      "id": "parse_boolish_y",
+      "fn": "parse_boolish",
+      "input": "y",
+      "expected": true
+    },
+    {
+      "id": "parse_boolish_on",
+      "fn": "parse_boolish",
+      "input": "on",
+      "expected": true
+    },
+    {
+      "id": "parse_boolish_on_mixed_case",
+      "fn": "parse_boolish",
+      "input": "On",
+      "expected": true
+    },
+    {
+      "id": "parse_boolish_zero_str",
+      "fn": "parse_boolish",
+      "input": "0",
+      "expected": false
+    },
+    {
+      "id": "parse_boolish_false_str",
+      "fn": "parse_boolish",
+      "input": "false",
+      "expected": false
+    },
+    {
+      "id": "parse_boolish_no",
+      "fn": "parse_boolish",
+      "input": "no",
+      "expected": false
+    },
+    {
+      "id": "parse_boolish_n",
+      "fn": "parse_boolish",
+      "input": "n",
+      "expected": false
+    },
+    {
+      "id": "parse_boolish_off",
+      "fn": "parse_boolish",
+      "input": "off",
+      "expected": false
+    },
+    {
+      "id": "parse_boolish_off_upper",
+      "fn": "parse_boolish",
+      "input": "OFF",
+      "expected": false
+    },
+    {
+      "id": "parse_boolish_int_one",
+      "fn": "parse_boolish",
+      "input": 1,
+      "expected": true
+    },
+    {
+      "id": "parse_boolish_int_zero",
+      "fn": "parse_boolish",
+      "input": 0,
+      "expected": false
+    },
+    {
+      "id": "parse_boolish_bool_true",
+      "fn": "parse_boolish",
+      "input": true,
+      "expected": true
+    },
+    {
+      "id": "parse_boolish_bool_false",
+      "fn": "parse_boolish",
+      "input": false,
+      "expected": false
+    },
+    {
+      "id": "parse_boolish_none",
+      "fn": "parse_boolish",
+      "input": null,
+      "expected": null
+    },
+    {
+      "id": "parse_boolish_empty",
+      "fn": "parse_boolish",
+      "input": "",
+      "expected": null
+    },
+    {
+      "id": "parse_boolish_maybe",
+      "fn": "parse_boolish",
+      "input": "maybe",
+      "expected": null
+    },
+    {
+      "id": "parse_boolish_two",
+      "fn": "parse_boolish",
+      "input": "2",
+      "expected": null
+    },
+    {
+      "id": "parse_boolish_float_one",
+      "fn": "parse_boolish",
+      "input": 1.0,
+      "expected": null
+    },
+    {
+      "id": "parse_boolish_t_alone",
+      "fn": "parse_boolish",
+      "input": "t",
+      "expected": null
+    },
+    {
+      "id": "parse_boolish_list",
+      "fn": "parse_boolish",
+      "input": [],
+      "expected": null
+    },
+    {
+      "id": "safe_food_items_normal",
+      "fn": "safe_food_items",
+      "input": {
+        "food_items": [
+          {
+            "name": "rice",
+            "estimated_calories": 200
+          }
+        ]
+      },
+      "expected": [
+        {
+          "name": "rice",
+          "estimated_calories": 200
+        }
+      ]
+    },
+    {
+      "id": "safe_food_items_not_a_dict_list",
+      "fn": "safe_food_items",
+      "input": [
+        {
+          "name": "rice"
+        }
+      ],
+      "expected": []
+    },
+    {
+      "id": "safe_food_items_not_a_dict_str",
+      "fn": "safe_food_items",
+      "input": "rice",
+      "expected": []
+    },
+    {
+      "id": "safe_food_items_none",
+      "fn": "safe_food_items",
+      "input": null,
+      "expected": []
+    },
+    {
+      "id": "safe_food_items_number",
+      "fn": "safe_food_items",
+      "input": 42,
+      "expected": []
+    },
+    {
+      "id": "safe_food_items_missing_key",
+      "fn": "safe_food_items",
+      "input": {
+        "total_calories": 500
+      },
+      "expected": []
+    },
+    {
+      "id": "safe_food_items_items_scalar",
+      "fn": "safe_food_items",
+      "input": {
+        "food_items": "rice"
+      },
+      "expected": []
+    },
+    {
+      "id": "safe_food_items_items_number",
+      "fn": "safe_food_items",
+      "input": {
+        "food_items": 5
+      },
+      "expected": []
+    },
+    {
+      "id": "safe_food_items_items_dict",
+      "fn": "safe_food_items",
+      "input": {
+        "food_items": {
+          "name": "rice"
+        }
+      },
+      "expected": []
+    },
+    {
+      "id": "safe_food_items_items_none",
+      "fn": "safe_food_items",
+      "input": {
+        "food_items": null
+      },
+      "expected": []
+    },
+    {
+      "id": "safe_food_items_items_empty",
+      "fn": "safe_food_items",
+      "input": {
+        "food_items": []
+      },
+      "expected": []
+    },
+    {
+      "id": "safe_food_items_items_mixed",
+      "fn": "safe_food_items",
+      "input": {
+        "food_items": [
+          {
+            "name": "rice"
+          },
+          "junk",
+          3,
+          null,
+          {
+            "name": "soup",
+            "estimated_calories": 90
+          },
+          []
+        ]
+      },
+      "expected": [
+        {
+          "name": "rice"
+        },
+        {
+          "name": "soup",
+          "estimated_calories": 90
+        }
+      ]
+    },
+    {
+      "id": "parse_ai_json_plain_object",
+      "fn": "parse_ai_json",
+      "input": "{\"a\": 1}",
+      "expected": {
+        "a": 1
+      }
+    },
+    {
+      "id": "parse_ai_json_plain_array",
+      "fn": "parse_ai_json",
+      "input": "[1, 2]",
+      "expected": [
+        1,
+        2
+      ]
+    },
+    {
+      "id": "parse_ai_json_fenced_json",
+      "fn": "parse_ai_json",
+      "input": "```json\n{\"a\": 1}\n```",
+      "expected": {
+        "a": 1
+      }
+    },
+    {
+      "id": "parse_ai_json_fenced_no_lang",
+      "fn": "parse_ai_json",
+      "input": "```\n[1, 2]\n```",
+      "expected": [
+        1,
+        2
+      ]
+    },
+    {
+      "id": "parse_ai_json_fenced_upper",
+      "fn": "parse_ai_json",
+      "input": "```JSON\n{\"is_food\": true}\n```",
+      "expected": {
+        "is_food": true
+      }
+    },
+    {
+      "id": "parse_ai_json_fenced_padded",
+      "fn": "parse_ai_json",
+      "input": "  ```json\n{\"a\": 1}\n```  ",
+      "expected": {
+        "a": 1
+      }
+    },
+    {
+      "id": "parse_ai_json_prose_wrapped_object",
+      "fn": "parse_ai_json",
+      "input": "Here is the result: {\"a\": 1} hope that helps",
+      "expected": {
+        "a": 1
+      }
+    },
+    {
+      "id": "parse_ai_json_prose_wrapped_array",
+      "fn": "parse_ai_json",
+      "input": "the actions are [1, 2] as requested",
+      "expected": [
+        1,
+        2
+      ]
+    },
+    {
+      "id": "parse_ai_json_prose_nested",
+      "fn": "parse_ai_json",
+      "input": "x {\"a\": [1, 2], \"b\": {\"c\": 3}} y",
+      "expected": {
+        "a": [
+          1,
+          2
+        ],
+        "b": {
+          "c": 3
+        }
+      }
+    },
+    {
+      "id": "parse_ai_json_bare_intent_array",
+      "fn": "parse_ai_json",
+      "input": "[{\"intent\": \"delete\", \"meal_indices\": [2]}]",
+      "expected": [
+        {
+          "intent": "delete",
+          "meal_indices": [
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "id": "parse_ai_json_whitespace_padded",
+      "fn": "parse_ai_json",
+      "input": "   {\"a\": 1}   ",
+      "expected": {
+        "a": 1
+      }
+    },
+    {
+      "id": "parse_ai_json_no_json",
+      "fn": "parse_ai_json",
+      "input": "no json here",
+      "expected": {
+        "__raises__": true
+      }
+    },
+    {
+      "id": "parse_ai_json_empty",
+      "fn": "parse_ai_json",
+      "input": "",
+      "expected": {
+        "__raises__": true
+      }
+    },
+    {
+      "id": "parse_ai_json_none",
+      "fn": "parse_ai_json",
+      "input": null,
+      "expected": {
+        "__raises__": true
+      }
+    },
+    {
+      "id": "parse_ai_json_unterminated_object",
+      "fn": "parse_ai_json",
+      "input": "{\"broken\": ",
+      "expected": {
+        "__raises__": true
+      }
+    },
+    {
+      "id": "parse_ai_json_close_before_open",
+      "fn": "parse_ai_json",
+      "input": "}{",
+      "expected": {
+        "__raises__": true
+      }
+    },
+    {
+      "id": "parse_ai_json_fence_only",
+      "fn": "parse_ai_json",
+      "input": "```json\n```",
+      "expected": {
+        "__raises__": true
+      }
+    }
+  ]
+}

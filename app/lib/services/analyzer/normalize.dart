@@ -11,12 +11,14 @@ import 'dart:typed_data';
 
 import 'package:image/image.dart' as img;
 
-/// Spec §3.1/§8: long side 1568 px, matches the accuracy-neutral cap; not
-/// user-editable.
-const int kAnalysisLongSidePx = 1568;
+import '../../core/shared_generated.dart';
 
-/// Spec §3.1 step 5: JPEG quality 85.
-const int kAnalysisJpegQuality = 85;
+/// Spec §3.1/§8: long side 1568 px, matches the accuracy-neutral cap; not
+/// user-editable. Value from shared/constants.json.
+const int kAnalysisLongSidePx = SharedConstants.normalizeMaxDimensionPx;
+
+/// Spec §3.1 step 5: JPEG quality 85 (shared/constants.json).
+const int kAnalysisJpegQuality = SharedConstants.normalizeJpegQuality;
 
 /// Returns the normalized JPEG, or null on ANY failure — spec §3.1 step 6:
 /// callers then send the original bytes if < 5 MB, else fail.

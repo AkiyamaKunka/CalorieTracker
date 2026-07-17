@@ -1,0 +1,1414 @@
+{
+  "generator": "scripts/generate_shared_vectors.py",
+  "encoding": "Inputs/outputs are plain JSON except: {\"__special__\": \"nan\"|\"inf\"|\"-inf\"} encodes a non-JSON float, and an expected of {\"__raises__\": true} means the call raises. Decode specials before calling the implementation.",
+  "max_actions": 5,
+  "cases": [
+    {
+      "id": "single_correction",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": "correction",
+        "meal_index": 1,
+        "reason": "wrong dish",
+        "analysis": {
+          "is_food": true,
+          "meal_description": "roast duck rice",
+          "total_calories": 780
+        }
+      },
+      "expected": [
+        {
+          "intent": "correction",
+          "meal_index": 1,
+          "reason": "wrong dish",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "roast duck rice",
+            "total_calories": 780
+          }
+        }
+      ]
+    },
+    {
+      "id": "single_delete",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": "delete",
+        "meal_indices": [
+          2
+        ],
+        "reason": "user asked"
+      },
+      "expected": [
+        {
+          "intent": "delete",
+          "meal_indices": [
+            2
+          ],
+          "reason": "user asked"
+        }
+      ]
+    },
+    {
+      "id": "single_new_meal",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": "new_meal",
+        "analysis": {
+          "is_food": true,
+          "meal_description": "oatmeal",
+          "total_calories": 320
+        }
+      },
+      "expected": [
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          }
+        }
+      ]
+    },
+    {
+      "id": "single_log_weight",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": "log_weight",
+        "weight_kg": 71.4
+      },
+      "expected": [
+        {
+          "intent": "log_weight",
+          "weight_kg": 71.4
+        }
+      ]
+    },
+    {
+      "id": "single_log_activity",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": "log_activity",
+        "calories_burned": 450,
+        "steps": 8000,
+        "distance_km": 5
+      },
+      "expected": [
+        {
+          "intent": "log_activity",
+          "calories_burned": 450,
+          "steps": 8000,
+          "distance_km": 5
+        }
+      ]
+    },
+    {
+      "id": "single_chat",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": "chat",
+        "reply": "Sounds like a balanced day!"
+      },
+      "expected": [
+        {
+          "intent": "chat",
+          "reply": "Sounds like a balanced day!"
+        }
+      ]
+    },
+    {
+      "id": "single_unknown_intent",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": "dance",
+        "reply": "?"
+      },
+      "expected": [
+        {
+          "intent": "dance",
+          "reply": "?"
+        }
+      ]
+    },
+    {
+      "id": "single_no_intent_key",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "reply": "hello"
+      },
+      "expected": [
+        {
+          "reply": "hello"
+        }
+      ]
+    },
+    {
+      "id": "single_intent_number",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": 3,
+        "reply": "?"
+      },
+      "expected": [
+        {
+          "intent": 3,
+          "reply": "?"
+        }
+      ]
+    },
+    {
+      "id": "multi_two_actions",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": "multi",
+        "actions": [
+          {
+            "intent": "correction",
+            "meal_index": 1,
+            "reason": "wrong dish",
+            "analysis": {
+              "is_food": true,
+              "meal_description": "roast duck rice",
+              "total_calories": 780
+            }
+          },
+          {
+            "intent": "delete",
+            "meal_indices": [
+              2
+            ],
+            "reason": "user asked"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "intent": "correction",
+          "meal_index": 1,
+          "reason": "wrong dish",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "roast duck rice",
+            "total_calories": 780
+          }
+        },
+        {
+          "intent": "delete",
+          "meal_indices": [
+            2
+          ],
+          "reason": "user asked"
+        }
+      ]
+    },
+    {
+      "id": "multi_three_actions",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": "multi",
+        "actions": [
+          {
+            "intent": "new_meal",
+            "analysis": {
+              "is_food": true,
+              "meal_description": "oatmeal",
+              "total_calories": 320
+            }
+          },
+          {
+            "intent": "log_weight",
+            "weight_kg": 71.4
+          },
+          {
+            "intent": "log_activity",
+            "calories_burned": 450,
+            "steps": 8000,
+            "distance_km": 5
+          }
+        ]
+      },
+      "expected": [
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          }
+        },
+        {
+          "intent": "log_weight",
+          "weight_kg": 71.4
+        },
+        {
+          "intent": "log_activity",
+          "calories_burned": 450,
+          "steps": 8000,
+          "distance_km": 5
+        }
+      ]
+    },
+    {
+      "id": "multi_empty_actions",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": "multi",
+        "actions": []
+      },
+      "expected": [
+        {
+          "intent": "multi",
+          "actions": []
+        }
+      ]
+    },
+    {
+      "id": "multi_actions_not_list",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": "multi",
+        "actions": {
+          "intent": "delete"
+        }
+      },
+      "expected": [
+        {
+          "intent": "multi",
+          "actions": {
+            "intent": "delete"
+          }
+        }
+      ]
+    },
+    {
+      "id": "multi_actions_scalar",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": "multi",
+        "actions": "delete meal 2"
+      },
+      "expected": [
+        {
+          "intent": "multi",
+          "actions": "delete meal 2"
+        }
+      ]
+    },
+    {
+      "id": "multi_with_non_map_entries",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": "multi",
+        "actions": [
+          {
+            "intent": "correction",
+            "meal_index": 1,
+            "reason": "wrong dish",
+            "analysis": {
+              "is_food": true,
+              "meal_description": "roast duck rice",
+              "total_calories": 780
+            }
+          },
+          "junk",
+          3,
+          null,
+          {
+            "intent": "delete",
+            "meal_indices": [
+              2
+            ],
+            "reason": "user asked"
+          },
+          [
+            {
+              "intent": "new_meal",
+              "analysis": {
+                "is_food": true,
+                "meal_description": "oatmeal",
+                "total_calories": 320
+              }
+            }
+          ]
+        ]
+      },
+      "expected": [
+        {
+          "intent": "correction",
+          "meal_index": 1,
+          "reason": "wrong dish",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "roast duck rice",
+            "total_calories": 780
+          }
+        },
+        {
+          "intent": "delete",
+          "meal_indices": [
+            2
+          ],
+          "reason": "user asked"
+        }
+      ]
+    },
+    {
+      "id": "multi_all_non_map_entries",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": "multi",
+        "actions": [
+          "a",
+          1,
+          null
+        ]
+      },
+      "expected": []
+    },
+    {
+      "id": "bare_array_production_correction_delete",
+      "fn": "_normalize_nl_actions",
+      "input": [
+        {
+          "intent": "correction",
+          "meal_index": 1,
+          "reason": "第二顿饭改为烧鸭饭",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "烧鸭饭",
+            "total_calories": 780,
+            "total_protein_g": 32,
+            "total_carbs_g": 88,
+            "total_fat_g": 30,
+            "food_items": [
+              {
+                "name": "烧鸭",
+                "estimated_calories": 380
+              },
+              {
+                "name": "米饭",
+                "estimated_calories": 400
+              }
+            ]
+          }
+        },
+        {
+          "intent": "delete",
+          "meal_indices": [
+            2
+          ],
+          "reason": "用户要求删除第三顿饭"
+        }
+      ],
+      "expected": [
+        {
+          "intent": "correction",
+          "meal_index": 1,
+          "reason": "第二顿饭改为烧鸭饭",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "烧鸭饭",
+            "total_calories": 780,
+            "total_protein_g": 32,
+            "total_carbs_g": 88,
+            "total_fat_g": 30,
+            "food_items": [
+              {
+                "name": "烧鸭",
+                "estimated_calories": 380
+              },
+              {
+                "name": "米饭",
+                "estimated_calories": 400
+              }
+            ]
+          }
+        },
+        {
+          "intent": "delete",
+          "meal_indices": [
+            2
+          ],
+          "reason": "用户要求删除第三顿饭"
+        }
+      ]
+    },
+    {
+      "id": "bare_array_single",
+      "fn": "_normalize_nl_actions",
+      "input": [
+        {
+          "intent": "correction",
+          "meal_index": 1,
+          "reason": "wrong dish",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "roast duck rice",
+            "total_calories": 780
+          }
+        }
+      ],
+      "expected": [
+        {
+          "intent": "correction",
+          "meal_index": 1,
+          "reason": "wrong dish",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "roast duck rice",
+            "total_calories": 780
+          }
+        }
+      ]
+    },
+    {
+      "id": "bare_array_empty",
+      "fn": "_normalize_nl_actions",
+      "input": [],
+      "expected": []
+    },
+    {
+      "id": "bare_array_with_non_map_entries",
+      "fn": "_normalize_nl_actions",
+      "input": [
+        {
+          "intent": "correction",
+          "meal_index": 1,
+          "reason": "wrong dish",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "roast duck rice",
+            "total_calories": 780
+          }
+        },
+        "junk",
+        7,
+        null,
+        {
+          "intent": "delete",
+          "meal_indices": [
+            2
+          ],
+          "reason": "user asked"
+        }
+      ],
+      "expected": [
+        {
+          "intent": "correction",
+          "meal_index": 1,
+          "reason": "wrong dish",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "roast duck rice",
+            "total_calories": 780
+          }
+        },
+        {
+          "intent": "delete",
+          "meal_indices": [
+            2
+          ],
+          "reason": "user asked"
+        }
+      ]
+    },
+    {
+      "id": "bare_array_all_non_map",
+      "fn": "_normalize_nl_actions",
+      "input": [
+        "only",
+        "strings",
+        1,
+        null
+      ],
+      "expected": []
+    },
+    {
+      "id": "bare_array_nested_list_dropped",
+      "fn": "_normalize_nl_actions",
+      "input": [
+        [
+          {
+            "intent": "correction",
+            "meal_index": 1,
+            "reason": "wrong dish",
+            "analysis": {
+              "is_food": true,
+              "meal_description": "roast duck rice",
+              "total_calories": 780
+            }
+          }
+        ]
+      ],
+      "expected": []
+    },
+    {
+      "id": "scalar_string",
+      "fn": "_normalize_nl_actions",
+      "input": "hello",
+      "expected": []
+    },
+    {
+      "id": "scalar_number",
+      "fn": "_normalize_nl_actions",
+      "input": 42,
+      "expected": []
+    },
+    {
+      "id": "scalar_null",
+      "fn": "_normalize_nl_actions",
+      "input": null,
+      "expected": []
+    },
+    {
+      "id": "scalar_bool",
+      "fn": "_normalize_nl_actions",
+      "input": true,
+      "expected": []
+    },
+    {
+      "id": "recognized_single_wins_over_actions",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": "correction",
+        "meal_index": 0,
+        "analysis": {
+          "is_food": true,
+          "meal_description": "roast duck rice",
+          "total_calories": 780
+        },
+        "actions": [
+          {
+            "intent": "delete",
+            "meal_indices": [
+              2
+            ],
+            "reason": "user asked"
+          },
+          {
+            "intent": "new_meal",
+            "analysis": {
+              "is_food": true,
+              "meal_description": "oatmeal",
+              "total_calories": 320
+            }
+          }
+        ]
+      },
+      "expected": [
+        {
+          "intent": "correction",
+          "meal_index": 0,
+          "analysis": {
+            "is_food": true,
+            "meal_description": "roast duck rice",
+            "total_calories": 780
+          },
+          "actions": [
+            {
+              "intent": "delete",
+              "meal_indices": [
+                2
+              ],
+              "reason": "user asked"
+            },
+            {
+              "intent": "new_meal",
+              "analysis": {
+                "is_food": true,
+                "meal_description": "oatmeal",
+                "total_calories": 320
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "unrecognized_intent_wrapper_uses_actions",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": "compound_request",
+        "actions": [
+          {
+            "intent": "correction",
+            "meal_index": 1,
+            "reason": "wrong dish",
+            "analysis": {
+              "is_food": true,
+              "meal_description": "roast duck rice",
+              "total_calories": 780
+            }
+          },
+          {
+            "intent": "delete",
+            "meal_indices": [
+              2
+            ],
+            "reason": "user asked"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "intent": "correction",
+          "meal_index": 1,
+          "reason": "wrong dish",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "roast duck rice",
+            "total_calories": 780
+          }
+        },
+        {
+          "intent": "delete",
+          "meal_indices": [
+            2
+          ],
+          "reason": "user asked"
+        }
+      ]
+    },
+    {
+      "id": "no_intent_wrapper_uses_actions",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "actions": [
+          {
+            "intent": "new_meal",
+            "analysis": {
+              "is_food": true,
+              "meal_description": "oatmeal",
+              "total_calories": 320
+            }
+          }
+        ]
+      },
+      "expected": [
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          }
+        }
+      ]
+    },
+    {
+      "id": "chat_intent_wrapper_uses_actions",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": "chat",
+        "reply": "doing both",
+        "actions": [
+          {
+            "intent": "correction",
+            "meal_index": 1,
+            "reason": "wrong dish",
+            "analysis": {
+              "is_food": true,
+              "meal_description": "roast duck rice",
+              "total_calories": 780
+            }
+          },
+          {
+            "intent": "delete",
+            "meal_indices": [
+              2
+            ],
+            "reason": "user asked"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "intent": "correction",
+          "meal_index": 1,
+          "reason": "wrong dish",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "roast duck rice",
+            "total_calories": 780
+          }
+        },
+        {
+          "intent": "delete",
+          "meal_indices": [
+            2
+          ],
+          "reason": "user asked"
+        }
+      ]
+    },
+    {
+      "id": "number_intent_wrapper_uses_actions",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": 3.14,
+        "actions": [
+          {
+            "intent": "delete",
+            "meal_indices": [
+              2
+            ],
+            "reason": "user asked"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "intent": "delete",
+          "meal_indices": [
+            2
+          ],
+          "reason": "user asked"
+        }
+      ]
+    },
+    {
+      "id": "object_intent_wrapper_uses_actions",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": {
+          "kind": "multi"
+        },
+        "actions": [
+          {
+            "intent": "correction",
+            "meal_index": 1,
+            "reason": "wrong dish",
+            "analysis": {
+              "is_food": true,
+              "meal_description": "roast duck rice",
+              "total_calories": 780
+            }
+          }
+        ]
+      },
+      "expected": [
+        {
+          "intent": "correction",
+          "meal_index": 1,
+          "reason": "wrong dish",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "roast duck rice",
+            "total_calories": 780
+          }
+        }
+      ]
+    },
+    {
+      "id": "array_intent_wrapper_uses_actions",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": [
+          "correction"
+        ],
+        "actions": [
+          {
+            "intent": "new_meal",
+            "analysis": {
+              "is_food": true,
+              "meal_description": "oatmeal",
+              "total_calories": 320
+            }
+          }
+        ]
+      },
+      "expected": [
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          }
+        }
+      ]
+    },
+    {
+      "id": "bool_intent_wrapper_uses_actions",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": true,
+        "actions": [
+          {
+            "intent": "log_weight",
+            "weight_kg": 71.4
+          }
+        ]
+      },
+      "expected": [
+        {
+          "intent": "log_weight",
+          "weight_kg": 71.4
+        }
+      ]
+    },
+    {
+      "id": "cap_bare_array_seven_actions",
+      "fn": "_normalize_nl_actions",
+      "input": [
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          },
+          "note": 0
+        },
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          },
+          "note": 1
+        },
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          },
+          "note": 2
+        },
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          },
+          "note": 3
+        },
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          },
+          "note": 4
+        },
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          },
+          "note": 5
+        },
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          },
+          "note": 6
+        }
+      ],
+      "expected": [
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          },
+          "note": 0
+        },
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          },
+          "note": 1
+        },
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          },
+          "note": 2
+        },
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          },
+          "note": 3
+        },
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          },
+          "note": 4
+        }
+      ]
+    },
+    {
+      "id": "cap_multi_six_actions",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": "multi",
+        "actions": [
+          {
+            "intent": "correction",
+            "meal_index": 1,
+            "reason": "wrong dish",
+            "analysis": {
+              "is_food": true,
+              "meal_description": "roast duck rice",
+              "total_calories": 780
+            }
+          },
+          {
+            "intent": "new_meal",
+            "analysis": {
+              "is_food": true,
+              "meal_description": "oatmeal",
+              "total_calories": 320
+            }
+          },
+          {
+            "intent": "log_weight",
+            "weight_kg": 71.4
+          },
+          {
+            "intent": "log_activity",
+            "calories_burned": 450,
+            "steps": 8000,
+            "distance_km": 5
+          },
+          {
+            "intent": "delete",
+            "meal_indices": [
+              2
+            ],
+            "reason": "user asked"
+          },
+          {
+            "intent": "delete",
+            "meal_indices": [
+              4
+            ]
+          }
+        ]
+      },
+      "expected": [
+        {
+          "intent": "correction",
+          "meal_index": 1,
+          "reason": "wrong dish",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "roast duck rice",
+            "total_calories": 780
+          }
+        },
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          }
+        },
+        {
+          "intent": "log_weight",
+          "weight_kg": 71.4
+        },
+        {
+          "intent": "log_activity",
+          "calories_burned": 450,
+          "steps": 8000,
+          "distance_km": 5
+        },
+        {
+          "intent": "delete",
+          "meal_indices": [
+            2
+          ],
+          "reason": "user asked"
+        }
+      ]
+    },
+    {
+      "id": "cap_drops_second_delete_before_merge",
+      "fn": "_normalize_nl_actions",
+      "input": [
+        {
+          "intent": "delete",
+          "meal_indices": [
+            2
+          ],
+          "reason": "user asked"
+        },
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          }
+        },
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          }
+        },
+        {
+          "intent": "log_weight",
+          "weight_kg": 71.4
+        },
+        {
+          "intent": "log_activity",
+          "calories_burned": 450,
+          "steps": 8000,
+          "distance_km": 5
+        },
+        {
+          "intent": "delete",
+          "meal_indices": [
+            4
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "intent": "delete",
+          "meal_indices": [
+            2
+          ],
+          "reason": "user asked"
+        },
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          }
+        },
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          }
+        },
+        {
+          "intent": "log_weight",
+          "weight_kg": 71.4
+        },
+        {
+          "intent": "log_activity",
+          "calories_burned": 450,
+          "steps": 8000,
+          "distance_km": 5
+        }
+      ]
+    },
+    {
+      "id": "cap_then_merge_deletes",
+      "fn": "_normalize_nl_actions",
+      "input": [
+        {
+          "intent": "delete",
+          "meal_indices": [
+            0
+          ]
+        },
+        {
+          "intent": "delete",
+          "meal_indices": [
+            1
+          ]
+        },
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          }
+        },
+        {
+          "intent": "log_weight",
+          "weight_kg": 71.4
+        },
+        {
+          "intent": "log_activity",
+          "calories_burned": 450,
+          "steps": 8000,
+          "distance_km": 5
+        },
+        {
+          "intent": "correction",
+          "meal_index": 1,
+          "reason": "wrong dish",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "roast duck rice",
+            "total_calories": 780
+          }
+        }
+      ],
+      "expected": [
+        {
+          "intent": "delete",
+          "meal_indices": [
+            0,
+            1
+          ]
+        },
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          }
+        },
+        {
+          "intent": "log_weight",
+          "weight_kg": 71.4
+        },
+        {
+          "intent": "log_activity",
+          "calories_burned": 450,
+          "steps": 8000,
+          "distance_km": 5
+        }
+      ]
+    },
+    {
+      "id": "merge_two_deletes",
+      "fn": "_normalize_nl_actions",
+      "input": [
+        {
+          "intent": "delete",
+          "meal_indices": [
+            0
+          ],
+          "reason": "first"
+        },
+        {
+          "intent": "delete",
+          "meal_indices": [
+            2,
+            3
+          ],
+          "reason": "second"
+        }
+      ],
+      "expected": [
+        {
+          "intent": "delete",
+          "meal_indices": [
+            0,
+            2,
+            3
+          ],
+          "reason": "first"
+        }
+      ]
+    },
+    {
+      "id": "merge_three_deletes",
+      "fn": "_normalize_nl_actions",
+      "input": [
+        {
+          "intent": "delete",
+          "meal_indices": [
+            0
+          ]
+        },
+        {
+          "intent": "delete",
+          "meal_indices": [
+            1
+          ]
+        },
+        {
+          "intent": "delete",
+          "meal_indices": [
+            5
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "intent": "delete",
+          "meal_indices": [
+            0,
+            1,
+            5
+          ]
+        }
+      ]
+    },
+    {
+      "id": "merge_keeps_first_delete_position",
+      "fn": "_normalize_nl_actions",
+      "input": [
+        {
+          "intent": "correction",
+          "meal_index": 1,
+          "reason": "wrong dish",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "roast duck rice",
+            "total_calories": 780
+          }
+        },
+        {
+          "intent": "delete",
+          "meal_indices": [
+            1
+          ]
+        },
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          }
+        },
+        {
+          "intent": "delete",
+          "meal_indices": [
+            2
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "intent": "correction",
+          "meal_index": 1,
+          "reason": "wrong dish",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "roast duck rice",
+            "total_calories": 780
+          }
+        },
+        {
+          "intent": "delete",
+          "meal_indices": [
+            1,
+            2
+          ]
+        },
+        {
+          "intent": "new_meal",
+          "analysis": {
+            "is_food": true,
+            "meal_description": "oatmeal",
+            "total_calories": 320
+          }
+        }
+      ]
+    },
+    {
+      "id": "merge_scalar_indices_contribute_nothing",
+      "fn": "_normalize_nl_actions",
+      "input": [
+        {
+          "intent": "delete",
+          "meal_indices": 3
+        },
+        {
+          "intent": "delete",
+          "meal_indices": [
+            1
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "intent": "delete",
+          "meal_indices": [
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "merge_missing_indices_contribute_nothing",
+      "fn": "_normalize_nl_actions",
+      "input": [
+        {
+          "intent": "delete"
+        },
+        {
+          "intent": "delete",
+          "meal_indices": [
+            0,
+            1
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "intent": "delete",
+          "meal_indices": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "id": "single_delete_scalar_indices_passthrough",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": "delete",
+        "meal_indices": 2
+      },
+      "expected": [
+        {
+          "intent": "delete",
+          "meal_indices": 2
+        }
+      ]
+    },
+    {
+      "id": "single_delete_hostile_indices_passthrough",
+      "fn": "_normalize_nl_actions",
+      "input": {
+        "intent": "delete",
+        "meal_indices": "all"
+      },
+      "expected": [
+        {
+          "intent": "delete",
+          "meal_indices": "all"
+        }
+      ]
+    }
+  ]
+}

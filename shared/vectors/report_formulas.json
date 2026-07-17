@@ -1,0 +1,603 @@
+{
+  "generator": "scripts/generate_shared_vectors.py",
+  "encoding": "Inputs/outputs are plain JSON except: {\"__special__\": \"nan\"|\"inf\"|\"-inf\"} encodes a non-JSON float, and an expected of {\"__raises__\": true} means the call raises. Decode specials before calling the implementation.",
+  "cases": [
+    {
+      "id": "day_totals_two_days",
+      "fn": "day_calorie_totals",
+      "input": [
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 500
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 700
+          }
+        },
+        {
+          "date": "2026-07-15",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 1800
+          }
+        }
+      ],
+      "expected": {
+        "2026-07-14": 1200,
+        "2026-07-15": 1800
+      }
+    },
+    {
+      "id": "day_totals_non_food_skipped",
+      "fn": "day_calorie_totals",
+      "input": [
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 500
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": false,
+            "total_calories": 900
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "total_calories": 300
+          }
+        }
+      ],
+      "expected": {
+        "2026-07-14": 500
+      }
+    },
+    {
+      "id": "day_totals_truthy_is_food_counts",
+      "fn": "day_calorie_totals",
+      "input": [
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": "yes",
+            "total_calories": 500
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": 0,
+            "total_calories": 200
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": 1,
+            "total_calories": 100
+          }
+        }
+      ],
+      "expected": {
+        "2026-07-14": 600
+      }
+    },
+    {
+      "id": "day_totals_negative_clamped_to_zero",
+      "fn": "day_calorie_totals",
+      "input": [
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": -400
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 600
+          }
+        }
+      ],
+      "expected": {
+        "2026-07-14": 600
+      }
+    },
+    {
+      "id": "day_totals_hostile_values_coerce_to_zero",
+      "fn": "day_calorie_totals",
+      "input": [
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": "640"
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 1e+18
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": {
+              "__special__": "inf"
+            }
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": {
+              "__special__": "nan"
+            }
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": true
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": null
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 250
+          }
+        }
+      ],
+      "expected": {
+        "2026-07-14": 250
+      }
+    },
+    {
+      "id": "day_totals_missing_date_buckets_under_empty",
+      "fn": "day_calorie_totals",
+      "input": [
+        {
+          "analysis": {
+            "is_food": true,
+            "total_calories": 400
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 500
+          }
+        }
+      ],
+      "expected": {
+        "": 400,
+        "2026-07-14": 500
+      }
+    },
+    {
+      "id": "day_totals_float_calories_accumulate",
+      "fn": "day_calorie_totals",
+      "input": [
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 250.5
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 250.25
+          }
+        }
+      ],
+      "expected": {
+        "2026-07-14": 500.75
+      }
+    },
+    {
+      "id": "day_totals_empty",
+      "fn": "day_calorie_totals",
+      "input": [],
+      "expected": {}
+    },
+    {
+      "id": "typical_median_two_days",
+      "fn": "typical_day_median",
+      "input": {
+        "2026-07-14": 1800,
+        "2026-07-15": 2200
+      },
+      "expected": 2000
+    },
+    {
+      "id": "typical_median_even_count_averages_middle_pair",
+      "fn": "typical_day_median",
+      "input": {
+        "d1": 1000,
+        "d2": 1500,
+        "d3": 2000,
+        "d4": 3000
+      },
+      "expected": 1750
+    },
+    {
+      "id": "typical_median_even_count_truncates_half",
+      "fn": "typical_day_median",
+      "input": {
+        "d1": 1001,
+        "d2": 1002
+      },
+      "expected": 1001
+    },
+    {
+      "id": "typical_median_odd_count",
+      "fn": "typical_day_median",
+      "input": {
+        "d1": 1200,
+        "d2": 2600,
+        "d3": 1900
+      },
+      "expected": 1900
+    },
+    {
+      "id": "typical_median_order_independent",
+      "fn": "typical_day_median",
+      "input": {
+        "d1": 2600,
+        "d2": 1200,
+        "d3": 1900
+      },
+      "expected": 1900
+    },
+    {
+      "id": "typical_median_single_day_null",
+      "fn": "typical_day_median",
+      "input": {
+        "2026-07-14": 1800
+      },
+      "expected": null
+    },
+    {
+      "id": "typical_median_empty_null",
+      "fn": "typical_day_median",
+      "input": {},
+      "expected": null
+    },
+    {
+      "id": "prior_avg_two_days",
+      "fn": "report_prior_avg",
+      "input": [
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 1400
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 600
+          }
+        },
+        {
+          "date": "2026-07-15",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 1800
+          }
+        }
+      ],
+      "expected": {
+        "day_totals": {
+          "2026-07-14": 2000,
+          "2026-07-15": 1800
+        },
+        "avg": 1900
+      }
+    },
+    {
+      "id": "prior_avg_single_day_null_avg",
+      "fn": "report_prior_avg",
+      "input": [
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 900
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 700
+          }
+        }
+      ],
+      "expected": {
+        "day_totals": {
+          "2026-07-14": 1600
+        },
+        "avg": null
+      }
+    },
+    {
+      "id": "prior_avg_empty",
+      "fn": "report_prior_avg",
+      "input": [],
+      "expected": {
+        "day_totals": {},
+        "avg": null
+      }
+    },
+    {
+      "id": "prior_avg_filter_zero_and_negative",
+      "fn": "report_prior_avg",
+      "input": [
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 0
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": -300
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 500
+          }
+        },
+        {
+          "date": "2026-07-15",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 700
+          }
+        }
+      ],
+      "expected": {
+        "day_totals": {
+          "2026-07-14": 500,
+          "2026-07-15": 700
+        },
+        "avg": 600
+      }
+    },
+    {
+      "id": "prior_avg_filter_upper_bound",
+      "fn": "report_prior_avg",
+      "input": [
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 1000000000.0
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 999999999
+          }
+        },
+        {
+          "date": "2026-07-15",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 999999999.0
+          }
+        }
+      ],
+      "expected": {
+        "day_totals": {
+          "2026-07-14": 999999999,
+          "2026-07-15": 999999999.0
+        },
+        "avg": 999999999
+      }
+    },
+    {
+      "id": "prior_avg_filter_non_numeric_and_bool",
+      "fn": "report_prior_avg",
+      "input": [
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": "800"
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": true
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": null
+          }
+        },
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 400
+          }
+        },
+        {
+          "date": "2026-07-15",
+          "analysis": {
+            "is_food": "truthy-string",
+            "total_calories": 600
+          }
+        }
+      ],
+      "expected": {
+        "day_totals": {
+          "2026-07-14": 400,
+          "2026-07-15": 600
+        },
+        "avg": 500
+      }
+    },
+    {
+      "id": "prior_avg_filter_non_food",
+      "fn": "report_prior_avg",
+      "input": [
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 500
+          }
+        },
+        {
+          "date": "2026-07-15",
+          "analysis": {
+            "is_food": false,
+            "total_calories": 800
+          }
+        },
+        {
+          "date": "2026-07-15",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 300
+          }
+        }
+      ],
+      "expected": {
+        "day_totals": {
+          "2026-07-14": 500,
+          "2026-07-15": 300
+        },
+        "avg": 400
+      }
+    },
+    {
+      "id": "prior_avg_bankers_rounding_half_to_even_down",
+      "fn": "report_prior_avg",
+      "input": [
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 1000
+          }
+        },
+        {
+          "date": "2026-07-15",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 1001
+          }
+        }
+      ],
+      "expected": {
+        "day_totals": {
+          "2026-07-14": 1000,
+          "2026-07-15": 1001
+        },
+        "avg": 1000
+      }
+    },
+    {
+      "id": "prior_avg_bankers_rounding_half_to_even_up",
+      "fn": "report_prior_avg",
+      "input": [
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 1001
+          }
+        },
+        {
+          "date": "2026-07-15",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 1002
+          }
+        }
+      ],
+      "expected": {
+        "day_totals": {
+          "2026-07-14": 1001,
+          "2026-07-15": 1002
+        },
+        "avg": 1002
+      }
+    },
+    {
+      "id": "prior_avg_float_calories",
+      "fn": "report_prior_avg",
+      "input": [
+        {
+          "date": "2026-07-14",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 620.5
+          }
+        },
+        {
+          "date": "2026-07-15",
+          "analysis": {
+            "is_food": true,
+            "total_calories": 700.25
+          }
+        }
+      ],
+      "expected": {
+        "day_totals": {
+          "2026-07-14": 620.5,
+          "2026-07-15": 700.25
+        },
+        "avg": 660
+      }
+    }
+  ]
+}

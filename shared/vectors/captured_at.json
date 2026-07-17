@@ -1,0 +1,312 @@
+{
+  "generator": "scripts/generate_shared_vectors.py",
+  "encoding": "Inputs/outputs are plain JSON except: {\"__special__\": \"nan\"|\"inf\"|\"-inf\"} encodes a non-JSON float, and an expected of {\"__raises__\": true} means the call raises. Decode specials before calling the implementation.",
+  "max_age_days": 45,
+  "cases": [
+    {
+      "id": "filename_standard_img",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_20260716_193042.jpg",
+      "expected": "2026-07-16 19:30:42"
+    },
+    {
+      "id": "filename_hash_prefixed",
+      "fn": "captured_at_from_filename",
+      "input": "a3f9c2d81b04__IMG_20260715_193042.jpg",
+      "expected": "2026-07-15 19:30:42"
+    },
+    {
+      "id": "filename_no_prefix",
+      "fn": "captured_at_from_filename",
+      "input": "20260716_193042.jpg",
+      "expected": "2026-07-16 19:30:42"
+    },
+    {
+      "id": "filename_vid_prefix",
+      "fn": "captured_at_from_filename",
+      "input": "VID_20260716_193042.mp4",
+      "expected": "2026-07-16 19:30:42"
+    },
+    {
+      "id": "filename_pixel_millis_suffix",
+      "fn": "captured_at_from_filename",
+      "input": "PXL_20260716_193042123.jpg",
+      "expected": "2026-07-16 19:30:42"
+    },
+    {
+      "id": "filename_trailing_extra_digit",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_20260716_1930421.jpg",
+      "expected": "2026-07-16 19:30:42"
+    },
+    {
+      "id": "filename_no_extension",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_20260716_193042",
+      "expected": "2026-07-16 19:30:42"
+    },
+    {
+      "id": "filename_digit_before_prefix",
+      "fn": "captured_at_from_filename",
+      "input": "9IMG_20260716_193042.jpg",
+      "expected": "2026-07-16 19:30:42"
+    },
+    {
+      "id": "filename_first_of_two_timestamps",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_20260101_000000_20260716_193042.jpg",
+      "expected": "2026-01-01 00:00:00"
+    },
+    {
+      "id": "filename_year_boundary_low",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_00010101_000000.jpg",
+      "expected": "0001-01-01 00:00:00"
+    },
+    {
+      "id": "filename_year_boundary_high",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_99991231_235959.jpg",
+      "expected": "9999-12-31 23:59:59"
+    },
+    {
+      "id": "filename_year_rollover_eve",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_20261231_235959.jpg",
+      "expected": "2026-12-31 23:59:59"
+    },
+    {
+      "id": "filename_year_rollover_day",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_20270101_000000.jpg",
+      "expected": "2027-01-01 00:00:00"
+    },
+    {
+      "id": "filename_leap_day_valid",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_20240229_080000.jpg",
+      "expected": "2024-02-29 08:00:00"
+    },
+    {
+      "id": "filename_leap_day_invalid",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_20260229_080000.jpg",
+      "expected": null
+    },
+    {
+      "id": "filename_month_13",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_20261332_120000.jpg",
+      "expected": null
+    },
+    {
+      "id": "filename_feb_31",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_20260231_120000.jpg",
+      "expected": null
+    },
+    {
+      "id": "filename_month_00",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_20260016_120000.jpg",
+      "expected": null
+    },
+    {
+      "id": "filename_day_00",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_20260700_120000.jpg",
+      "expected": null
+    },
+    {
+      "id": "filename_hour_25",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_20260716_250000.jpg",
+      "expected": null
+    },
+    {
+      "id": "filename_minute_60",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_20260716_196042.jpg",
+      "expected": null
+    },
+    {
+      "id": "filename_second_61",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_20260716_193061.jpg",
+      "expected": null
+    },
+    {
+      "id": "filename_second_60_leap",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_20260716_193060.jpg",
+      "expected": null
+    },
+    {
+      "id": "filename_dash_separator",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_20260716-193042.jpg",
+      "expected": null
+    },
+    {
+      "id": "filename_date_split_by_underscore",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_2026_0716.jpg",
+      "expected": null
+    },
+    {
+      "id": "filename_seven_digit_date",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_2026071_193042.jpg",
+      "expected": null
+    },
+    {
+      "id": "filename_five_digit_time",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_20260716_19304.jpg",
+      "expected": null
+    },
+    {
+      "id": "filename_nine_digit_date_run",
+      "fn": "captured_at_from_filename",
+      "input": "IMG_120260716_193042.jpg",
+      "expected": null
+    },
+    {
+      "id": "filename_plain_name",
+      "fn": "captured_at_from_filename",
+      "input": "photo.jpg",
+      "expected": null
+    },
+    {
+      "id": "filename_empty",
+      "fn": "captured_at_from_filename",
+      "input": "",
+      "expected": null
+    },
+    {
+      "id": "filename_none",
+      "fn": "captured_at_from_filename",
+      "input": null,
+      "expected": null
+    },
+    {
+      "id": "validation_exactly_now",
+      "fn": "captured_at_valid",
+      "captured_at": "2026-07-16 12:00:00",
+      "now": "2026-07-16 12:00:00",
+      "expected_valid": true
+    },
+    {
+      "id": "validation_one_second_future",
+      "fn": "captured_at_valid",
+      "captured_at": "2026-07-16 12:00:01",
+      "now": "2026-07-16 12:00:00",
+      "expected_valid": true
+    },
+    {
+      "id": "validation_plus_one_hour_inclusive",
+      "fn": "captured_at_valid",
+      "captured_at": "2026-07-16 13:00:00",
+      "now": "2026-07-16 12:00:00",
+      "expected_valid": true
+    },
+    {
+      "id": "validation_plus_one_hour_one_second",
+      "fn": "captured_at_valid",
+      "captured_at": "2026-07-16 13:00:01",
+      "now": "2026-07-16 12:00:00",
+      "expected_valid": false
+    },
+    {
+      "id": "validation_plus_one_day",
+      "fn": "captured_at_valid",
+      "captured_at": "2026-07-17 12:00:00",
+      "now": "2026-07-16 12:00:00",
+      "expected_valid": false
+    },
+    {
+      "id": "validation_yesterday",
+      "fn": "captured_at_valid",
+      "captured_at": "2026-07-15 20:15:30",
+      "now": "2026-07-16 12:00:00",
+      "expected_valid": true
+    },
+    {
+      "id": "validation_forty_four_days_old",
+      "fn": "captured_at_valid",
+      "captured_at": "2026-06-02 12:00:00",
+      "now": "2026-07-16 12:00:00",
+      "expected_valid": true
+    },
+    {
+      "id": "validation_minus_45_days_inclusive",
+      "fn": "captured_at_valid",
+      "captured_at": "2026-06-01 12:00:00",
+      "now": "2026-07-16 12:00:00",
+      "expected_valid": true
+    },
+    {
+      "id": "validation_minus_45_days_one_second",
+      "fn": "captured_at_valid",
+      "captured_at": "2026-06-01 11:59:59",
+      "now": "2026-07-16 12:00:00",
+      "expected_valid": false
+    },
+    {
+      "id": "validation_forty_six_days_old",
+      "fn": "captured_at_valid",
+      "captured_at": "2026-05-31 12:00:00",
+      "now": "2026-07-16 12:00:00",
+      "expected_valid": false
+    },
+    {
+      "id": "validation_padded_whitespace_valid",
+      "fn": "captured_at_valid",
+      "captured_at": "  2026-07-16 11:00:00  ",
+      "now": "2026-07-16 12:00:00",
+      "expected_valid": true
+    },
+    {
+      "id": "validation_iso_t_separator_invalid",
+      "fn": "captured_at_valid",
+      "captured_at": "2026-07-16T11:00:00",
+      "now": "2026-07-16 12:00:00",
+      "expected_valid": false
+    },
+    {
+      "id": "validation_missing_seconds_invalid",
+      "fn": "captured_at_valid",
+      "captured_at": "2026-07-16 11:00",
+      "now": "2026-07-16 12:00:00",
+      "expected_valid": false
+    },
+    {
+      "id": "validation_date_only_invalid",
+      "fn": "captured_at_valid",
+      "captured_at": "2026-07-16",
+      "now": "2026-07-16 12:00:00",
+      "expected_valid": false
+    },
+    {
+      "id": "validation_empty_invalid",
+      "fn": "captured_at_valid",
+      "captured_at": "",
+      "now": "2026-07-16 12:00:00",
+      "expected_valid": false
+    },
+    {
+      "id": "validation_junk_invalid",
+      "fn": "captured_at_valid",
+      "captured_at": "yesterday lunch",
+      "now": "2026-07-16 12:00:00",
+      "expected_valid": false
+    },
+    {
+      "id": "validation_midnight_now_window",
+      "fn": "captured_at_valid",
+      "captured_at": "2026-01-01 00:30:00",
+      "now": "2026-01-01 00:00:00",
+      "expected_valid": true
+    }
+  ]
+}

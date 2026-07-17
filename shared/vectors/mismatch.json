@@ -1,0 +1,476 @@
+{
+  "generator": "scripts/generate_shared_vectors.py",
+  "encoding": "Inputs/outputs are plain JSON except: {\"__special__\": \"nan\"|\"inf\"|\"-inf\"} encodes a non-JSON float, and an expected of {\"__raises__\": true} means the call raises. Decode specials before calling the implementation.",
+  "cases": [
+    {
+      "id": "production_135_vs_1335",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "is_food": true,
+        "meal_description": "beef noodle soup",
+        "total_calories": 1335,
+        "food_items": [
+          {
+            "name": "item0",
+            "estimated_calories": 45
+          },
+          {
+            "name": "item1",
+            "estimated_calories": 45
+          },
+          {
+            "name": "item2",
+            "estimated_calories": 45
+          }
+        ]
+      },
+      "expected": 135
+    },
+    {
+      "id": "inverse_1335_vs_135",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "total_calories": 135,
+        "food_items": [
+          {
+            "name": "item0",
+            "estimated_calories": 445
+          },
+          {
+            "name": "item1",
+            "estimated_calories": 445
+          },
+          {
+            "name": "item2",
+            "estimated_calories": 445
+          }
+        ]
+      },
+      "expected": 1335
+    },
+    {
+      "id": "consistent_exact",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "total_calories": 600,
+        "food_items": [
+          {
+            "name": "item0",
+            "estimated_calories": 200
+          },
+          {
+            "name": "item1",
+            "estimated_calories": 400
+          }
+        ]
+      },
+      "expected": null
+    },
+    {
+      "id": "consistent_close",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "total_calories": 620,
+        "food_items": [
+          {
+            "name": "item0",
+            "estimated_calories": 200
+          },
+          {
+            "name": "item1",
+            "estimated_calories": 400
+          }
+        ]
+      },
+      "expected": null
+    },
+    {
+      "id": "edge_diff_exactly_100",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "total_calories": 500,
+        "food_items": [
+          {
+            "name": "item0",
+            "estimated_calories": 150
+          },
+          {
+            "name": "item1",
+            "estimated_calories": 250
+          }
+        ]
+      },
+      "expected": null
+    },
+    {
+      "id": "edge_diff_101",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "total_calories": 501,
+        "food_items": [
+          {
+            "name": "item0",
+            "estimated_calories": 150
+          },
+          {
+            "name": "item1",
+            "estimated_calories": 250
+          }
+        ]
+      },
+      "expected": 400
+    },
+    {
+      "id": "edge_exactly_20_percent",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "total_calories": 1000,
+        "food_items": [
+          {
+            "name": "item0",
+            "estimated_calories": 400
+          },
+          {
+            "name": "item1",
+            "estimated_calories": 400
+          }
+        ]
+      },
+      "expected": null
+    },
+    {
+      "id": "edge_just_over_20_percent",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "total_calories": 1000,
+        "food_items": [
+          {
+            "name": "item0",
+            "estimated_calories": 400
+          },
+          {
+            "name": "item1",
+            "estimated_calories": 399
+          }
+        ]
+      },
+      "expected": 799
+    },
+    {
+      "id": "edge_20_percent_of_item_sum",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "total_calories": 800,
+        "food_items": [
+          {
+            "name": "item0",
+            "estimated_calories": 500
+          },
+          {
+            "name": "item1",
+            "estimated_calories": 500
+          }
+        ]
+      },
+      "expected": null
+    },
+    {
+      "id": "no_items",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "total_calories": 500
+      },
+      "expected": null
+    },
+    {
+      "id": "empty_items",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "total_calories": 500,
+        "food_items": []
+      },
+      "expected": null
+    },
+    {
+      "id": "items_without_calories",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "total_calories": 500,
+        "food_items": [
+          {
+            "name": "rice"
+          },
+          {
+            "name": "soup"
+          }
+        ]
+      },
+      "expected": null
+    },
+    {
+      "id": "item_sum_zero",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "total_calories": 500,
+        "food_items": [
+          {
+            "name": "item0",
+            "estimated_calories": 0
+          },
+          {
+            "name": "item1",
+            "estimated_calories": 0
+          }
+        ]
+      },
+      "expected": null
+    },
+    {
+      "id": "item_sum_negative",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "total_calories": 500,
+        "food_items": [
+          {
+            "name": "item0",
+            "estimated_calories": -50
+          },
+          {
+            "name": "item1",
+            "estimated_calories": 20
+          }
+        ]
+      },
+      "expected": null
+    },
+    {
+      "id": "total_missing",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "food_items": [
+          {
+            "name": "item0",
+            "estimated_calories": 200
+          },
+          {
+            "name": "item1",
+            "estimated_calories": 300
+          }
+        ]
+      },
+      "expected": null
+    },
+    {
+      "id": "total_string",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "total_calories": "1335",
+        "food_items": [
+          {
+            "name": "item0",
+            "estimated_calories": 45
+          },
+          {
+            "name": "item1",
+            "estimated_calories": 45
+          },
+          {
+            "name": "item2",
+            "estimated_calories": 45
+          }
+        ]
+      },
+      "expected": null
+    },
+    {
+      "id": "total_bool",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "total_calories": true,
+        "food_items": [
+          {
+            "name": "item0",
+            "estimated_calories": 45
+          },
+          {
+            "name": "item1",
+            "estimated_calories": 45
+          },
+          {
+            "name": "item2",
+            "estimated_calories": 45
+          }
+        ]
+      },
+      "expected": null
+    },
+    {
+      "id": "total_huge",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "total_calories": 1e+18,
+        "food_items": [
+          {
+            "name": "item0",
+            "estimated_calories": 45
+          },
+          {
+            "name": "item1",
+            "estimated_calories": 45
+          },
+          {
+            "name": "item2",
+            "estimated_calories": 45
+          }
+        ]
+      },
+      "expected": null
+    },
+    {
+      "id": "total_nan",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "total_calories": {
+          "__special__": "nan"
+        },
+        "food_items": [
+          {
+            "name": "item0",
+            "estimated_calories": 45
+          },
+          {
+            "name": "item1",
+            "estimated_calories": 45
+          },
+          {
+            "name": "item2",
+            "estimated_calories": 45
+          }
+        ]
+      },
+      "expected": null
+    },
+    {
+      "id": "analysis_not_dict_list",
+      "fn": "meal_calorie_mismatch",
+      "input": [
+        1,
+        2,
+        3
+      ],
+      "expected": null
+    },
+    {
+      "id": "analysis_none",
+      "fn": "meal_calorie_mismatch",
+      "input": null,
+      "expected": null
+    },
+    {
+      "id": "hostile_items_skipped",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "total_calories": 1335,
+        "food_items": [
+          {
+            "name": "item0",
+            "estimated_calories": 45
+          },
+          {
+            "name": "item1",
+            "estimated_calories": "800"
+          },
+          {
+            "name": "item2",
+            "estimated_calories": 45
+          },
+          {
+            "name": "huge",
+            "estimated_calories": 1e+18
+          },
+          {
+            "name": "inf",
+            "estimated_calories": {
+              "__special__": "inf"
+            }
+          },
+          {
+            "name": "nan",
+            "estimated_calories": {
+              "__special__": "nan"
+            }
+          },
+          {
+            "name": "bool",
+            "estimated_calories": true
+          },
+          "not-a-dict",
+          {
+            "name": "ok",
+            "estimated_calories": 45
+          }
+        ]
+      },
+      "expected": 135
+    },
+    {
+      "id": "negative_total_vs_positive_sum",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "total_calories": -500,
+        "food_items": [
+          {
+            "name": "item0",
+            "estimated_calories": 150
+          },
+          {
+            "name": "item1",
+            "estimated_calories": 150
+          }
+        ]
+      },
+      "expected": 300
+    },
+    {
+      "id": "float_sum_truncates_to_int",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "total_calories": 800,
+        "food_items": [
+          {
+            "name": "item0",
+            "estimated_calories": 175.35
+          },
+          {
+            "name": "item1",
+            "estimated_calories": 175.35
+          }
+        ]
+      },
+      "expected": 350
+    },
+    {
+      "id": "corrected_flag_is_ignored_by_pure_fn",
+      "fn": "meal_calorie_mismatch",
+      "input": {
+        "corrected": true,
+        "total_calories": 1335,
+        "food_items": [
+          {
+            "name": "item0",
+            "estimated_calories": 45
+          },
+          {
+            "name": "item1",
+            "estimated_calories": 45
+          },
+          {
+            "name": "item2",
+            "estimated_calories": 45
+          }
+        ]
+      },
+      "expected": 135
+    }
+  ]
+}

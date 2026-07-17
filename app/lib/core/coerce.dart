@@ -8,16 +8,22 @@ library;
 
 import 'dart:convert';
 
-/// Bounded numeric coercion. Returns [fallback] for non-numerics, bools,
-/// NaN/Infinity, and absurd magnitudes (|x| >= 1e9) so accumulations can
-/// never throw or poison a total.
-num safeNumber(dynamic value, {num fallback = 0}) {
+/// Bounded numeric coercion with a NULLABLE fallback — full parity with
+/// Python `safe_number(value, default)` where default may be None. Returns
+/// [fallback] for non-numerics, bools, NaN/Infinity, and absurd magnitudes
+/// (|x| >= 1e9) so accumulations can never throw or poison a total.
+num? safeNumberOr(dynamic value, num? fallback) {
   if (value is bool || value is! num) return fallback;
   final d = value.toDouble();
   if (d.isNaN || d.isInfinite) return fallback;
   if (d <= -1e9 || d >= 1e9) return fallback;
   return value;
 }
+
+/// [safeNumberOr] with the common non-null default (Python default=0 call
+/// shape) — the result is always usable in arithmetic.
+num safeNumber(dynamic value, {num fallback = 0}) =>
+    safeNumberOr(value, fallback)!;
 
 /// The analysis's food_items as a list of maps, tolerating any shape:
 /// scalars, string entries, and non-list values all degrade to [] / skipped
@@ -35,8 +41,12 @@ List<Map<String, dynamic>> safeFoodItems(dynamic analysis) {
 bool? parseBoolish(dynamic value) {
   if (value is bool) return value;
   if (value is num) {
-    if (value == 1) return true;
-    if (value == 0) return false;
+    // Python parity (pinned by shared/vectors/coerce.json): only INTEGER 1/0
+    // coerce — a float 1.0 is not boolean-like and must read as "reject".
+    if (value is int) {
+      if (value == 1) return true;
+      if (value == 0) return false;
+    }
     return null;
   }
   if (value is String) {

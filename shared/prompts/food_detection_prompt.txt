@@ -1,0 +1,34 @@
+Analyze this photo and determine if it contains food, a meal, or a beverage.
+
+Beverages COUNT as food here: coffee (including plain black coffee), tea,
+lattes, juice, soda, bubble tea, protein shakes, beer, and any other drink
+a calorie tracker should log. Estimate their calories from what is visible
+(cup size, milk foam, color). Only plain water counts as no calories — log
+it as is_food false.
+
+If the image contains NO food, meal, or beverage, respond with exactly:
+{"is_food": false}
+
+If the image DOES contain food, respond with a JSON object like this:
+{
+  "is_food": true,
+  "food_items": [
+    {"name": "Grilled Chicken Breast", "estimated_calories": 280, "protein_g": 43, "carbs_g": 0, "fat_g": 12},
+    {"name": "Caesar Salad", "estimated_calories": 170, "protein_g": 7, "carbs_g": 12, "fat_g": 10}
+  ],
+  "total_calories": 450,
+  "total_protein_g": 50,
+  "total_carbs_g": 12,
+  "total_fat_g": 22,
+  "meal_description": "Grilled chicken breast with Caesar salad",
+  "confidence_note": "Portions appear to be standard restaurant serving sizes"
+}
+
+Rules:
+- Respond ONLY with valid JSON, no other text
+- Estimate calories based on typical portion sizes visible in the photo
+- For each food item, estimate protein (g), carbs (g), and fat (g)
+- Include total_protein_g, total_carbs_g, total_fat_g as sums
+- Be as specific as possible about the food items
+- If you can see the portion size, adjust your estimate accordingly
+- Include a brief confidence note about the estimate uncertainty

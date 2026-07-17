@@ -126,6 +126,58 @@ num pyMedian(List<num> values) {
   return (sorted[n ~/ 2 - 1] + sorted[n ~/ 2]) / 2;
 }
 
+// ─── Pure report formulas (shared-vector surface) ──────────────────
+// These operate on raw {date, analysis} rows so the golden vectors from the
+// Python reference (shared/vectors/report_formulas.json) can replay them
+// without a DAO; the builder methods below delegate to them.
+
+/// telegram_bot._daily_calorie_totals (spec §5.1/§5.3): per-day calorie sums
+/// over Python-truthy food rows, each meal clamped max(0, safeNumber) — a
+/// negative or hostile hallucinated total must never subtract from a day.
+/// A missing date buckets under ''.
+Map<String, num> dayCalorieTotals(Iterable<Map<String, dynamic>> rows) {
+  final totals = <String, num>{};
+  for (final row in rows) {
+    final analysis = row['analysis'];
+    if (analysis is! Map || !isFoodTruthy(analysis['is_food'])) continue;
+    final cal = safeNumber(analysis['total_calories']);
+    final date = '${row['date'] ?? ''}';
+    totals[date] = (totals[date] ?? 0) + (cal > 0 ? cal : 0);
+  }
+  return totals;
+}
+
+/// The typical-day figure (spec §5.1): int-truncated MEDIAN of the per-day
+/// totals, only when ≥ 2 days have data — under-logged days would bias a
+/// mean low. Null means "not enough data, print nothing".
+int? typicalDayMedian(Map<String, num> dayTotals) {
+  if (dayTotals.length < 2) return null;
+  return pyMedian(dayTotals.values.toList()).truncate();
+}
+
+/// The daily report's prior-7-day average (spec §5.5, daily_report.py:
+/// 450-470): a meal only counts when its RAW total is a non-bool number with
+/// 0 < cal < 1e9 (deliberately a bounds test, not a clamp); avg is the
+/// banker's-rounded mean over days with data, null when fewer than 2.
+({Map<String, num> dayTotals, int? avg}) reportPriorAvg(
+    Iterable<Map<String, dynamic>> rows) {
+  final totals = <String, num>{};
+  for (final row in rows) {
+    final analysis = row['analysis'];
+    if (analysis is! Map || !isFoodTruthy(analysis['is_food'])) continue;
+    final cal = analysis['total_calories'];
+    if (cal is! num) continue; // Dart bool is not num, matching the bool test
+    final d = cal.toDouble();
+    if (!(d > 0 && d < 1e9)) continue; // NaN/Infinity fail these tests too
+    final date = '${row['date'] ?? ''}';
+    totals[date] = (totals[date] ?? 0) + cal;
+  }
+  final avg = totals.length >= 2
+      ? pyRound(totals.values.reduce((a, b) => a + b) / totals.length)
+      : null;
+  return (dayTotals: totals, avg: avg);
+}
+
 /// daily_report._weekly_weight_slope port (spec §5.5): least-squares kg/week
 /// slope (per-day OLS × 7, rounded to 2 decimals), or null when fewer than 2
 /// usable weigh-ins. Junk weights/dates are skipped, never thrown on.
@@ -205,17 +257,13 @@ class ReportBuilderImpl implements ReportBuilder {
           .where((m) => isFoodTruthy(m.analysis['is_food']))
           .toList();
 
-  /// telegram_bot._daily_calorie_totals (spec §5.1/§5.3): per-day sums over
-  /// food meals, each meal clamped max(0, safeNumber) — a negative
-  /// hallucinated total must never subtract from a day.
-  Future<Map<String, num>> _dailyCalorieTotals(String start, String end) async {
-    final totals = <String, num>{};
-    for (final m in await _foodMeals(start, end)) {
-      final cal = safeNumber(m.analysis['total_calories']);
-      totals[m.date] = (totals[m.date] ?? 0) + (cal > 0 ? cal : 0);
-    }
-    return totals;
-  }
+  /// Per-day calorie sums between [start] and [end] — pure formula in
+  /// [dayCalorieTotals], pinned by shared/vectors/report_formulas.json.
+  Future<Map<String, num>> _dailyCalorieTotals(String start, String end) async =>
+      dayCalorieTotals([
+        for (final m in await _dao.mealsBetween(start, end))
+          {'date': m.date, 'analysis': m.analysis},
+      ]);
 
   /// Weight/activity rows are not first-class DAO reads; they ride in the
   /// exportJson payload (spec §8 full export). Unexpected shapes degrade to
@@ -357,13 +405,13 @@ class ReportBuilderImpl implements ReportBuilder {
 
     // Typical-day: MEDIAN over the prior 7 local days, today excluded, only
     // when ≥ 2 days have data — under-logged days would bias a mean low
-    // (spec §5.1).
+    // (spec §5.1; pure formula in [typicalDayMedian]).
     final prior = await _dailyCalorieTotals(
       _isoDay(todayUtc.subtract(const Duration(days: 7))),
       _isoDay(todayUtc.subtract(const Duration(days: 1))),
     );
-    if (prior.length >= 2) {
-      final typical = pyMedian(prior.values.toList()).truncate();
+    final typical = typicalDayMedian(prior);
+    if (typical != null) {
       lines
         ..add('')
         ..add('📊 Typical day: ~${commaFmt(typical)} kcal');
@@ -509,26 +557,17 @@ class ReportBuilderImpl implements ReportBuilder {
       ..add('🧈 Fat: ${grandF}g')
       ..add('📸 Meals logged: ${foodMeals.length}');
 
-    // 7-day average over the prior window [date-7, date-1]. A meal only
-    // counts when its RAW total is a non-bool number with 0 < cal < 1e9 —
-    // strictly positive, and deliberately a bounds test rather than
-    // isFinite (spec §5.5, daily_report.py:450-470).
-    final priorTotals = <String, num>{};
+    // 7-day average over the prior window [date-7, date-1] — pure formula in
+    // [reportPriorAvg] (spec §5.5, daily_report.py:450-470), pinned by
+    // shared/vectors/report_formulas.json.
     final priorMeals = await _dao.mealsBetween(
       _isoDay(target.subtract(const Duration(days: 7))),
       _isoDay(target.subtract(const Duration(days: 1))),
     );
-    for (final m in priorMeals) {
-      if (!isFoodTruthy(m.analysis['is_food'])) continue;
-      final cal = m.analysis['total_calories'];
-      if (cal is! num) continue;
-      final d = cal.toDouble();
-      if (!(d > 0 && d < 1e9)) continue; // NaN/Infinity fail these tests too
-      priorTotals[m.date] = (priorTotals[m.date] ?? 0) + cal;
-    }
-    if (priorTotals.length >= 2) {
-      final avg =
-          pyRound(priorTotals.values.reduce((a, b) => a + b) / priorTotals.length);
+    final avg = reportPriorAvg([
+      for (final m in priorMeals) {'date': m.date, 'analysis': m.analysis},
+    ]).avg;
+    if (avg != null) {
       lines.add('📈 7-day avg: ~${commaFmt(avg)} kcal');
       final delta = grandCal - avg;
       var deltaLine = '    Today vs avg: ${signedCommaFmt(delta)} kcal';

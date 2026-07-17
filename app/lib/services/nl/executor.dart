@@ -12,22 +12,23 @@ import 'dart:math' as math;
 import '../../core/coerce.dart';
 import '../../core/contracts.dart';
 import '../../core/prompts.dart';
+import '../../core/shared_generated.dart';
 import '../settings/app_settings.dart';
 
-/// Spec §1.2 / §8: TEXT_EDIT_WINDOW_DAYS = 7 (telegram_bot.py:161).
-const int textEditWindowDays = 7;
+/// Spec §1.2 / §8: TEXT_EDIT_WINDOW_DAYS (telegram_bot.py:161), from shared/.
+const int textEditWindowDays = SharedConstants.textEditWindowDaysDefault;
 
-/// Spec §4.1: NL_MAX_ACTIONS = 5 (telegram_bot.py:4181).
-const int nlMaxActions = 5;
+/// Spec §4.1: NL_MAX_ACTIONS (telegram_bot.py:4181), from shared/.
+const int nlMaxActions = SharedConstants.nlMaxActions;
 
-/// Spec §4.8 clamps (telegram_bot.py:2971-2973).
-const num activityKcalMax = 20000;
-const num activityStepsMax = 200000;
-const num activityKmMax = 500;
+/// Spec §4.8 clamps (telegram_bot.py:2971-2973), from shared/.
+const num activityKcalMax = SharedConstants.activityKcalMax;
+const num activityStepsMax = SharedConstants.activityStepsMax;
+const num activityKmMax = SharedConstants.activityKmMax;
 
-/// Spec §4.7 / §7.1 weight bounds (nutrition.py:429-430).
-const num minWeightKg = 30;
-const num maxWeightKg = 300;
+/// Spec §4.7 / §7.1 weight bounds (nutrition.py:429-430), from shared/.
+const num minWeightKg = SharedConstants.weightMinKg;
+const num maxWeightKg = SharedConstants.weightMaxKg;
 
 const double _lbToKg = 0.45359237; // nutrition.py _LB_TO_KG
 
@@ -172,7 +173,9 @@ int? mealCalorieMismatch(dynamic analysis) {
   final total = analysis is Map ? _asNumber(analysis['total_calories']) : null;
   if (counted == 0 || itemSum <= 0 || total == null) return null;
   if ((total - itemSum).abs() >
-      math.max(100, 0.2 * math.max(total, itemSum))) {
+      math.max(
+          SharedConstants.mealMismatchMinKcal,
+          SharedConstants.mealMismatchPct * math.max(total, itemSum))) {
     return itemSum.toInt();
   }
   return null;

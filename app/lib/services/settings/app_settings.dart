@@ -10,6 +10,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../core/shared_generated.dart';
+
 /// Narrow seam over the secure-storage plugin so tests can substitute an
 /// in-memory store (the platform channel is unavailable in unit tests).
 abstract class SecureKeyStore {
@@ -49,13 +51,14 @@ class AppSettings extends ChangeNotifier {
   static const String _kDietaryProfile = 'settings.dietary_profile';
   static const String _kQuotaPauseUntil = 'settings.quota_pause_until';
 
-  /// Spec §8: Gemini model default (config.py:26).
-  static const String defaultModel = 'gemini-2.5-flash';
+  /// Spec §8: Gemini model default (config.py:26), from shared/.
+  static const String defaultModel = SharedConstants.geminiModelDefault;
 
-  /// Spec §8: SYNC_LOOKBACK_DAYS default 2, clamp 1–30 (upload_photo.py:68).
-  static const int defaultLookbackDays = 2;
+  /// Spec §8: SYNC_LOOKBACK_DAYS default 2, clamp 1–30 (upload_photo.py:68),
+  /// default/max from shared/.
+  static const int defaultLookbackDays = SharedConstants.syncLookbackDaysDefault;
   static const int minLookbackDays = 1;
-  static const int maxLookbackDays = 30;
+  static const int maxLookbackDays = SharedConstants.syncLookbackDaysMax;
 
   static const String defaultReportTime = '21:30';
   static final RegExp _reportTimeRe = RegExp(r'^([01]?\d|2[0-3]):[0-5]\d$');

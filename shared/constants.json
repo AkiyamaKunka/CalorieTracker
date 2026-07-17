@@ -1,0 +1,23 @@
+{
+  "_comment": "Single source of truth for cross-platform behavior constants. Edit HERE, then run scripts/sync_shared.py to regenerate the Python and Dart bindings. Values are the verified production defaults (env vars may still override on the server).",
+  "nl_max_actions": 5,
+  "text_edit_window_days_default": 7,
+  "duplicate_window_minutes": 5,
+  "normalize_max_dimension_px": 1568,
+  "normalize_jpeg_quality": 85,
+  "captured_at_max_age_days_default": 45,
+  "captured_at_max_future_seconds": 3600,
+  "sync_lookback_days_default": 2,
+  "sync_lookback_days_max": 30,
+  "weight_min_kg": 30,
+  "weight_max_kg": 300,
+  "activity_kcal_max": 20000,
+  "activity_steps_max": 200000,
+  "activity_km_max": 500,
+  "calorie_magnitude_limit": 1000000000,
+  "meal_mismatch_min_kcal": 100,
+  "meal_mismatch_pct": 0.2,
+  "gemini_model_default": "gemini-2.5-flash",
+  "gemini_analysis_max_attempts": 3,
+  "gemini_retry_delay_cap_seconds": 60
+}

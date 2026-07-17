@@ -12,6 +12,7 @@ import 'dart:convert';
 
 import '../core/coerce.dart';
 import '../core/contracts.dart';
+import '../core/shared_generated.dart';
 
 /// Spec §2: chat_id kept for schema/export parity; one constant local user.
 const int localChatId = 1;
@@ -19,8 +20,8 @@ const int localChatId = 1;
 /// Spec §2.3: PHOTO_RESERVATION_STALE_SECONDS = 6 h (database.py:11).
 const int photoReservationStaleSeconds = 6 * 60 * 60;
 
-/// Spec §2.3: DUPLICATE_WINDOW_MINUTES = 5 (config.py:95).
-const int duplicateWindowMinutes = 5;
+/// Spec §2.3: DUPLICATE_WINDOW_MINUTES (config.py:95), from shared/.
+const int duplicateWindowMinutes = SharedConstants.duplicateWindowMinutes;
 
 /// Spec §3.5: Python truthiness for is_food — false, 0, 0.0, '', [], {},
 /// null → false; anything else (including non-empty strings, 1, NaN) → true.
