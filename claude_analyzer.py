@@ -8,15 +8,31 @@ absent, token invalid, usage-window exhausted, timeout, malformed output —
 returns None and the caller falls back to Gemini, so the bot never degrades
 below today's behavior.
 
+Dispatch modes (CLAUDE_ANALYZER_DISPATCH):
+  stream (default)  Single model turn: the image travels on stdin as a
+                    base64 content block via `--input-format stream-json`,
+                    so no temp file and no Read-tool round trip. Measured on
+                    the production VM: ~8.2-8.4s wall vs 16.0s for the
+                    two-turn path, num_turns=1, same-quality output. If the
+                    attempt fails for CLI-shape reasons (older CLIs without
+                    stream-json support exit nonzero here), the analyzer
+                    logs once and retries ONCE via the file path below —
+                    within the same _CLI_LOCK hold.
+  file              Two model turns: the image is written to a temp file and
+                    the model Reads it back. Forces the old path only —
+                    a rollback knob, never combined with a stream attempt.
+
 Configuration (env / .env):
   CLAUDE_ANALYZER_ENABLED           truthy to enable (default: off)
   CLAUDE_ANALYZER_BIN               CLI binary (default: "claude")
   CLAUDE_ANALYZER_MODEL             optional --model override
   CLAUDE_ANALYZER_TIMEOUT_SECONDS   per-analysis wall clock (default: 120)
   CLAUDE_ANALYZER_EXTRA_FLAGS       optional extra CLI flags (shlex-split)
+  CLAUDE_ANALYZER_DISPATCH          'stream' (default) or 'file' (see above)
   CLAUDE_CODE_OAUTH_TOKEN           subscription token (read by the CLI itself)
 """
 
+import base64
 import json
 import logging
 import os
@@ -27,7 +43,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from config import FOOD_DETECTION_PROMPT
 from utils import parse_ai_json, parse_boolish
@@ -78,6 +94,13 @@ def status_label() -> str:
     return "enabled"
 
 
+def _dispatch_mode() -> str:
+    """'file' forces the two-turn temp-file path (the rollback knob);
+    anything else — unset, 'stream', or a typo — takes the stream default."""
+    raw = (os.environ.get("CLAUDE_ANALYZER_DISPATCH") or "").strip().lower()
+    return "file" if raw == "file" else "stream"
+
+
 def _build_prompt(image_path: str) -> str:
     return (
         f"Read the image file at {image_path} and analyze it.\n\n"
@@ -101,22 +124,177 @@ def _extra_flags() -> list:
         return []
 
 
-def analyze_food_photo(image_bytes: bytes) -> Optional[Dict]:
-    """Analyze a food photo via the Claude Code CLI; None means 'use Gemini'."""
-    if not is_configured():
-        return None
-    cli = _cli_path()
-    if cli is None or not image_bytes:
-        return None
+def _append_model_and_extra_flags(cmd: list) -> None:
+    """Shared argv tail: optional --model override, then extra flags last."""
+    model = (os.environ.get("CLAUDE_ANALYZER_MODEL") or "").strip()
+    if model:
+        cmd += ["--model", model]
+    cmd += _extra_flags()
 
-    # Contended-CLI bypass: another photo already owns the (up to 120s) CLI
-    # run. Don't queue behind it — Gemini answers this photo in seconds.
-    if not _CLI_LOCK.acquire(blocking=False):
-        log.info("Claude CLI busy — falling back to Gemini for this photo.")
-        return None
 
+def _cli_env() -> Dict[str, str]:
+    # The CLI phones home for updates/telemetry on every run; both knobs
+    # shave that off (and are harmless no-ops on CLIs that predate them).
+    env = dict(os.environ)
+    env["DISABLE_AUTOUPDATER"] = "1"
+    env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+    return env
+
+
+def _stream_stdin(image_bytes: bytes) -> str:
+    """One stream-json user message: the analysis prompt plus the image as a
+    base64 content block. Callers pass already-normalized JPEG bytes (the
+    single-decode photo pipeline), hence the fixed image/jpeg media type."""
+    message = {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"Analyze the attached image.\n\n{FOOD_DETECTION_PROMPT}",
+                },
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": base64.b64encode(image_bytes).decode("ascii"),
+                    },
+                },
+            ],
+        },
+    }
+    return json.dumps(message) + "\n"
+
+
+def _parse_stream_result(stdout: str) -> Optional[Dict]:
+    """The LAST {"type": "result"} line of the stream-json JSONL output —
+    the same envelope shape as `--output-format json` (is_error, result,
+    duration_ms, duration_api_ms, num_turns). Non-JSON lines and result-less
+    events (init/assistant messages, stray warnings) are tolerated noise."""
+    envelope = None
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            candidate = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(candidate, dict) and candidate.get("type") == "result":
+            envelope = candidate
+    return envelope
+
+
+def _result_text(envelope) -> Optional[str]:
+    """The result string of a non-error envelope; None for any other shape."""
+    if not isinstance(envelope, dict) or envelope.get("is_error"):
+        return None
+    text = envelope.get("result")
+    if not isinstance(text, str) or not text.strip():
+        return None
+    return text
+
+
+def _log_cli_exit(proc) -> None:
+    snippet = (proc.stderr or proc.stdout or "").strip()[:300]
+    if "limit" in snippet.lower():
+        log.warning(f"Claude CLI usage window likely exhausted: {snippet}")
+    else:
+        log.warning(f"Claude CLI exited {proc.returncode}: {snippet}")
+
+
+def _finish_analysis(envelope: Dict, result_text: str, start: float) -> Optional[Dict]:
+    """is_food-contract validation + success instrumentation, shared by both
+    dispatch paths. None here means the MODEL answered junk — callers must
+    treat it as terminal and never retry-spend on a model that answered."""
+    try:
+        analysis = parse_ai_json(result_text)
+    except (json.JSONDecodeError, ValueError) as e:
+        log.warning(f"Could not parse Claude analysis JSON: {e}")
+        return None
+    if not isinstance(analysis, dict) or "is_food" not in analysis:
+        log.warning("Claude analysis JSON missing the is_food contract.")
+        return None
+    # The CLI has no JSON mode, so is_food may arrive as a quoted
+    # "false" — truthy downstream. Coerce to a real bool or reject.
+    if not isinstance(analysis["is_food"], bool):
+        coerced = parse_boolish(analysis["is_food"])
+        if coerced is None:
+            log.warning("Claude analysis is_food was not boolean-like.")
+            return None
+        analysis["is_food"] = coerced
+    # Envelope timings split CLI overhead from API time, and num_turns
+    # proves which dispatch actually answered (1 = single-turn stream) —
+    # the evidence trail for tuning without touching the model choice.
+    wall = time.time() - start
+    log.info(
+        f"✅ Photo analyzed by Claude (subscription) in {wall:.1f}s "
+        f"(cli={envelope.get('duration_ms')}ms "
+        f"api={envelope.get('duration_api_ms')}ms "
+        f"turns={envelope.get('num_turns')})."
+    )
+    return analysis
+
+
+def _attempt_stream(
+    cli: str, image_bytes: bytes, env: Dict[str, str], start: float
+) -> Tuple[Optional[Dict], bool]:
+    """Single-turn dispatch: image on stdin, no temp file, no tool turns.
+
+    Returns (analysis, retry_via_file). retry_via_file is True only for
+    CLI-shape failures — nonzero exit, no result line, unusable envelope —
+    the cases an older CLI without stream-json support produces. A timeout
+    or a model that answered junk is terminal: retrying would double-spend
+    the wall clock / subscription for the same photo.
+    """
+    cmd = [
+        cli, "-p",
+        # stdin carries the image; --input-format stream-json ERRORS unless
+        # the output format matches, and -p only streams with --verbose.
+        "--input-format", "stream-json",
+        "--output-format", "stream-json",
+        "--verbose",
+        "--tools", "",  # no tools: the answer must land in turn one
+    ]
+    _append_model_and_extra_flags(cmd)
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=_stream_stdin(image_bytes),
+            capture_output=True,
+            text=True,
+            timeout=_timeout_seconds(),
+            env=env,
+        )
+        if proc.returncode != 0:
+            _log_cli_exit(proc)
+            return None, True
+        envelope = _parse_stream_result(proc.stdout)
+        if envelope is None:
+            log.warning("Claude CLI stream output had no result line.")
+            return None, True
+        text = _result_text(envelope)
+        if text is None:
+            log.warning("Claude CLI stream result envelope was unusable.")
+            return None, True
+        return _finish_analysis(envelope, text, start), False
+    except subprocess.TimeoutExpired:
+        log.warning(f"Claude CLI timed out after {_timeout_seconds()}s.")
+        return None, False
+    except Exception as e:
+        log.warning(f"Claude analyzer failed unexpectedly: {type(e).__name__}: {e}")
+        return None, False
+
+
+def _attempt_file(
+    cli: str, image_bytes: bytes, env: Dict[str, str], start: float
+) -> Optional[Dict]:
+    """Two-turn dispatch: temp image file + a Read-tool prompt. The
+    compatibility fallback for CLIs without stream-json support, and the
+    forced path under CLAUDE_ANALYZER_DISPATCH=file."""
     tmp_path = None
-    start = time.time()
     try:
         with tempfile.NamedTemporaryFile(
             prefix="ct_claude_", suffix=".jpg", delete=False
@@ -131,17 +309,7 @@ def analyze_food_photo(image_bytes: bytes) -> Optional[Dict]:
             "--output-format", "json",
             "--allowedTools", "Read",
         ]
-        model = (os.environ.get("CLAUDE_ANALYZER_MODEL") or "").strip()
-        if model:
-            cmd += ["--model", model]
-        cmd += _extra_flags()
-
-        # The CLI phones home for updates/telemetry on every run; both knobs
-        # shave that off (and are harmless no-ops on CLIs that predate them).
-        env = dict(os.environ)
-        env["DISABLE_AUTOUPDATER"] = "1"
-        env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
-
+        _append_model_and_extra_flags(cmd)
         proc = subprocess.run(
             cmd,
             capture_output=True,
@@ -151,45 +319,16 @@ def analyze_food_photo(image_bytes: bytes) -> Optional[Dict]:
             env=env,
         )
         if proc.returncode != 0:
-            snippet = (proc.stderr or proc.stdout or "").strip()[:300]
-            if "limit" in snippet.lower():
-                log.warning(f"Claude CLI usage window likely exhausted: {snippet}")
-            else:
-                log.warning(f"Claude CLI exited {proc.returncode}: {snippet}")
+            _log_cli_exit(proc)
             return None
 
         # `claude -p --output-format json` wraps the reply in a result envelope.
         envelope = json.loads(proc.stdout)
-        if not isinstance(envelope, dict) or envelope.get("is_error"):
-            log.warning("Claude CLI returned an error envelope.")
+        text = _result_text(envelope)
+        if text is None:
+            log.warning("Claude CLI returned an unusable result envelope.")
             return None
-        result_text = envelope.get("result")
-        if not isinstance(result_text, str) or not result_text.strip():
-            log.warning("Claude CLI envelope had no result text.")
-            return None
-
-        analysis = parse_ai_json(result_text)
-        if not isinstance(analysis, dict) or "is_food" not in analysis:
-            log.warning("Claude analysis JSON missing the is_food contract.")
-            return None
-        # The CLI has no JSON mode, so is_food may arrive as a quoted
-        # "false" — truthy downstream. Coerce to a real bool or reject.
-        if not isinstance(analysis["is_food"], bool):
-            coerced = parse_boolish(analysis["is_food"])
-            if coerced is None:
-                log.warning("Claude analysis is_food was not boolean-like.")
-                return None
-            analysis["is_food"] = coerced
-        # Envelope timings split CLI overhead from API time — the evidence
-        # trail for tuning startup flags without touching the model choice.
-        wall = time.time() - start
-        duration_ms = envelope.get("duration_ms")
-        duration_api_ms = envelope.get("duration_api_ms")
-        log.info(
-            f"✅ Photo analyzed by Claude (subscription) in {wall:.1f}s "
-            f"(cli={duration_ms}ms api={duration_api_ms}ms)."
-        )
-        return analysis
+        return _finish_analysis(envelope, text, start)
     except subprocess.TimeoutExpired:
         log.warning(f"Claude CLI timed out after {_timeout_seconds()}s.")
         return None
@@ -200,9 +339,41 @@ def analyze_food_photo(image_bytes: bytes) -> Optional[Dict]:
         log.warning(f"Claude analyzer failed unexpectedly: {type(e).__name__}: {e}")
         return None
     finally:
-        _CLI_LOCK.release()
         if tmp_path:
             try:
                 os.unlink(tmp_path)
             except OSError:
                 pass
+
+
+def analyze_food_photo(image_bytes: bytes) -> Optional[Dict]:
+    """Analyze a food photo via the Claude Code CLI; None means 'use Gemini'."""
+    if not is_configured():
+        return None
+    cli = _cli_path()
+    if cli is None or not image_bytes:
+        return None
+
+    # Contended-CLI bypass: another photo already owns the (up to 120s) CLI
+    # run. Don't queue behind it — Gemini answers this photo in seconds.
+    if not _CLI_LOCK.acquire(blocking=False):
+        log.info("Claude CLI busy — falling back to Gemini for this photo.")
+        return None
+
+    # One photo = one CLI occupancy: the lock is held across BOTH attempts
+    # of the stream→file fallback chain, so a burst can never stack the
+    # memory-heavy CLI even mid-fallback.
+    start = time.time()
+    try:
+        env = _cli_env()
+        if _dispatch_mode() == "stream":
+            analysis, retry_via_file = _attempt_stream(cli, image_bytes, env, start)
+            if not retry_via_file:
+                return analysis
+            log.warning(
+                "Claude stream-json dispatch failed — retrying once via the "
+                "two-turn Read-file path."
+            )
+        return _attempt_file(cli, image_bytes, env, start)
+    finally:
+        _CLI_LOCK.release()

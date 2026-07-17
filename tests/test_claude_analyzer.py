@@ -1,5 +1,6 @@
 import sys
 import os
+import base64
 import json
 import logging
 import subprocess
@@ -29,8 +30,14 @@ def _envelope(result_text, is_error=False):
                        "is_error": is_error, "result": result_text})
 
 
-def _configure(monkeypatch, enabled="1", cli="/usr/local/bin/claude"):
+def _configure(monkeypatch, enabled="1", cli="/usr/local/bin/claude", dispatch=None):
     monkeypatch.setenv("CLAUDE_ANALYZER_ENABLED", enabled)
+    # Hermetic dispatch: default to the module default (stream) regardless of
+    # any ambient CLAUDE_ANALYZER_DISPATCH in the developer's environment.
+    if dispatch is None:
+        monkeypatch.delenv("CLAUDE_ANALYZER_DISPATCH", raising=False)
+    else:
+        monkeypatch.setenv("CLAUDE_ANALYZER_DISPATCH", dispatch)
     monkeypatch.setattr(claude_analyzer.shutil, "which", lambda *a, **k: cli)
 
 
@@ -68,13 +75,12 @@ def test_successful_analysis_with_fenced_json(monkeypatch):
     result = claude_analyzer.analyze_food_photo(b"jpegbytes")
 
     assert result == GOOD_ANALYSIS
-    assert len(calls) == 1
+    assert len(calls) == 1                    # single-turn: no fallback spent
     cmd = calls[0]
     assert cmd[0] == "/usr/local/bin/claude"
     assert "-p" in cmd and "--output-format" in cmd
-    # The prompt must point Claude at the temp image file.
-    prompt = cmd[cmd.index("-p") + 1]
-    assert "Read the image file at" in prompt and ".jpg" in prompt
+    # Default dispatch is the single-turn stream path — image on stdin.
+    assert "--input-format" in cmd
 
 
 def test_successful_analysis_plain_json(monkeypatch):
@@ -114,7 +120,7 @@ def test_timeout_returns_none(monkeypatch):
 
 
 def test_temp_file_cleaned_up(monkeypatch, tmp_path):
-    _configure(monkeypatch)
+    _configure(monkeypatch, dispatch="file")
     seen = {}
 
     def run(cmd, **kwargs):
@@ -295,7 +301,7 @@ def test_string_is_food_is_coerced_or_rejected(monkeypatch):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_subprocess_gets_clamped_timeout_list_args_and_temp_cwd(monkeypatch, tmp_path):
-    _configure(monkeypatch)
+    _configure(monkeypatch, dispatch="file")
     _redirect_tempdir(monkeypatch, tmp_path)
     monkeypatch.delenv("CLAUDE_ANALYZER_TIMEOUT_SECONDS", raising=False)
     monkeypatch.delenv("CLAUDE_ANALYZER_MODEL", raising=False)
@@ -320,7 +326,7 @@ def test_timeout_env_lower_bound_and_float_strings(monkeypatch):
 
 
 def test_timeout_path_cleans_temp_file(monkeypatch, tmp_path):
-    _configure(monkeypatch)
+    _configure(monkeypatch, dispatch="file")
     _redirect_tempdir(monkeypatch, tmp_path)
     _fake_run(monkeypatch, raise_timeout=True)
     assert claude_analyzer.analyze_food_photo(b"img") is None
@@ -329,7 +335,7 @@ def test_timeout_path_cleans_temp_file(monkeypatch, tmp_path):
 
 def test_binary_vanishing_mid_flight_cleans_temp_file(monkeypatch, tmp_path):
     """which() said yes, exec said no — the analyzer must degrade, not crash."""
-    _configure(monkeypatch)
+    _configure(monkeypatch, dispatch="file")
     _redirect_tempdir(monkeypatch, tmp_path)
 
     def run(cmd, **kwargs):
@@ -372,8 +378,9 @@ def test_concurrent_analyses_never_stack_cli_runs(monkeypatch, tmp_path):
     CLI run; the invariant it pinned — one CLI at a time, distinct temp
     files, nothing leaked — now holds via the contended-CLI bypass: while
     one run is in flight, a second caller returns None immediately (its
-    photo falls through to Gemini) without launching a subprocess."""
-    _configure(monkeypatch)
+    photo falls through to Gemini) without launching a subprocess. Pinned on
+    the file path, whose temp-file lifecycle is the risky part."""
+    _configure(monkeypatch, dispatch="file")
     _redirect_tempdir(monkeypatch, tmp_path)
     seen = []
     first_run_started = threading.Event()
@@ -410,7 +417,7 @@ def test_concurrent_analyses_never_stack_cli_runs(monkeypatch, tmp_path):
 
 
 def test_temp_file_not_leaked_when_write_fails(monkeypatch, tmp_path):
-    _configure(monkeypatch)
+    _configure(monkeypatch, dispatch="file")
     _redirect_tempdir(monkeypatch, tmp_path)
     real_ntf = tempfile.NamedTemporaryFile
 
@@ -505,6 +512,222 @@ def test_documented_enabled_spellings_enable(monkeypatch, value):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Single-turn stream dispatch (default) and the stream→file fallback chain
+# ─────────────────────────────────────────────────────────────────────────────
+
+# The exact single-turn invocation verified live on the production VM
+# (CLI 2.1.210): --input-format stream-json ERRORS unless the output format
+# matches, --verbose is required for stream output with -p, and --tools ""
+# forbids tool turns so the answer must land in turn one.
+STREAM_BASE_CMD = [
+    "/usr/local/bin/claude", "-p",
+    "--input-format", "stream-json",
+    "--output-format", "stream-json",
+    "--verbose",
+    "--tools", "",
+]
+
+
+def _fake_run_script(monkeypatch, responses):
+    """Scripted subprocess.run: responses[i] answers call i as
+    (returncode, stdout), or the string 'timeout'. Records (cmd, kwargs) and
+    asserts _CLI_LOCK is held for EVERY call — one photo must equal one CLI
+    occupancy even across the stream→file fallback chain."""
+    records = []
+
+    def run(cmd, **kwargs):
+        assert claude_analyzer._CLI_LOCK.locked(), "CLI ran outside the lock"
+        index = len(records)
+        records.append((cmd, kwargs))
+        assert index < len(responses), "unexpected extra subprocess call"
+        response = responses[index]
+        if response == "timeout":
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 120))
+        returncode, stdout = response
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(claude_analyzer.subprocess, "run", run)
+    return records
+
+
+def _assert_file_cmd_shape(cmd):
+    """The old two-turn shape: temp-file wrapper prompt + Read tool."""
+    assert "--allowedTools" in cmd
+    assert cmd[cmd.index("--allowedTools") + 1] == "Read"
+    prompt = cmd[cmd.index("-p") + 1]
+    assert "Read the image file at" in prompt and ".jpg" in prompt
+    assert "--input-format" not in cmd
+
+
+def test_stream_default_cmd_shape_exact(monkeypatch):
+    _configure(monkeypatch)
+    monkeypatch.delenv("CLAUDE_ANALYZER_MODEL", raising=False)
+    monkeypatch.delenv("CLAUDE_ANALYZER_EXTRA_FLAGS", raising=False)
+    calls = _fake_run(monkeypatch, stdout=_envelope(json.dumps(GOOD_ANALYSIS)))
+
+    assert claude_analyzer.analyze_food_photo(b"img") == GOOD_ANALYSIS
+    assert calls == [STREAM_BASE_CMD]          # pinned exactly, element for element
+
+
+def test_stream_stdin_carries_prompt_and_image_base64(monkeypatch):
+    _configure(monkeypatch)
+    captured = _fake_run_capture(monkeypatch, stdout=_envelope(json.dumps(GOOD_ANALYSIS)))
+    image = b"\xff\xd8\xffjpeg-bytes"
+
+    assert claude_analyzer.analyze_food_photo(image) == GOOD_ANALYSIS
+
+    (_, kwargs), = captured
+    message = json.loads(kwargs["input"])      # exactly one JSON line on stdin
+    assert message["type"] == "user"
+    assert message["message"]["role"] == "user"
+    text_block, image_block = message["message"]["content"]
+    assert text_block["type"] == "text"
+    assert text_block["text"].startswith("Analyze the attached image.")
+    assert claude_analyzer.FOOD_DETECTION_PROMPT in text_block["text"]
+    assert image_block["type"] == "image"
+    assert image_block["source"]["type"] == "base64"
+    assert image_block["source"]["media_type"] == "image/jpeg"
+    assert base64.b64decode(image_block["source"]["data"]) == image
+
+
+def test_stream_path_creates_no_temp_file_and_no_cwd(monkeypatch):
+    _configure(monkeypatch)
+    monkeypatch.delenv("CLAUDE_ANALYZER_TIMEOUT_SECONDS", raising=False)
+
+    def no_temp(*args, **kwargs):
+        raise AssertionError("stream dispatch must not create a temp file")
+
+    monkeypatch.setattr(claude_analyzer.tempfile, "NamedTemporaryFile", no_temp)
+    captured = _fake_run_capture(monkeypatch, stdout=_envelope(json.dumps(GOOD_ANALYSIS)))
+
+    assert claude_analyzer.analyze_food_photo(b"img") == GOOD_ANALYSIS
+    (_, kwargs), = captured
+    assert "cwd" not in kwargs                 # no temp dir to sit beside
+    assert kwargs["timeout"] == 120            # same clamped wall clock
+    assert kwargs.get("text") is True
+    assert kwargs["env"]["DISABLE_AUTOUPDATER"] == "1"   # same env knobs
+
+
+def test_stream_result_line_parsed_amid_noise(monkeypatch, caplog):
+    """The result envelope is the LAST {"type":"result"} JSONL line; every
+    other line — non-JSON noise, init/assistant events, truncated JSON,
+    blanks — is tolerated."""
+    _configure(monkeypatch)
+    stdout = "\n".join([
+        "npm warn deprecated something",
+        json.dumps({"type": "system", "subtype": "init"}),
+        json.dumps({"type": "assistant", "message": {"content": []}}),
+        '{"type": "assistant", "truncated": ',
+        "",
+        json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                    "num_turns": 1, "duration_ms": 8200, "duration_api_ms": 7300,
+                    "result": json.dumps(GOOD_ANALYSIS)}),
+    ])
+    calls = _fake_run(monkeypatch, stdout=stdout)
+
+    with caplog.at_level(logging.INFO, logger="claude_analyzer"):
+        assert claude_analyzer.analyze_food_photo(b"img") == GOOD_ANALYSIS
+
+    assert len(calls) == 1
+    lines = [r.message for r in caplog.records if "Photo analyzed by Claude" in r.message]
+    assert len(lines) == 1 and "turns=1" in lines[0]
+
+
+@pytest.mark.parametrize("first_response", [
+    pytest.param((1, ""), id="nonzero-exit"),
+    pytest.param((0, "noise only\n" + json.dumps({"type": "system"})), id="no-result-line"),
+    pytest.param((0, _envelope("boom", is_error=True)), id="error-envelope"),
+    pytest.param((0, json.dumps({"type": "result", "is_error": False, "result": ""})),
+                 id="empty-result-text"),
+])
+def test_cli_shape_failure_falls_back_once_to_file_path(monkeypatch, tmp_path,
+                                                        caplog, first_response):
+    """A CLI-shape failure on the stream attempt (what an older CLI without
+    stream-json support produces) retries ONCE via the two-turn Read-file
+    path — on the SAME lock hold (asserted inside _fake_run_script)."""
+    _configure(monkeypatch)
+    _redirect_tempdir(monkeypatch, tmp_path)
+    records = _fake_run_script(monkeypatch, [
+        first_response,
+        (0, _envelope(json.dumps(GOOD_ANALYSIS))),       # fallback succeeds
+    ])
+
+    with caplog.at_level(logging.WARNING, logger="claude_analyzer"):
+        assert claude_analyzer.analyze_food_photo(b"img") == GOOD_ANALYSIS
+
+    assert len(records) == 2
+    stream_cmd, stream_kwargs = records[0]
+    assert "--input-format" in stream_cmd
+    assert "input" in stream_kwargs                      # image went via stdin
+    file_cmd, file_kwargs = records[1]
+    _assert_file_cmd_shape(file_cmd)
+    assert file_kwargs["cwd"] == str(tmp_path)           # CLI beside the image
+    assert "retrying once" in caplog.text                # logged exactly the switch
+    assert claude_analyzer._CLI_LOCK.locked() is False   # released on the way out
+    assert _leftover_temp_files(tmp_path) == []
+
+
+def test_fallback_failure_returns_none(monkeypatch, tmp_path):
+    """Both attempts fail -> None (Gemini), exactly two CLI spawns, no leaks."""
+    _configure(monkeypatch)
+    _redirect_tempdir(monkeypatch, tmp_path)
+    records = _fake_run_script(monkeypatch, [(1, ""), (1, "")])
+
+    assert claude_analyzer.analyze_food_photo(b"img") is None
+    assert len(records) == 2
+    assert claude_analyzer._CLI_LOCK.locked() is False
+    assert _leftover_temp_files(tmp_path) == []
+
+
+@pytest.mark.parametrize("result_text", [
+    pytest.param("total nonsense, no json anywhere", id="unparseable"),
+    pytest.param(json.dumps({"note": "no is_food contract"}), id="missing-contract"),
+])
+def test_contract_failure_returns_none_without_fallback(monkeypatch, result_text):
+    """The model ANSWERED (a turn was spent) but with junk JSON. That is an
+    is_food-contract failure, not a CLI-shape failure: go straight to Gemini
+    and never double-spend the subscription on a model that replied."""
+    _configure(monkeypatch)
+    records = _fake_run_script(monkeypatch, [(0, _envelope(result_text))])
+
+    assert claude_analyzer.analyze_food_photo(b"img") is None
+    assert len(records) == 1                   # no second CLI spawn
+
+
+def test_stream_timeout_is_terminal_no_fallback(monkeypatch):
+    """A timeout means the model was slow, not that the dispatch shape was
+    wrong — a file-path retry would double the wall clock for one photo."""
+    _configure(monkeypatch)
+    records = _fake_run_script(monkeypatch, ["timeout"])
+
+    assert claude_analyzer.analyze_food_photo(b"img") is None
+    assert len(records) == 1
+    assert claude_analyzer._CLI_LOCK.locked() is False
+
+
+def test_dispatch_file_skips_stream_entirely(monkeypatch, tmp_path):
+    """CLAUDE_ANALYZER_DISPATCH=file is the rollback knob: the old two-turn
+    path runs directly, with no stream attempt spent first."""
+    _configure(monkeypatch, dispatch="file")
+    _redirect_tempdir(monkeypatch, tmp_path)
+    records = _fake_run_script(monkeypatch, [(0, _envelope(json.dumps(GOOD_ANALYSIS)))])
+
+    assert claude_analyzer.analyze_food_photo(b"img") == GOOD_ANALYSIS
+    assert len(records) == 1
+    file_cmd, file_kwargs = records[0]
+    _assert_file_cmd_shape(file_cmd)
+    assert "input" not in file_kwargs          # nothing rides stdin on this path
+    assert _leftover_temp_files(tmp_path) == []
+
+
+def test_unknown_dispatch_value_defaults_to_stream(monkeypatch):
+    _configure(monkeypatch, dispatch="TURBO")
+    calls = _fake_run(monkeypatch, stdout=_envelope(json.dumps(GOOD_ANALYSIS)))
+    assert claude_analyzer.analyze_food_photo(b"img") == GOOD_ANALYSIS
+    assert "--input-format" in calls[0]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Real-subprocess integration (no mocked subprocess.run)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -516,6 +739,7 @@ def _install_fake_cli(tmp_path, monkeypatch, body):
     monkeypatch.setenv("CLAUDE_ANALYZER_BIN", str(script))
     monkeypatch.delenv("CLAUDE_ANALYZER_TIMEOUT_SECONDS", raising=False)
     monkeypatch.delenv("CLAUDE_ANALYZER_MODEL", raising=False)
+    monkeypatch.delenv("CLAUDE_ANALYZER_DISPATCH", raising=False)
     return script
 
 
@@ -531,6 +755,9 @@ def test_real_subprocess_end_to_end_success_and_injection_inert(monkeypatch, tmp
         tmp_path, monkeypatch,
         f'printf \'%s\\n\' "$@" > "{args_file}"\ncat "{envelope_file}"\n',
     )
+    # This end-to-end pins the FILE dispatch (temp file + --allowedTools Read);
+    # the stream sibling below covers the default stdin dispatch.
+    monkeypatch.setenv("CLAUDE_ANALYZER_DISPATCH", "file")
     monkeypatch.setenv("CLAUDE_ANALYZER_MODEL", f"opus; touch {pwned}")
     _redirect_tempdir(monkeypatch, tmp_path)
 
@@ -542,6 +769,39 @@ def test_real_subprocess_end_to_end_success_and_injection_inert(monkeypatch, tmp
     assert not pwned.exists()                  # and was never shell-interpreted
     assert "--allowedTools" in args
     assert "Read" in args
+    assert _leftover_temp_files(tmp_path) == []
+
+
+def test_real_subprocess_stream_end_to_end(monkeypatch, tmp_path):
+    """Default dispatch against a REAL subprocess: the prompt and the image
+    (as base64) arrive on the child's stdin in one stream-json user message,
+    and no temp image file is ever created."""
+    envelope_file = tmp_path / "envelope.json"
+    envelope_file.write_text(_envelope(json.dumps(GOOD_ANALYSIS)))
+    args_file = tmp_path / "args.txt"
+    stdin_file = tmp_path / "stdin.json"
+
+    _install_fake_cli(
+        tmp_path, monkeypatch,
+        f'printf \'%s\\n\' "$@" > "{args_file}"\n'
+        f'cat > "{stdin_file}"\n'
+        f'cat "{envelope_file}"\n',
+    )
+    _redirect_tempdir(monkeypatch, tmp_path)
+
+    image = b"real-stream-bytes"
+    assert claude_analyzer.analyze_food_photo(image) == GOOD_ANALYSIS
+
+    args = args_file.read_text().splitlines()
+    assert "--input-format" in args and "--output-format" in args
+    assert args.count("stream-json") == 2      # both format flags
+    assert "--verbose" in args                 # -p streams only with --verbose
+    assert "--allowedTools" not in args        # no Read-tool turn
+
+    message = json.loads(stdin_file.read_text())
+    text_block, image_block = message["message"]["content"]
+    assert "Analyze the attached image." in text_block["text"]
+    assert base64.b64decode(image_block["source"]["data"]) == image
     assert _leftover_temp_files(tmp_path) == []
 
 
@@ -818,19 +1078,19 @@ def test_extra_flags_absent_or_malformed_add_nothing(monkeypatch):
     monkeypatch.delenv("CLAUDE_ANALYZER_MODEL", raising=False)
     calls = _fake_run(monkeypatch, stdout=_envelope(json.dumps(GOOD_ANALYSIS)))
     assert claude_analyzer.analyze_food_photo(b"img") == GOOD_ANALYSIS
-    assert calls[0][-2:] == ["--allowedTools", "Read"]  # base argv unchanged
+    assert calls[0][-2:] == ["--tools", ""]   # stream base argv unchanged
 
     # Unbalanced quote: degrade to no extra flags, never fail the photo.
     monkeypatch.setenv("CLAUDE_ANALYZER_EXTRA_FLAGS", '--broken "unclosed')
     assert claude_analyzer.analyze_food_photo(b"img") == GOOD_ANALYSIS
-    assert calls[1][-2:] == ["--allowedTools", "Read"]
+    assert calls[1][-2:] == ["--tools", ""]
 
 
 def test_success_log_includes_wall_and_envelope_durations(monkeypatch, caplog):
     _configure(monkeypatch)
     envelope = json.dumps({
         "type": "result", "subtype": "success", "is_error": False,
-        "duration_ms": 4200, "duration_api_ms": 3100,
+        "duration_ms": 4200, "duration_api_ms": 3100, "num_turns": 1,
         "result": json.dumps(GOOD_ANALYSIS),
     })
     _fake_run(monkeypatch, stdout=envelope)
@@ -842,6 +1102,8 @@ def test_success_log_includes_wall_and_envelope_durations(monkeypatch, caplog):
     assert len(lines) == 1
     assert "(subscription) in " in lines[0]
     assert "cli=4200ms api=3100ms" in lines[0]
+    # num_turns is the proof of which dispatch answered (1 = single-turn).
+    assert "turns=1" in lines[0]
 
 
 def test_success_log_tolerates_missing_envelope_durations(monkeypatch, caplog):
@@ -853,6 +1115,7 @@ def test_success_log_tolerates_missing_envelope_durations(monkeypatch, caplog):
     lines = [r.message for r in caplog.records if "Photo analyzed by Claude" in r.message]
     assert len(lines) == 1
     assert "cli=Nonems api=Nonems" in lines[0]
+    assert "turns=None" in lines[0]
 
 
 def test_timeout_bounds_lock_hold_even_with_pipe_holding_grandchild(monkeypatch, tmp_path):
@@ -880,6 +1143,7 @@ def test_timeout_bounds_lock_hold_even_with_pipe_holding_grandchild(monkeypatch,
     monkeypatch.setenv("CLAUDE_ANALYZER_ENABLED", "1")
     monkeypatch.setenv("CLAUDE_ANALYZER_BIN", str(cli))
     monkeypatch.delenv("CLAUDE_ANALYZER_MODEL", raising=False)
+    monkeypatch.delenv("CLAUDE_ANALYZER_DISPATCH", raising=False)
     monkeypatch.setattr(claude_analyzer, "_timeout_seconds", lambda: 1)
 
     result_box = {}
