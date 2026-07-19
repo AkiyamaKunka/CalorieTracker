@@ -5,6 +5,10 @@
 set -euo pipefail
 ENV_FILE="$1"; DEV="${2:-emulator-5554}"
 APP_ID=dev.calorietracker.calorie_tracker
+# On a REAL phone use PHOTO_DIR=/sdcard/Pictures: the Termux watcher ships
+# everything in DCIM/Camera to the production server — test photos must
+# never enter that pipeline. The app's picker sees all MediaStore images.
+PHOTO_DIR="${PHOTO_DIR:-/sdcard/DCIM/Camera}"
 SCRATCH="$(dirname "$ENV_FILE")"
 export JAVA_HOME=/opt/homebrew/opt/openjdk@17
 
@@ -12,11 +16,11 @@ adb -s "$DEV" uninstall "$APP_ID" >/dev/null 2>&1 || true
 # Inject the test photos with camera-style names so captured_at derivation
 # has real material, then trigger a media scan for each.
 STAMP=$(date +%Y%m%d_%H%M%S)
-adb -s "$DEV" push "$SCRATCH/pizza.jpg" "/sdcard/DCIM/Camera/IMG_${STAMP}_p.jpg" >/dev/null
-adb -s "$DEV" push "$SCRATCH/burger.jpg" "/sdcard/DCIM/Camera/IMG_${STAMP}_b.jpg" >/dev/null
+adb -s "$DEV" push "$SCRATCH/pizza.jpg" "$PHOTO_DIR/IMG_${STAMP}_p.jpg" >/dev/null
+adb -s "$DEV" push "$SCRATCH/burger.jpg" "$PHOTO_DIR/IMG_${STAMP}_b.jpg" >/dev/null
 for f in "IMG_${STAMP}_p.jpg" "IMG_${STAMP}_b.jpg"; do
   adb -s "$DEV" shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE \
-    -d "file:///sdcard/DCIM/Camera/$f" >/dev/null
+    -d "file://$PHOTO_DIR/$f" >/dev/null
 done
 
 cd "$(dirname "$0")/../app"
@@ -26,6 +30,7 @@ cd "$(dirname "$0")/../app"
   for i in $(seq 1 120); do
     if adb -s "$DEV" shell pm list packages 2>/dev/null | grep -q "$APP_ID"; then
       adb -s "$DEV" shell pm grant "$APP_ID" android.permission.READ_MEDIA_IMAGES 2>/dev/null || true
+      adb -s "$DEV" shell pm grant "$APP_ID" android.permission.READ_EXTERNAL_STORAGE 2>/dev/null || true
       adb -s "$DEV" shell pm grant "$APP_ID" android.permission.POST_NOTIFICATIONS 2>/dev/null || true
       exit 0
     fi
