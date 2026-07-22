@@ -38,7 +38,16 @@ cd "$(dirname "$0")/../app"
   done
 ) &
 GRANTER=$!
-flutter test integration_test/e2e_test.dart -d "$DEV" --dart-define-from-file="$ENV_FILE"
+# E2E_MODE=profile drives an AOT + R8-minified build — the same crash
+# surface as release (Flutter Driver cannot attach to true release builds;
+# profile is the closest shippable-variant proxy). Default stays debug.
+if [ "${E2E_MODE:-debug}" = "profile" ]; then
+  flutter drive --driver=test_driver/integration_test.dart \
+    --target=integration_test/e2e_test.dart -d "$DEV" --profile \
+    --dart-define-from-file="$ENV_FILE"
+else
+  flutter test integration_test/e2e_test.dart -d "$DEV" --dart-define-from-file="$ENV_FILE"
+fi
 RC=$?
 kill $GRANTER 2>/dev/null || true
 exit $RC

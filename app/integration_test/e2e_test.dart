@@ -117,6 +117,13 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
       await tester.tap(find.byKey(const Key('validateKeyButton')));
       await pumpUntilFound(tester, find.byKey(const Key('keyOkText')),
+          probe: () {
+            // Safe to print: the analyzer's error string, never the key.
+            final err = find.byKey(const Key('keyErrorText')).evaluate();
+            if (err.isEmpty) return 'no error shown (still validating?)';
+            final w = err.first.widget;
+            return w is Text ? 'keyErrorText="${w.data}"' : 'non-text error widget';
+          },
           what: 'key validation success marker (keyOkText)',
           timeout: const Duration(seconds: 90));
       _pass('B live key validation', sw);
