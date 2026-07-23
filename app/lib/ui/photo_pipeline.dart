@@ -19,8 +19,14 @@ enum PhotoOutcomeKind { saved, skipped, failed, duplicate, alreadyTracked }
 class PhotoOutcome {
   final PhotoOutcomeKind kind;
   final Map<String, dynamic>? analysis; // present when kind == saved
+
+  /// True when the failure was transient and the RESERVATION WAS RELEASED —
+  /// the photo stays eligible and a later scan re-offers it. Consumers use
+  /// this to hold watermarks/seen-sets open instead of marking coverage.
+  final bool retryable;
   final String message; // user-facing summary
-  const PhotoOutcome(this.kind, this.message, {this.analysis});
+  const PhotoOutcome(this.kind, this.message,
+      {this.analysis, this.retryable = false});
 }
 
 class PhotoPipeline {
@@ -40,9 +46,18 @@ class PhotoPipeline {
 
   PhotoPipeline({required this.dao, required this.analyzer, this.notify});
 
-  /// Wire the watcher intake stream. Stream errors are swallowed: one bad
-  /// event must not cancel the watch (spec §6 containment).
-  void bind(PhotoIntake intake) => bindStream(intake.photos);
+  /// Wire the watcher intake with BACKPRESSURE: the intake awaits each
+  /// photo's turn through the same global FIFO the share stream uses, so
+  /// byte reads never run ahead of processing (one photo's bytes resident
+  /// at a time). Returns non-retryable to the intake so released photos
+  /// are re-offered by later scans.
+  void bind(PhotoIntake intake) {
+    intake.attachSink((p) {
+      final slot = _tail.then((_) => process(p));
+      _tail = slot.then((_) {});
+      return slot.then((o) => !o.retryable);
+    });
+  }
 
   /// Also used for the share-sheet intake stream (deliberate adds, spec §6).
   void bindStream(Stream<IntakePhoto> photos) {
@@ -62,6 +77,7 @@ class PhotoPipeline {
   Future<PhotoOutcome> process(IntakePhoto photo) async {
     // Identity = md5 of ORIGINAL bytes, normalized (spec §6.2, §2.2).
     final hash = normalizeImageHash(md5.convert(photo.bytes).toString());
+    var reserved = false;
     try {
       // Pre-reservation 5-minute duplicate window — deliberate (user-facing)
       // path only, matching the server's chat-only check (spec §2.3).
@@ -73,7 +89,7 @@ class PhotoPipeline {
       // Reservation: deliberate adds reclaim failed/skipped/deleted rows;
       // automated watch intake is strict (spec §2.3 caller policies).
       final source = photo.deliberate ? 'app_photo' : 'app_watch';
-      final reserved = await dao.reservePhotoHash(hash,
+      reserved = await dao.reservePhotoHash(hash,
           source: source, reclaimDeliberate: photo.deliberate);
       if (!reserved) {
         return const PhotoOutcome(PhotoOutcomeKind.alreadyTracked,
@@ -89,7 +105,7 @@ class PhotoPipeline {
           // photo. Burning it to 'failed' would drop it forever on the
           // automated path (watch intake never reclaims, spec §2.3).
           await dao.releasePhotoHash(hash);
-          return PhotoOutcome(PhotoOutcomeKind.failed, why);
+          return PhotoOutcome(PhotoOutcomeKind.failed, why, retryable: true);
         }
         // Permanent failure: kept as status failed for deliberate retry
         // (spec §6.5).
@@ -134,10 +150,15 @@ class PhotoPipeline {
       return PhotoOutcome(PhotoOutcomeKind.saved, 'Logged meal #$id: $summary',
           analysis: analysis);
     } catch (e) {
-      // Containment: mark failed if possible, never rethrow (spec §6).
-      try {
-        await dao.markPhotoHash(hash, IngestionStatus.failed);
-      } catch (_) {}
+      // Containment: never rethrow (spec §6). Mark failed ONLY if we hold
+      // the reservation — a pre-reservation throw (e.g. the duplicate
+      // check) must not burn an untracked hash into 'failed', which the
+      // automated path would then never reclaim.
+      if (reserved) {
+        try {
+          await dao.markPhotoHash(hash, IngestionStatus.failed);
+        } catch (_) {}
+      }
       return PhotoOutcome(PhotoOutcomeKind.failed, 'Photo intake failed: $e');
     }
   }

@@ -35,10 +35,12 @@ class BackfillWindowTruncated implements Exception {
 /// falls within the last [lookbackDays] days — i.e. the cutoff is local
 /// midnight (lookbackDays − 1) days before today, so lookbackDays=2 means
 /// today + yesterday exactly (upload_photo.py sync_photos semantics).
+/// Calendar-component arithmetic, NOT Duration subtraction: a Duration is
+/// 24 absolute hours, which lands an hour off local midnight across a DST
+/// transition (the device may travel even though China skips DST).
 DateTime lookbackCutoff(DateTime now, int lookbackDays) {
   final days = clampLookbackDays(lookbackDays);
-  return DateTime(now.year, now.month, now.day)
-      .subtract(Duration(days: days - 1));
+  return DateTime(now.year, now.month, now.day - (days - 1));
 }
 
 /// Integration-contract factory: the integrator wires this with the
@@ -69,9 +71,18 @@ class LibraryPhotoIntake implements PhotoIntake {
   DateTime? _incrementalCutoff;
   bool _scanning = false;
   bool _started = false;
+  Future<bool> Function(IntakePhoto)? _sink;
+  // stop() bumps this; in-flight emission loops observe the change and
+  // quiesce instead of auto-logging on after the user disabled the watcher.
+  int _generation = 0;
 
   @override
   Stream<IntakePhoto> get photos => _controller.stream;
+
+  @override
+  void attachSink(Future<bool> Function(IntakePhoto photo)? sink) {
+    _sink = sink;
+  }
 
   @override
   Future<void> start() async {
@@ -88,6 +99,7 @@ class LibraryPhotoIntake implements PhotoIntake {
   Future<void> stop() async {
     if (!_started) return;
     _started = false;
+    _generation++; // quiesce in-flight emission loops
     await _library.stopChangeNotify();
   }
 
@@ -101,14 +113,17 @@ class LibraryPhotoIntake implements PhotoIntake {
     try {
       final cutoff = _incrementalCutoff ?? _clock();
       final assets = await _library.imagesCreatedAfter(cutoff);
-      await _emit(assets);
-      // Advance only to the newest create-date actually seen; the seen-id
-      // set absorbs the deliberate overlap at the cutoff instant.
-      for (final asset in assets) {
+      final frontier = await _emit(assets);
+      // Advance ONLY over the contiguous run of successfully-covered
+      // photos (oldest-first), and never past the wall clock: a transient
+      // read failure must stay inside the window so the next change event
+      // retries it, and one future-skewed createDate (camera clock drift)
+      // must not blind the live watcher for the skew duration.
+      if (frontier != null) {
+        final now = _clock();
+        final capped = frontier.isAfter(now) ? now : frontier;
         final cur = _incrementalCutoff;
-        if (cur == null || asset.createDateTime.isAfter(cur)) {
-          _incrementalCutoff = asset.createDateTime;
-        }
+        if (cur == null || capped.isAfter(cur)) _incrementalCutoff = capped;
       }
     } catch (_) {
       // Change-notify runs unawaited: a library query failure must not
@@ -120,7 +135,8 @@ class LibraryPhotoIntake implements PhotoIntake {
   }
 
   @override
-  Future<void> backfillScan({int lookbackDays = 0, DateTime? since}) async {
+  Future<DateTime?> backfillScan(
+      {int lookbackDays = 0, DateTime? since}) async {
     // 0 (unset) → the configured §8 default from settings.
     final days = lookbackDays > 0 ? lookbackDays : _lookbackDays();
     var cutoff = lookbackCutoff(_clock(), days);
@@ -134,31 +150,54 @@ class LibraryPhotoIntake implements PhotoIntake {
     // (a truncated scan under a watermark skips the tail forever).
     final assets =
         await _library.imagesCreatedAfter(cutoff, limit: backfillQueryLimit);
-    await _emit(assets);
+    final frontier = await _emit(assets);
     // Signal AFTER emitting: the caller processes what was seen, but a
     // watermark must not advance over the unseen tail.
     if (assets.length >= backfillQueryLimit) {
       throw const BackfillWindowTruncated();
     }
+    return frontier;
   }
 
-  Future<void> _emit(List<LibraryAsset> assets) async {
+  /// Delivers [assets] oldest-first and returns the coverage FRONTIER: the
+  /// newest createDate such that every asset at or before it was terminally
+  /// handled (delivered, seen before, or permanently skipped). The frontier
+  /// halts at the first transient failure or retryable release so callers
+  /// never advance a cutoff/watermark past a photo that still needs a
+  /// retry. Null = nothing covered.
+  Future<DateTime?> _emit(List<LibraryAsset> assets) async {
     // §6: newest-LAST emission — oldest first, so downstream meal rows land
     // in chronological order.
     final ordered = [...assets]
       ..sort((a, b) => a.createDateTime.compareTo(b.createDateTime));
+    final generation = _generation;
+    DateTime? frontier;
+    var frontierOpen = true;
+
+    void cover(LibraryAsset asset) {
+      if (frontierOpen) frontier = asset.createDateTime;
+    }
+
     for (final asset in ordered) {
-      if (_controller.isClosed) return;
-      if (!_seenAssetIds.add(asset.id)) continue;
+      if (_controller.isClosed) break;
+      if (_generation != generation) break; // stop(): quiesce mid-batch
+      if (!_seenAssetIds.add(asset.id)) {
+        cover(asset); // already handled this session
+        continue;
+      }
       final Uint8List? bytes;
       final String name;
       try {
         bytes = await asset.originBytes(); // ORIGINAL bytes (§6.2)
         if (bytes == null || bytes.isEmpty) {
           _seenAssetIds.remove(asset.id); // transient read failure: retryable
+          frontierOpen = false;
           continue;
         }
-        if (bytes.length > maxPhotoBytes) continue; // §8 25 MB pre-decode cap
+        if (bytes.length > maxPhotoBytes) {
+          cover(asset); // §8 25 MB pre-decode cap: permanent skip
+          continue;
+        }
         name = await asset.fileName();
       } catch (_) {
         // photo_manager REPLIES an error (not null) for unreadable/deleted
@@ -166,6 +205,7 @@ class LibraryPhotoIntake implements PhotoIntake {
         // whole scan (a scan abort loses every photo behind it AND, in the
         // background job, kills the run before its watermark logic).
         _seenAssetIds.remove(asset.id);
+        frontierOpen = false;
         continue;
       }
       final capturedAt = deriveCapturedAt(
@@ -174,8 +214,24 @@ class LibraryPhotoIntake implements PhotoIntake {
           now: _clock(),
           maxAgeDays: _capturedAtMaxAgeDays);
       // deliberate=false: automated intake, strict reservation (§2.3).
-      _controller.add(IntakePhoto(bytes, asset.id, name,
-          capturedAt: capturedAt, deliberate: false));
+      final photo = IntakePhoto(bytes, asset.id, name,
+          capturedAt: capturedAt, deliberate: false);
+      final sink = _sink;
+      if (sink != null) {
+        // Backpressured path: the next asset's bytes are read only after
+        // this photo fully processed — one photo resident at a time.
+        final terminal = await sink(photo);
+        if (terminal) {
+          cover(asset);
+        } else {
+          _seenAssetIds.remove(asset.id); // released: re-offer next scan
+          frontierOpen = false;
+        }
+      } else {
+        _controller.add(photo);
+        cover(asset);
+      }
     }
+    return frontier;
   }
 }

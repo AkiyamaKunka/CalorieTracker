@@ -20,10 +20,22 @@ const int kAnalysisLongSidePx = SharedConstants.normalizeMaxDimensionPx;
 /// Spec §3.1 step 5: JPEG quality 85 (shared/constants.json).
 const int kAnalysisJpegQuality = SharedConstants.normalizeJpegQuality;
 
+/// Decoded-pixel ceiling: the 25 MB BYTE cap does not bound pixels — a
+/// 108 MP JPEG is ~15 MB on disk but ~432 MB as RGBA, an instant OOM in
+/// the background isolate. 50 MP (~200 MB peak, one photo at a time)
+/// admits every mainstream camera's full-resolution output.
+const int kMaxDecodePixels = 50 * 1000 * 1000;
+
 /// Returns the normalized JPEG, or null on ANY failure — spec §3.1 step 6:
 /// callers then send the original bytes if < 5 MB, else fail.
 Uint8List? normalizeForAnalysis(Uint8List original) {
   try {
+    // Header-probe the dimensions BEFORE committing to a full pixel decode.
+    final decoder = img.findDecoderForData(original);
+    final info = decoder?.startDecode(original);
+    if (info != null && info.width * info.height > kMaxDecodePixels) {
+      return null;
+    }
     var decoded = img.decodeImage(original);
     if (decoded == null) return null;
     // Spec §3.1 step 3: bake the EXIF orientation transpose into the pixels.

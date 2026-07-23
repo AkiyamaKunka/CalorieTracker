@@ -19,26 +19,39 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'fakes.dart';
 
-/// Intake whose backfillScan emits a scripted batch — mimics the real
-/// LibraryPhotoIntake (async broadcast stream, emission during the scan).
+/// Intake whose backfillScan delivers a scripted batch — mimics the real
+/// LibraryPhotoIntake (sink-awaited delivery when attached; stream else).
 class EmittingIntake implements PhotoIntake {
   final _controller = StreamController<IntakePhoto>.broadcast();
   List<IntakePhoto> batch = const [];
   final List<DateTime?> sinceArgs = [];
   int scans = 0;
   bool throwAfterEmit = false; // scan-abort simulation (library query died)
+  DateTime? frontier; // returned from a completed scan
+  Future<bool> Function(IntakePhoto)? _sink;
 
   @override
   Stream<IntakePhoto> get photos => _controller.stream;
 
   @override
-  Future<void> backfillScan({int lookbackDays = 0, DateTime? since}) async {
+  void attachSink(Future<bool> Function(IntakePhoto photo)? sink) =>
+      _sink = sink;
+
+  @override
+  Future<DateTime?> backfillScan(
+      {int lookbackDays = 0, DateTime? since}) async {
     scans++;
     sinceArgs.add(since);
     for (final p in batch) {
-      _controller.add(p);
+      final sink = _sink;
+      if (sink != null) {
+        await sink(p); // backpressured delivery, like the real intake
+      } else {
+        _controller.add(p);
+      }
     }
     if (throwAfterEmit) throw StateError('library query died mid-scan');
+    return frontier;
   }
 
   @override

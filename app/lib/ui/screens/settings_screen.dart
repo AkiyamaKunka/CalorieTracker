@@ -107,7 +107,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       // instead of waiting for the next change event / background run.
       // Only with a key — analyses cannot succeed without one.
       if (widget.settings.apiKey.trim().isNotEmpty) {
-        unawaited(widget.photoIntake?.backfillScan().catchError((_) {}));
+        unawaited(widget.photoIntake
+            ?.backfillScan()
+            .then((_) {}, onError: (Object _) {}));
       }
     } else {
       await widget.photoIntake?.stop();

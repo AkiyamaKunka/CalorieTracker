@@ -93,7 +93,15 @@ class AppServices {
       // Fire-and-forget: startup must not block on Gemini analyses. Key
       // guard: without a key nothing can succeed, so don't read photo bytes.
       if ((settings.geminiApiKey ?? '').isNotEmpty && !settings.isQuotaPaused) {
-        unawaited(photoIntake.backfillScan().catchError((_) {}));
+        unawaited(photoIntake.backfillScan().then((_) {},
+            onError: (Object e) {
+          // Truncation must not vanish silently: >2000 window images means
+          // the catch-up cannot promise full coverage.
+          if (e is BackfillWindowTruncated) {
+            notify?.call('Photo library backlog is very large — some older '
+                'photos may need to be added manually.');
+          }
+        }));
       }
     }
     // Reconcile the periodic WorkManager backfill (background_glue) with the

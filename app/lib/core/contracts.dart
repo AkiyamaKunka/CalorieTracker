@@ -135,11 +135,26 @@ class IntakePhoto {
 abstract class PhotoIntake {
   Stream<IntakePhoto> get photos;
 
+  /// Backpressured delivery: when a sink is attached, the intake DELIVERS
+  /// each photo by awaiting it — reading the next photo's bytes only after
+  /// the sink returns — instead of adding to [photos]. Without this, a scan
+  /// reads the whole window's original bytes (25 MB each) ahead of a
+  /// pipeline that takes 10–20 s per photo: a 200-photo backlog ≈ 1 GB
+  /// resident → OOM-killed background runs in a loop. The sink returns
+  /// false when the photo was RELEASED for retry (transient failure) — the
+  /// intake then forgets it was seen so a later scan re-offers it. Pass
+  /// null to detach.
+  void attachSink(Future<bool> Function(IntakePhoto photo)? sink);
+
   /// Scan the lookback window and emit every photo in it. [since], when
   /// LATER than the window cutoff, narrows the scan to photos created after
   /// it — the periodic background job passes its persisted watermark so a
   /// 30-minute cadence doesn't re-read the whole window's bytes every run.
-  Future<void> backfillScan({int lookbackDays, DateTime? since});
+  /// Returns the coverage FRONTIER: the newest createDate with everything
+  /// at/before it terminally handled (a retryable release or transient read
+  /// failure halts it) — watermarks must never advance past it. Null =
+  /// nothing covered.
+  Future<DateTime?> backfillScan({int lookbackDays, DateTime? since});
   Future<void> start();
   Future<void> stop();
 }

@@ -218,15 +218,21 @@ class FakeIntake implements PhotoIntake {
   final StreamController<IntakePhoto> controller =
       StreamController<IntakePhoto>.broadcast();
   bool started = false;
+  Future<bool> Function(IntakePhoto)? sink;
 
   @override
   Stream<IntakePhoto> get photos => controller.stream;
 
+  @override
+  void attachSink(Future<bool> Function(IntakePhoto photo)? s) => sink = s;
+
   int backfillScans = 0;
 
   @override
-  Future<void> backfillScan({int lookbackDays = 2, DateTime? since}) async {
+  Future<DateTime?> backfillScan(
+      {int lookbackDays = 2, DateTime? since}) async {
     backfillScans++;
+    return null;
   }
 
   @override

@@ -9,19 +9,26 @@ import 'package:calorie_tracker/services/photo/watcher.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class FakeAsset implements LibraryAsset {
-  FakeAsset(this.id, this.name, this.createDateTime, this.bytes);
+  FakeAsset(this.id, this.name, this.createDateTime, this.bytes,
+      {this.onRead, this.throwOnRead = false});
   @override
   final String id;
   final String name;
   @override
   final DateTime createDateTime;
   final Uint8List? bytes;
+  final void Function()? onRead;
+  final bool throwOnRead; // Android 11+ replies errors for unreadable assets
 
   @override
   Future<String> fileName() async => name;
 
   @override
-  Future<Uint8List?> originBytes() async => bytes;
+  Future<Uint8List?> originBytes() async {
+    onRead?.call();
+    if (throwOnRead) throw StateError('202: get originBytes error');
+    return bytes;
+  }
 }
 
 class FakePhotoLibrary implements PhotoLibrary {
@@ -117,10 +124,126 @@ void main() {
       library.assets = List.generate(
           backfillQueryLimit,
           (i) => FakeAsset('t$i', 'IMG_t$i.jpg',
-              DateTime(2026, 7, 17, 8, 0, i ~/ 60, i % 60 * 16), null));
-      await expectLater(
-          intake.backfillScan(lookbackDays: 2),
+              DateTime(2026, 7, 17, 8, 0, i ~/ 60, i % 60 * 16), bytesOf(1)));
+      final delivered = <String>[];
+      intake.attachSink((p) async {
+        delivered.add(p.assetId);
+        return true;
+      });
+      await expectLater(intake.backfillScan(lookbackDays: 2),
           throwsA(isA<BackfillWindowTruncated>()));
+      // Everything the query returned was processed BEFORE the signal —
+      // truncation warns about the unseen tail, it must not abandon work.
+      expect(delivered, hasLength(backfillQueryLimit));
+    });
+
+    test('sink backpressure: next bytes are read only after the sink returns',
+        () async {
+      final events = <String>[];
+      library.assets = [
+        FakeAsset('a', 'IMG_a.jpg', DateTime(2026, 7, 17, 8), bytesOf(1),
+            onRead: () => events.add('read:a')),
+        FakeAsset('b', 'IMG_b.jpg', DateTime(2026, 7, 17, 9), bytesOf(2),
+            onRead: () => events.add('read:b')),
+      ];
+      intake.attachSink((p) async {
+        events.add('sink:${p.assetId}');
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+        events.add('done:${p.assetId}');
+        return true;
+      });
+      await intake.backfillScan(lookbackDays: 2);
+      expect(events,
+          ['read:a', 'sink:a', 'done:a', 'read:b', 'sink:b', 'done:b'],
+          reason: 'reading ahead of the pipeline holds every queued '
+              'photo\'s bytes in memory at once (OOM class)');
+    });
+
+    test('released photo (sink false) is re-offered by the NEXT scan; '
+        'terminal is not', () async {
+      library.assets = [
+        FakeAsset('keep', 'IMG_k.jpg', DateTime(2026, 7, 17, 8), bytesOf(1)),
+        FakeAsset('retry', 'IMG_r.jpg', DateTime(2026, 7, 17, 9), bytesOf(2)),
+      ];
+      final delivered = <String>[];
+      intake.attachSink((p) async {
+        delivered.add(p.assetId);
+        return p.assetId != 'retry'; // 'retry' → released
+      });
+      await intake.backfillScan(lookbackDays: 2);
+      await intake.backfillScan(lookbackDays: 2);
+      expect(delivered, ['keep', 'retry', 'retry']);
+    });
+
+    test('frontier halts at the first failure and at retryable releases',
+        () async {
+      library.assets = [
+        FakeAsset('ok1', 'IMG_1.jpg', DateTime(2026, 7, 17, 8), bytesOf(1)),
+        FakeAsset('bad', 'IMG_2.jpg', DateTime(2026, 7, 17, 9), null),
+        FakeAsset('ok2', 'IMG_3.jpg', DateTime(2026, 7, 17, 10), bytesOf(3)),
+      ];
+      intake.attachSink((p) async => true);
+      final frontier = await intake.backfillScan(lookbackDays: 2);
+      // ok2 processed fine, but the watermark may not pass 'bad'.
+      expect(frontier, DateTime(2026, 7, 17, 8));
+    });
+
+    test('oversize photos are covered (permanent skip), null-bytes are not',
+        () async {
+      library.assets = [
+        FakeAsset('big', 'IMG_big.jpg', DateTime(2026, 7, 17, 8),
+            Uint8List(maxPhotoBytes + 1)),
+        FakeAsset('flaky', 'IMG_f.jpg', DateTime(2026, 7, 17, 9), null),
+      ];
+      intake.attachSink((p) async => true);
+      await intake.backfillScan(lookbackDays: 2);
+      // Second scan: oversize NOT re-read (seen), flaky re-offered.
+      var flakyReads = 0;
+      library.assets = [
+        FakeAsset('big', 'IMG_big.jpg', DateTime(2026, 7, 17, 8),
+            Uint8List(maxPhotoBytes + 1),
+            onRead: () => fail('oversize must stay covered')),
+        FakeAsset('flaky', 'IMG_f.jpg', DateTime(2026, 7, 17, 9), bytesOf(2),
+            onRead: () => flakyReads++),
+      ];
+      await intake.backfillScan(lookbackDays: 2);
+      expect(flakyReads, 1);
+    });
+
+    test('a THROWING asset (Android 11+ unreadable) skips, not aborts',
+        () async {
+      library.assets = [
+        FakeAsset('gone', 'IMG_g.jpg', DateTime(2026, 7, 17, 8), null,
+            throwOnRead: true),
+        FakeAsset('fine', 'IMG_f.jpg', DateTime(2026, 7, 17, 9), bytesOf(1)),
+      ];
+      final delivered = <String>[];
+      intake.attachSink((p) async {
+        delivered.add(p.assetId);
+        return true;
+      });
+      final frontier = await intake.backfillScan(lookbackDays: 2);
+      expect(delivered, ['fine']); // scan survived the poison asset
+      expect(frontier, isNull); // but coverage halts before it
+    });
+
+    test('stop() quiesces a batch mid-delivery', () async {
+      library.assets = [
+        FakeAsset('p1', 'IMG_1.jpg', DateTime(2026, 7, 17, 8), bytesOf(1)),
+        FakeAsset('p2', 'IMG_2.jpg', DateTime(2026, 7, 17, 9), bytesOf(2)),
+      ];
+      library.permissionGranted = true;
+      await intake.start();
+      final delivered = <String>[];
+      intake.attachSink((p) async {
+        delivered.add(p.assetId);
+        await intake.stop(); // user flips the toggle mid-batch
+        return true;
+      });
+      await intake.backfillScan(lookbackDays: 2);
+      expect(delivered, ['p1'],
+          reason: 'meals must not keep auto-logging after the watcher is '
+              'disabled');
     });
 
     test('window honors lookbackDays; older photos excluded', () async {

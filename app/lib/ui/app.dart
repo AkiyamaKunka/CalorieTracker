@@ -84,7 +84,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     // emissions have had a chance to process.
     unawaited(s.photoIntake
         ?.backfillScan()
-        .catchError((_) {})
+        .then((_) {}, onError: (Object _) {})
         .then((_) => Future<void>.delayed(const Duration(seconds: 15)))
         .then((_) {
       if (!mounted) return;

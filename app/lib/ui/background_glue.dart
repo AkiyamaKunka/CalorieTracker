@@ -43,42 +43,51 @@ const Duration backgroundScanOverlap = Duration(hours: 1);
 /// nothing new was shot.
 const Duration backgroundScanFrequency = Duration(minutes: 30);
 
-/// Result of one drained backfill: what happened to each emitted photo,
-/// and whether the SCAN itself completed (a scan abort means unseen photos
-/// remain — the caller must not advance its watermark past them).
+/// Result of one drained backfill: what happened to each photo, whether
+/// the SCAN itself completed (a scan abort means unseen photos remain),
+/// and the intake's coverage frontier (never advance a watermark past it).
 class BackfillDrain {
   final List<PhotoOutcome> outcomes;
   final bool scanCompleted;
-  const BackfillDrain(this.outcomes, {required this.scanCompleted});
+  final DateTime? frontier;
+  const BackfillDrain(this.outcomes,
+      {required this.scanCompleted, this.frontier});
 }
 
-/// Run one backfill through the pipeline and wait for every emitted photo
-/// to finish processing. [PhotoPipeline.bind] is deliberately NOT used: it
-/// fire-and-forgets, and a WorkManager task that returns before its photos
-/// are analyzed gets its isolate killed mid-Gemini-call. Photos process
-/// ONE at a time — a concurrent batch self-inflicts free-tier RPM 429s.
+/// Run one backfill through the pipeline with FULL backpressure: the
+/// intake awaits each photo's processing before reading the next photo's
+/// bytes (one photo resident at a time — a 200-photo backlog must not hold
+/// ~1 GB while the first Gemini call is in flight). When [onOutcome] is
+/// set it runs per photo BEFORE the next one starts, so progress
+/// (notifications, watermark checkpoints) survives a WorkManager
+/// hard-stop mid-batch.
 Future<BackfillDrain> drainBackfill(PhotoIntake intake, PhotoPipeline pipeline,
-    {int lookbackDays = 0, DateTime? since}) async {
+    {int lookbackDays = 0,
+    DateTime? since,
+    Future<void> Function(IntakePhoto photo, PhotoOutcome outcome)?
+        onOutcome}) async {
   final outcomes = <PhotoOutcome>[];
-  var tail = Future<void>.value();
-  final sub = intake.photos.listen((p) {
-    tail = tail.then((_) async => outcomes.add(await pipeline.process(p)));
+  intake.attachSink((p) async {
+    final o = await pipeline.process(p);
+    outcomes.add(o);
+    if (onOutcome != null) await onOutcome(p, o);
+    return !o.retryable;
   });
   var scanCompleted = false;
+  DateTime? frontier;
   try {
-    await intake.backfillScan(lookbackDays: lookbackDays, since: since);
+    frontier = await intake.backfillScan(
+        lookbackDays: lookbackDays, since: since);
     scanCompleted = true;
   } catch (_) {
-    // Library query died mid-scan. Photos already emitted still get
-    // processed below; the false flag tells the caller the window was NOT
-    // fully covered.
+    // Library query died / window truncated. Photos delivered before the
+    // throw are already fully processed (sink is awaited inline); the
+    // false flag tells the caller the window was NOT fully covered.
+  } finally {
+    intake.attachSink(null);
   }
-  // Broadcast delivery is a microtask behind add(); one event-loop turn
-  // flushes the tail events into the FIFO chain before the join.
-  await Future<void>.delayed(Duration.zero);
-  await tail;
-  await sub.cancel();
-  return BackfillDrain(outcomes, scanCompleted: scanCompleted);
+  return BackfillDrain(outcomes,
+      scanCompleted: scanCompleted, frontier: frontier);
 }
 
 /// The headless scan body, dependency-injected so tests can drive it with
@@ -105,21 +114,51 @@ Future<bool> headlessBackfillWith({
   final scanStart = clock();
   final since =
       DateTime.tryParse(prefs.getString(backgroundWatermarkPrefsKey) ?? '');
+
+  Future<void> checkpoint(DateTime mark) async {
+    // Monotonic forward only, never past this scan's start.
+    final capped = mark.isAfter(scanStart) ? scanStart : mark;
+    final cur =
+        DateTime.tryParse(prefs.getString(backgroundWatermarkPrefsKey) ?? '');
+    if (cur == null || capped.isAfter(cur)) {
+      await prefs.setString(
+          backgroundWatermarkPrefsKey, capped.toIso8601String());
+    }
+  }
+
   // The pipeline (and its database handle) is built ONLY past the guards:
   // most runs guard out or find nothing, and every needless cross-isolate
   // open is a shot at the shared-handle transaction races.
-  final drain = await drainBackfill(intake, await pipeline(),
-      since: since?.subtract(backgroundScanOverlap));
-  for (final o in drain.outcomes) {
-    if (o.kind == PhotoOutcomeKind.saved) {
-      await showMealCard('🍽️ Meal logged automatically', o.message);
-    }
-  }
-  // Advance the watermark ONLY over a fully-covered window — an aborted
-  // scan may have unseen photos behind it.
-  if (drain.scanCompleted) {
+  var checkpointOpen = true; // halts at the first retryable release
+  final drain = await drainBackfill(
+    intake,
+    await pipeline(),
+    since: since?.subtract(backgroundScanOverlap),
+    onOutcome: (photo, o) async {
+      // Per photo, BEFORE the next one: a WorkManager hard-stop mid-batch
+      // must not lose the notification for an already-saved meal, nor the
+      // progress the run already made.
+      if (o.kind == PhotoOutcomeKind.saved) {
+        await showMealCard('🍽️ Meal logged automatically', o.message);
+      }
+      if (o.retryable) {
+        checkpointOpen = false; // released photo: nothing may pass it
+      } else if (checkpointOpen) {
+        final at = photo.capturedAt;
+        if (at != null) await checkpoint(at);
+      }
+    },
+  );
+  // Final watermark: a clean scan with no retryable releases covers the
+  // whole window up to scanStart; anything less advances only to the
+  // intake's coverage frontier (photos behind a transient failure stay
+  // reachable for the next run).
+  final anyRetryable = drain.outcomes.any((o) => o.retryable);
+  if (drain.scanCompleted && !anyRetryable) {
     await prefs.setString(
         backgroundWatermarkPrefsKey, scanStart.toIso8601String());
+  } else if (drain.frontier != null) {
+    await checkpoint(drain.frontier!);
   }
   return true;
 }
