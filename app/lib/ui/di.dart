@@ -50,18 +50,23 @@ class AppServices {
     final shareIntake = createShareIntake(settings);
     final ReportBuilder reports = createReportBuilder(dao);
 
-    // Notification surface (spec §5.5/§6): init() also performs the Android
-    // 13+ POST_NOTIFICATIONS runtime request — without it every meal card
+    // Notification surface (spec §5.5/§6): init() also performs the runtime
+    // permission request (Android 13+ / iOS) — without it every meal card
     // and daily report is silently dropped. The in-process daily Timer dies
     // with the process, so re-arm it on every launch (notifications.dart
-    // integrator contract).
+    // integrator contract). MUST be fire-and-forget: init() resolves only
+    // when the user answers the permission dialog, and awaiting that here
+    // blocks the first frame indefinitely (found by the iOS E2E hanging
+    // 15 minutes at launch).
     final notifier = ReportNotifier(dailyBody: reports.todaySummary);
-    await notifier.init();
-    try {
-      await notifier.scheduleDaily(settings.reportTime);
-    } on ArgumentError {
-      // A corrupt persisted hh:mm must not abort startup.
-    }
+    unawaited(() async {
+      try {
+        await notifier.init();
+        await notifier.scheduleDaily(settings.reportTime);
+      } catch (_) {
+        // Permission denial / corrupt hh:mm must never break startup.
+      }
+    }());
 
     final ui = UiServices(
       dao: dao,
