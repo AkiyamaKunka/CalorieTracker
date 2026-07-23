@@ -98,6 +98,31 @@ void main() {
       intake.photos.listen(emitted.add);
     });
 
+    test('since AFTER the window cutoff narrows the scan (watermark)',
+        () async {
+      final mark = DateTime(2026, 7, 17, 9, 30);
+      await intake.backfillScan(lookbackDays: 2, since: mark);
+      expect(library.queriedCutoffs.single, mark);
+    });
+
+    test('since BEFORE the window cutoff is ignored (never widens §8 clamp)',
+        () async {
+      await intake.backfillScan(
+          lookbackDays: 2, since: DateTime(2026, 7, 1));
+      expect(library.queriedCutoffs.single, DateTime(2026, 7, 16));
+    });
+
+    test('a capped result set emits everything, then signals truncation',
+        () async {
+      library.assets = List.generate(
+          backfillQueryLimit,
+          (i) => FakeAsset('t$i', 'IMG_t$i.jpg',
+              DateTime(2026, 7, 17, 8, 0, i ~/ 60, i % 60 * 16), null));
+      await expectLater(
+          intake.backfillScan(lookbackDays: 2),
+          throwsA(isA<BackfillWindowTruncated>()));
+    });
+
     test('window honors lookbackDays; older photos excluded', () async {
       library.assets = [
         FakeAsset('a', 'IMG_20260717_080000.jpg',

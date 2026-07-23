@@ -122,13 +122,18 @@ class FakeAnalyzer implements AnalyzerService {
       const AnalysisOutcome(wall: Duration.zero);
   Map<String, dynamic>? nextTextIntent;
 
+  /// Test hook: awaited inside analyzePhoto (concurrency probes).
+  Future<void> Function()? onAnalyze;
+
   /// Test hook: controls validateKey resolution. Default resolves null (OK).
   Future<String?> Function(String apiKey)? onValidateKey;
   final List<String> validatedKeys = [];
 
   @override
-  Future<AnalysisOutcome> analyzePhoto(Uint8List originalBytes) async =>
-      nextPhotoOutcome;
+  Future<AnalysisOutcome> analyzePhoto(Uint8List originalBytes) async {
+    if (onAnalyze != null) await onAnalyze!();
+    return nextPhotoOutcome;
+  }
 
   @override
   Future<Map<String, dynamic>?> textIntent(String prompt) async =>
@@ -217,8 +222,12 @@ class FakeIntake implements PhotoIntake {
   @override
   Stream<IntakePhoto> get photos => controller.stream;
 
+  int backfillScans = 0;
+
   @override
-  Future<void> backfillScan({int lookbackDays = 2}) async {}
+  Future<void> backfillScan({int lookbackDays = 2, DateTime? since}) async {
+    backfillScans++;
+  }
 
   @override
   Future<void> start() async => started = true;

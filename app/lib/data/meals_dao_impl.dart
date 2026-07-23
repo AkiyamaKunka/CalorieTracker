@@ -244,12 +244,36 @@ class SqfliteMealsDao implements MealsDao {
     );
   }
 
+  /// A 'processing' row younger than this may belong to a LIVE run in the
+  /// other isolate (the periodic background job vs. the foreground app) —
+  /// sweeping it would double-analyze and double-log the photo. Worst-case
+  /// legitimate hold is ~5 min (3 attempts × 90 s deadline + backoffs).
+  static const Duration staleProcessingAge = Duration(minutes: 15);
+
   @override
   Future<void> reclaimStaleProcessing() async {
-    // Spec §2.3 app simplification: in a single-process app, any 'processing'
-    // row at launch is a crashed run. Mark it 'failed' — the original photo
-    // stays retrievable via retry-failed / deliberate re-add, and the auto
-    // intake still won't re-log it (the 6-hour timer has no app role).
+    // Spec §2.3 app simplification, adjusted for two realities the server
+    // never had: (1) EMUI-class OSes routinely kill the process mid-
+    // analysis, and (2) a background isolate may hold live reservations
+    // while this launch sweep runs. Only rows stale for [staleProcessingAge]
+    // are touched. AUTOMATED-watch rows are RELEASED (deleted) so the next
+    // scan re-offers the photo — marking them 'failed' silently dropped
+    // every interrupted photo forever (watch intake never reclaims failed;
+    // observed live 2026-07-23: three of the user's photos burned this way).
+    final cutoff =
+        _clock().subtract(staleProcessingAge).toIso8601String();
+    await _db.delete(
+      'photo_ingestions',
+      where: 'chat_id = ? AND status = ? AND source = ? AND last_seen_at < ?',
+      whereArgs: [
+        localChatId,
+        IngestionStatus.processing.name,
+        'app_watch',
+        cutoff,
+      ],
+    );
+    // DELIBERATE rows (picker/share) keep the spec behavior: mark 'failed'
+    // so the user-visible retry path owns them.
     await _db.update(
       'photo_ingestions',
       {
@@ -257,8 +281,8 @@ class SqfliteMealsDao implements MealsDao {
         'meal_id': null,
         'last_seen_at': _clock().toIso8601String(),
       },
-      where: 'chat_id = ? AND status = ?',
-      whereArgs: [localChatId, IngestionStatus.processing.name],
+      where: 'chat_id = ? AND status = ? AND last_seen_at < ?',
+      whereArgs: [localChatId, IngestionStatus.processing.name, cutoff],
     );
   }
 

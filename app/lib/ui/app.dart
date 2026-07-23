@@ -2,6 +2,8 @@
 /// FAB → add flow. Also the startup-failure screen used by main.dart.
 library;
 
+import 'dart:async' show unawaited;
+
 import 'package:flutter/material.dart';
 
 import 'screens/add_flow.dart';
@@ -42,7 +44,7 @@ class HomeShell extends StatefulWidget {
   State<HomeShell> createState() => _HomeShellState();
 }
 
-class _HomeShellState extends State<HomeShell> {
+class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   late int _index;
   final GlobalKey<TodayScreenState> _todayKey = GlobalKey<TodayScreenState>();
   // History sits in the IndexedStack, so its initState runs once at app
@@ -54,8 +56,41 @@ class _HomeShellState extends State<HomeShell> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // Onboarding: with no API key yet, land on Settings first.
     _index = widget.services.settings.apiKey.trim().isEmpty ? 2 : 0;
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
+    final s = widget.services;
+    // The background job may have logged meals while we were away — the
+    // IndexedStack keeps stale screens alive, so refresh them now.
+    _todayKey.currentState?.reload();
+    if (_index == 1) _historyKey.currentState?.reload();
+    if (!s.settings.watcherEnabled) return;
+    if (s.settings.apiKey.trim().isEmpty) return; // nothing can succeed yet
+    // Resume catch-up (full lookback window): the change-notify watcher is
+    // frozen with the process on EMUI-class OSes, so photos taken while the
+    // app was backgrounded surface here. The md5 ledger + in-session seen
+    // set make repeat resumes near-free. Refresh again once the scan's
+    // emissions have had a chance to process.
+    unawaited(s.photoIntake
+        ?.backfillScan()
+        .catchError((_) {})
+        .then((_) => Future<void>.delayed(const Duration(seconds: 15)))
+        .then((_) {
+      if (!mounted) return;
+      _todayKey.currentState?.reload();
+      if (_index == 1) _historyKey.currentState?.reload();
+    }));
   }
 
   @override

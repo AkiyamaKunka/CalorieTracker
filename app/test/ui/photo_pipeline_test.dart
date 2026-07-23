@@ -2,6 +2,7 @@
 /// transitions, food_items sanitization, and per-photo error containment.
 library;
 
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
@@ -68,16 +69,62 @@ void main() {
     expect(dao.ledger[_hash], IngestionStatus.skipped);
   });
 
-  test('failed analysis → ledger failed, kept for retry', () async {
+  test('PERMANENT failed analysis → ledger failed, kept for retry', () async {
     final dao = FakeDao();
     final analyzer = FakeAnalyzer()
       ..nextPhotoOutcome =
-          const AnalysisOutcome(error: 'network down', wall: Duration.zero);
+          const AnalysisOutcome(error: 'bad key', wall: Duration.zero);
     final out =
         await PhotoPipeline(dao: dao, analyzer: analyzer).process(_photo());
     expect(out.kind, PhotoOutcomeKind.failed);
     expect(dao.ledger[_hash], IngestionStatus.failed);
     expect(dao.meals, isEmpty);
+  });
+
+  test('RETRYABLE failed analysis → reservation released, not burned',
+      () async {
+    final dao = FakeDao();
+    final analyzer = FakeAnalyzer()
+      ..nextPhotoOutcome = const AnalysisOutcome(
+          error: 'rate limit', retryable: true, wall: Duration.zero);
+    final pipeline = PhotoPipeline(dao: dao, analyzer: analyzer);
+    final out = await pipeline.process(_photo());
+    expect(out.kind, PhotoOutcomeKind.failed);
+    // Released: NO ledger row — the next scan re-offers the photo instead
+    // of dropping it forever (automated intake never reclaims 'failed').
+    expect(dao.ledger.containsKey(_hash), isFalse);
+
+    // And a later scan CAN save it once the transient trouble clears.
+    analyzer.nextPhotoOutcome = AnalysisOutcome(
+        analysis: _foodAnalysis(), isFood: true, wall: Duration.zero);
+    final retry = await pipeline.process(_photo());
+    expect(retry.kind, PhotoOutcomeKind.saved);
+    expect(dao.ledger[_hash], IngestionStatus.saved);
+  });
+
+  test('bound streams process photos ONE at a time (no Gemini burst)',
+      () async {
+    final dao = FakeDao();
+    var active = 0, maxActive = 0, calls = 0;
+    final analyzer = FakeAnalyzer();
+    analyzer.onAnalyze = () async {
+      active++;
+      calls++;
+      if (active > maxActive) maxActive = active;
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+      active--;
+    };
+    final pipeline = PhotoPipeline(dao: dao, analyzer: analyzer);
+    final controller = StreamController<IntakePhoto>.broadcast();
+    pipeline.bindStream(controller.stream);
+    for (var i = 0; i < 4; i++) {
+      controller.add(IntakePhoto(
+          Uint8List.fromList([i, i, i]), 'a$i', 'IMG_$i.jpg'));
+    }
+    while (calls < 4) {
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+    }
+    expect(maxActive, 1); // FIFO: a backfill batch must never fan out
   });
 
   test('watch intake never reclaims a skipped hash; deliberate add does',

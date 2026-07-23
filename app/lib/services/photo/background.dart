@@ -97,7 +97,11 @@ class WorkmanagerScheduler implements BackgroundScheduler {
   Future<void> registerPeriodic(String uniqueName, String taskName,
           {required Duration frequency, Map<String, dynamic>? inputData}) =>
       Workmanager().registerPeriodicTask(uniqueName, taskName,
-          frequency: frequency, inputData: inputData);
+          frequency: frequency,
+          inputData: inputData,
+          // Analyses need Gemini; an offline run can only read bytes for
+          // nothing (retryable-release keeps it harmless, but don't wake).
+          constraints: Constraints(networkType: NetworkType.connected));
 
   @override
   Future<void> cancelByUniqueName(String uniqueName) =>

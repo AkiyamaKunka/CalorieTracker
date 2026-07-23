@@ -140,6 +140,15 @@ Future<Database> openAppDatabase({String? path}) async {
     dbPath,
     options: OpenDatabaseOptions(
       version: kSchemaVersion,
+      // Two isolates share this database (foreground app + the WorkManager
+      // backfill isolate) through ONE static native handle (sqflite
+      // singleInstance). If either isolate dies between BEGIN and COMMIT
+      // (WorkManager's 10-min hard stop, EMUI kill), the handle's
+      // transaction state wedges and every later operation queues forever.
+      // This flag makes the NEXT open issue the healing ROLLBACK — release
+      // builds default it to false, which would freeze the app on every
+      // warm start after a mid-transaction kill, with no recovery path.
+      rollbackActiveTransactionOnOpen: true,
       // database.py:16 — foreign keys ON.
       onConfigure: (db) => db.execute('PRAGMA foreign_keys = ON'),
       onCreate: (db, version) async {

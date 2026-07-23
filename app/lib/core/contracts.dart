@@ -70,9 +70,21 @@ class AnalysisOutcome {
   final Map<String, dynamic>? analysis; // null = failed (kept for retry)
   final bool isFood; // already coerced via coerceIsFood
   final String? error; // user-facing failure summary
+
+  /// True when the failure is transient (rate limit, network, quota pause,
+  /// missing key) — the photo itself is fine and a later attempt can
+  /// succeed. Automated intake RELEASES the reservation instead of burning
+  /// it to 'failed' (which the watcher never reclaims, spec §2.3): on
+  /// EMUI-class OSes mid-analysis kills and quota pauses are routine, and
+  /// burning on them silently drops the user's photos forever.
+  final bool retryable;
   final Duration wall;
   const AnalysisOutcome(
-      {this.analysis, this.isFood = false, this.error, required this.wall});
+      {this.analysis,
+      this.isFood = false,
+      this.error,
+      this.retryable = false,
+      required this.wall});
 }
 
 /// Gemini-backed analyzer (spec §3): callers hand ORIGINAL bytes; the
@@ -122,7 +134,12 @@ class IntakePhoto {
 
 abstract class PhotoIntake {
   Stream<IntakePhoto> get photos;
-  Future<void> backfillScan({int lookbackDays});
+
+  /// Scan the lookback window and emit every photo in it. [since], when
+  /// LATER than the window cutoff, narrows the scan to photos created after
+  /// it — the periodic background job passes its persisted watermark so a
+  /// 30-minute cadence doesn't re-read the whole window's bytes every run.
+  Future<void> backfillScan({int lookbackDays, DateTime? since});
   Future<void> start();
   Future<void> stop();
 }

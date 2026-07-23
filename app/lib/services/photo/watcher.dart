@@ -7,6 +7,7 @@
 library;
 
 import 'dart:async';
+import 'dart:typed_data';
 
 import '../../core/contracts.dart';
 import '../settings/app_settings.dart' show AppSettings;
@@ -15,6 +16,20 @@ import 'photo_library.dart';
 
 /// §8: SYNC_LOOKBACK_DAYS range 1–30.
 int clampLookbackDays(int days) => days < 1 ? 1 : (days > 30 ? 30 : days);
+
+/// Backfill query cap. The library query returns the NEWEST assets first,
+/// so hitting the cap means the window's oldest photos were not seen.
+const int backfillQueryLimit = 2000;
+
+/// Thrown AFTER emitting a capped result set: everything returned still
+/// processes, but callers tracking coverage (the background watermark) must
+/// treat the window as not fully scanned.
+class BackfillWindowTruncated implements Exception {
+  const BackfillWindowTruncated();
+  @override
+  String toString() =>
+      'BackfillWindowTruncated: >$backfillQueryLimit images in the window';
+}
 
 /// Backfill window math (spec §6.4): include photos whose create-date DAY
 /// falls within the last [lookbackDays] days — i.e. the cutoff is local
@@ -95,21 +110,36 @@ class LibraryPhotoIntake implements PhotoIntake {
           _incrementalCutoff = asset.createDateTime;
         }
       }
+    } catch (_) {
+      // Change-notify runs unawaited: a library query failure must not
+      // become an unhandled zone error. The cutoff didn't advance, so the
+      // next change event retries the same window.
     } finally {
       _scanning = false;
     }
   }
 
   @override
-  Future<void> backfillScan({int lookbackDays = 0}) async {
+  Future<void> backfillScan({int lookbackDays = 0, DateTime? since}) async {
     // 0 (unset) → the configured §8 default from settings.
     final days = lookbackDays > 0 ? lookbackDays : _lookbackDays();
-    final cutoff = lookbackCutoff(_clock(), days);
+    var cutoff = lookbackCutoff(_clock(), days);
+    // A watermark can only NARROW the window, never widen it past §8's
+    // lookback clamp.
+    if (since != null && since.isAfter(cutoff)) cutoff = since;
     // §6.4: EVERY photo in the window is offered downstream; the status
     // ledger (saved/skipped/failed/deleted incl. tombstones) is what makes
-    // the re-scan idempotent — keep the window small.
-    final assets = await _library.imagesCreatedAfter(cutoff);
+    // the re-scan idempotent — keep the window small. The raised limit
+    // keeps a heavy-shooter window from being truncated newest-first
+    // (a truncated scan under a watermark skips the tail forever).
+    final assets =
+        await _library.imagesCreatedAfter(cutoff, limit: backfillQueryLimit);
     await _emit(assets);
+    // Signal AFTER emitting: the caller processes what was seen, but a
+    // watermark must not advance over the unseen tail.
+    if (assets.length >= backfillQueryLimit) {
+      throw const BackfillWindowTruncated();
+    }
   }
 
   Future<void> _emit(List<LibraryAsset> assets) async {
@@ -120,13 +150,24 @@ class LibraryPhotoIntake implements PhotoIntake {
     for (final asset in ordered) {
       if (_controller.isClosed) return;
       if (!_seenAssetIds.add(asset.id)) continue;
-      final bytes = await asset.originBytes(); // ORIGINAL bytes (§6.2)
-      if (bytes == null || bytes.isEmpty) {
-        _seenAssetIds.remove(asset.id); // transient read failure: retryable
+      final Uint8List? bytes;
+      final String name;
+      try {
+        bytes = await asset.originBytes(); // ORIGINAL bytes (§6.2)
+        if (bytes == null || bytes.isEmpty) {
+          _seenAssetIds.remove(asset.id); // transient read failure: retryable
+          continue;
+        }
+        if (bytes.length > maxPhotoBytes) continue; // §8 25 MB pre-decode cap
+        name = await asset.fileName();
+      } catch (_) {
+        // photo_manager REPLIES an error (not null) for unreadable/deleted
+        // assets on Android 11+ — one bad asset must skip, not abort the
+        // whole scan (a scan abort loses every photo behind it AND, in the
+        // background job, kills the run before its watermark logic).
+        _seenAssetIds.remove(asset.id);
         continue;
       }
-      if (bytes.length > maxPhotoBytes) continue; // §8: 25 MB pre-decode cap
-      final name = await asset.fileName();
       final capturedAt = deriveCapturedAt(
           fileName: name,
           assetCreateDate: asset.createDateTime,

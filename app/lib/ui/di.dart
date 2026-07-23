@@ -4,6 +4,8 @@
 /// time, the integrator fixes THIS file alone.
 library;
 
+import 'dart:async' show unawaited;
+
 import 'package:permission_handler/permission_handler.dart';
 
 import '../core/contracts.dart';
@@ -13,7 +15,9 @@ import '../services/nl/executor.dart';
 import '../services/photo/share_intake.dart';
 import '../services/photo/watcher.dart';
 import '../services/report/builders.dart';
+import '../services/report/notifications.dart';
 import '../services/settings/app_settings.dart';
+import 'background_glue.dart';
 import 'photo_pipeline.dart';
 import 'services.dart';
 
@@ -46,13 +50,26 @@ class AppServices {
     final shareIntake = createShareIntake(settings);
     final ReportBuilder reports = createReportBuilder(dao);
 
+    // Notification surface (spec §5.5/§6): init() also performs the Android
+    // 13+ POST_NOTIFICATIONS runtime request — without it every meal card
+    // and daily report is silently dropped. The in-process daily Timer dies
+    // with the process, so re-arm it on every launch (notifications.dart
+    // integrator contract).
+    final notifier = ReportNotifier(dailyBody: reports.todaySummary);
+    await notifier.init();
+    try {
+      await notifier.scheduleDaily(settings.reportTime);
+    } on ArgumentError {
+      // A corrupt persisted hh:mm must not abort startup.
+    }
+
     final ui = UiServices(
       dao: dao,
       analyzer: analyzer,
       executor: executor,
       photoIntake: photoIntake,
       reports: reports,
-      settings: _AppSettingsStore(settings),
+      settings: _AppSettingsStore(settings, notifier),
       picker: _ShareIntakePicker(shareIntake),
       requestPhotoPermission: _requestPhotosPermission,
     );
@@ -65,7 +82,18 @@ class AppServices {
     pipeline.bindStream(shareIntake.photos()); // share sheet (deliberate)
     if (settings.watcherEnabled) {
       await photoIntake.start();
+      // Launch catch-up over the FULL lookback window: change-notify only
+      // fires while the process lives, and EMUI-class OS freezing kills it
+      // minutes after backgrounding — photos taken since are picked up here.
+      // Fire-and-forget: startup must not block on Gemini analyses. Key
+      // guard: without a key nothing can succeed, so don't read photo bytes.
+      if ((settings.geminiApiKey ?? '').isNotEmpty && !settings.isQuotaPaused) {
+        unawaited(photoIntake.backfillScan().catchError((_) {}));
+      }
     }
+    // Reconcile the periodic WorkManager backfill (background_glue) with the
+    // persisted toggle so it also runs while the app is closed.
+    await syncBackgroundScan(settings);
 
     return _instance = AppServices._(ui, pipeline, settings);
   }
@@ -76,10 +104,12 @@ Future<bool> _requestPhotosPermission() async {
   return status.isGranted || status.isLimited;
 }
 
-/// Adapts the persistent AppSettings onto the UI's SettingsStore.
+/// Adapts the persistent AppSettings onto the UI's SettingsStore, keeping
+/// the background job and the daily-report schedule in lockstep with edits.
 class _AppSettingsStore implements SettingsStore {
   final AppSettings _s;
-  _AppSettingsStore(this._s);
+  final ReportNotifier _notifier;
+  _AppSettingsStore(this._s, this._notifier);
 
   @override
   String get apiKey => _s.geminiApiKey ?? '';
@@ -105,15 +135,22 @@ class _AppSettingsStore implements SettingsStore {
   }) async {
     if (apiKey != null) await _s.setGeminiApiKey(apiKey);
     if (model != null) await _s.setModel(model);
-    if (lookbackDays != null) await _s.setLookbackDays(lookbackDays);
+    if (lookbackDays != null) {
+      await _s.setLookbackDays(lookbackDays);
+      await syncBackgroundScan(_s);
+    }
     if (reportTime != null) {
       try {
         await _s.setReportTime(reportTime); // validates HH:mm, throws on junk
+        await _notifier.scheduleDaily(_s.reportTime); // re-arm on the new slot
       } on ArgumentError {
         // UI always sends zero-padded HH:mm; a junk value keeps the default.
       }
     }
-    if (watcherEnabled != null) await _s.setWatcherEnabled(watcherEnabled);
+    if (watcherEnabled != null) {
+      await _s.setWatcherEnabled(watcherEnabled);
+      await syncBackgroundScan(_s); // register/cancel the periodic job
+    }
     if (dietaryProfile != null) await _s.setDietaryProfile(dietaryProfile);
   }
 }

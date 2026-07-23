@@ -3,6 +3,8 @@
 /// (requests photo permission), dietary profile, JSON export via share_plus.
 library;
 
+import 'dart:async' show unawaited;
+
 import 'package:flutter/material.dart';
 import 'package:share_plus/share_plus.dart';
 
@@ -101,6 +103,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
         return; // leave the switch off
       }
       await widget.photoIntake?.start();
+      // Instant feedback on enable: sweep the lookback window right away
+      // instead of waiting for the next change event / background run.
+      // Only with a key — analyses cannot succeed without one.
+      if (widget.settings.apiKey.trim().isNotEmpty) {
+        unawaited(widget.photoIntake?.backfillScan().catchError((_) {}));
+      }
     } else {
       await widget.photoIntake?.stop();
     }

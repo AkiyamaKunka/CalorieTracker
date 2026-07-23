@@ -25,12 +25,18 @@ class ReportNotifier {
     DateTime Function()? clock,
     NotificationPresenter? presenter,
     Future<String> Function()? dailyBody,
+    int? mealCardIdSeed,
   })  : _plugin = plugin ?? FlutterLocalNotificationsPlugin(),
         _clock = clock ?? DateTime.now,
         // ignore: prefer_initializing_formals
         _presenter = presenter,
         // ignore: prefer_initializing_formals
-        _dailyBody = dailyBody;
+        _dailyBody = dailyBody {
+    // Each background run constructs a FRESH notifier; a fixed 100-base
+    // would make every run overwrite the previous run's unread meal cards.
+    // Headless callers pass a time-derived seed so ids keep advancing.
+    if (mealCardIdSeed != null) _nextMealCardId = mealCardIdSeed;
+  }
 
   /// Fixed id: re-firing replaces yesterday's report notification instead of
   /// stacking (one canonical daily report, spec §5.5).

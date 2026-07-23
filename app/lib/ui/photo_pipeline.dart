@@ -32,6 +32,12 @@ class PhotoPipeline {
 
   final List<StreamSubscription<IntakePhoto>> _subs = [];
 
+  // FIFO tail: bound-stream photos process ONE at a time. A backfill batch
+  // fired concurrently self-inflicts Gemini RPM 429s (free tier) and piles
+  // write contention onto the ledger; the server processed sequentially too.
+  // process() never throws (contract), so the chain cannot break.
+  Future<void> _tail = Future.value();
+
   PhotoPipeline({required this.dao, required this.analyzer, this.notify});
 
   /// Wire the watcher intake stream. Stream errors are swallowed: one bad
@@ -41,7 +47,7 @@ class PhotoPipeline {
   /// Also used for the share-sheet intake stream (deliberate adds, spec §6).
   void bindStream(Stream<IntakePhoto> photos) {
     _subs.add(photos.listen((p) {
-      unawaited(process(p));
+      _tail = _tail.then((_) => process(p));
     }, onError: (Object _) {}));
   }
 
@@ -76,9 +82,18 @@ class PhotoPipeline {
 
       final outcome = await analyzer.analyzePhoto(photo.bytes);
       if (outcome.analysis == null) {
-        // Kept for retry with status failed (spec §6.5).
-        await dao.markPhotoHash(hash, IngestionStatus.failed);
         final why = outcome.error ?? 'Analysis failed.';
+        if (outcome.retryable) {
+          // Transient trouble (rate limit / network / quota pause / no key):
+          // RELEASE the reservation so the next scan simply re-offers the
+          // photo. Burning it to 'failed' would drop it forever on the
+          // automated path (watch intake never reclaims, spec §2.3).
+          await dao.releasePhotoHash(hash);
+          return PhotoOutcome(PhotoOutcomeKind.failed, why);
+        }
+        // Permanent failure: kept as status failed for deliberate retry
+        // (spec §6.5).
+        await dao.markPhotoHash(hash, IngestionStatus.failed);
         notify?.call('Photo analysis failed — kept for retry. $why');
         return PhotoOutcome(PhotoOutcomeKind.failed, why);
       }

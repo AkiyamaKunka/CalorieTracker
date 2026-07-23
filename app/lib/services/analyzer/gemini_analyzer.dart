@@ -242,9 +242,11 @@ class GeminiAnalyzer implements AnalyzerService {
   @override
   Future<AnalysisOutcome> analyzePhoto(Uint8List originalBytes) async {
     final sw = Stopwatch()..start();
-    // Spec §3.3: while paused, skip analysis entirely — no model call.
+    // Spec §3.3: while paused, skip analysis entirely — no model call. The
+    // pause expires, so this is retryable by definition.
     if (_settings.isQuotaPaused) {
-      return AnalysisOutcome(error: _pausedMessage(), wall: sw.elapsed);
+      return AnalysisOutcome(
+          error: _pausedMessage(), retryable: true, wall: sw.elapsed);
     }
 
     Uint8List? sendBytes = await _normalize(originalBytes);
@@ -279,17 +281,26 @@ class GeminiAnalyzer implements AnalyzerService {
         text = _extractText(await _post(parts));
       } on GeminiException catch (e) {
         if (isDailyFreeTierQuotaError(e.message)) {
-          // Spec §3.3: latch pause-until = now + cooldown, persisted.
+          // Spec §3.3: latch pause-until = now + cooldown, persisted. The
+          // photo can succeed once the pause lifts → retryable.
           await _settings
               .setQuotaPauseUntil(DateTime.now().add(dailyQuotaCooldown));
-          return AnalysisOutcome(error: _pausedMessage(), wall: sw.elapsed);
+          return AnalysisOutcome(
+              error: _pausedMessage(), retryable: true, wall: sw.elapsed);
         }
         if (attempt < maxAttempts && isRetryableGeminiError(e.message)) {
           await _sleep(Duration(seconds: parseRetryDelaySeconds(e.message)));
           continue;
         }
+        // Exhausted in-place retries on a transient class (429/5xx/network),
+        // or the key is simply not configured yet: the PHOTO is fine either
+        // way — a later scan may succeed. Auth/model/parse failures are not.
+        final transient = isRetryableGeminiError(e.message) ||
+            e.message.startsWith('API_KEY missing');
         return AnalysisOutcome(
-            error: _userMessageFor(e.message), wall: sw.elapsed);
+            error: _userMessageFor(e.message),
+            retryable: transient,
+            wall: sw.elapsed);
       }
 
       // Spec §3.3/§3.4: a JSON parse failure is parse_error — never retried.
