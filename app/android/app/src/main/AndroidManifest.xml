@@ -1,4 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Gemini analysis and key validation need network. Flutter auto-adds
+         this ONLY to the debug/profile manifest (for hot reload), so it must
+         be declared here or release builds ship with no internet at all —
+         every analysis fails with "Error contacting Gemini". -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <!-- Photo intake (spec §6): read camera-roll images via photo_manager.
          API 33+ uses the granular media permission; API <=32 needs legacy
          external-storage read. WorkManager background scan needs no extra
