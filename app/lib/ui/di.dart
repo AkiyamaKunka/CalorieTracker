@@ -18,6 +18,7 @@ import '../services/report/builders.dart';
 import '../services/report/notifications.dart';
 import '../services/settings/app_settings.dart';
 import 'background_glue.dart';
+import 'format.dart' show isoDate;
 import 'photo_pipeline.dart';
 import 'services.dart';
 
@@ -58,7 +59,11 @@ class AppServices {
     // when the user answers the permission dialog, and awaiting that here
     // blocks the first frame indefinitely (found by the iOS E2E hanging
     // 15 minutes at launch).
-    final notifier = ReportNotifier(dailyBody: reports.todaySummary);
+    // dailyBody gets the ARMED SLOT's date: a Timer delivered late (after
+    // overnight suspension) must still report the day it was scheduled
+    // for, not the fresh morning's near-empty totals.
+    final notifier = ReportNotifier(
+        dailyBody: (slotDate) => reports.dailyReport(isoDate(slotDate)));
     unawaited(() async {
       try {
         await notifier.init();
@@ -126,6 +131,8 @@ class _AppSettingsStore implements SettingsStore {
 
   @override
   String get apiKey => _s.geminiApiKey ?? '';
+  @override
+  bool get isQuotaPaused => _s.isQuotaPaused;
   @override
   String get model => _s.model;
   @override

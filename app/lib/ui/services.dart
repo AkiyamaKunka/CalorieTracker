@@ -12,6 +12,10 @@ import '../core/contracts.dart';
 /// fakes.
 abstract class SettingsStore {
   String get apiKey;
+
+  /// Spec §3.3 quota-pause latch: while true, analyses cannot succeed —
+  /// backfill triggers skip the byte-reads entirely.
+  bool get isQuotaPaused;
   String get model; // default gemini-2.5-flash (spec §8)
   int get lookbackDays; // backfill window, clamp 1–30 (spec §6.4/§8)
   String get reportTime; // 'HH:mm' local, daily-report notification time

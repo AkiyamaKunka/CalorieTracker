@@ -24,17 +24,20 @@ import 'fakes.dart';
 class EmittingIntake implements PhotoIntake {
   final _controller = StreamController<IntakePhoto>.broadcast();
   List<IntakePhoto> batch = const [];
+  List<DateTime?> safeFrontiers = const []; // parallel to batch; pads null
   final List<DateTime?> sinceArgs = [];
   int scans = 0;
   bool throwAfterEmit = false; // scan-abort simulation (library query died)
   DateTime? frontier; // returned from a completed scan
-  Future<bool> Function(IntakePhoto)? _sink;
+  Future<bool> Function(IntakePhoto, DateTime?)? _sink;
 
   @override
   Stream<IntakePhoto> get photos => _controller.stream;
 
   @override
-  void attachSink(Future<bool> Function(IntakePhoto photo)? sink) =>
+  void attachSink(
+          Future<bool> Function(IntakePhoto photo, DateTime? safeFrontier)?
+              sink) =>
       _sink = sink;
 
   @override
@@ -42,12 +45,13 @@ class EmittingIntake implements PhotoIntake {
       {int lookbackDays = 0, DateTime? since}) async {
     scans++;
     sinceArgs.add(since);
-    for (final p in batch) {
+    for (var i = 0; i < batch.length; i++) {
       final sink = _sink;
+      final safe = i < safeFrontiers.length ? safeFrontiers[i] : null;
       if (sink != null) {
-        await sink(p); // backpressured delivery, like the real intake
+        await sink(batch[i], safe); // backpressured, like the real intake
       } else {
-        _controller.add(p);
+        _controller.add(batch[i]);
       }
     }
     if (throwAfterEmit) throw StateError('library query died mid-scan');
@@ -93,6 +97,18 @@ class RecordingScheduler implements BackgroundScheduler {
 
 IntakePhoto photo(int n) => IntakePhoto(
     Uint8List.fromList([n, n, n]), 'asset$n', 'IMG_$n.jpg');
+
+/// FakeDao that fires a callback on each saveMeal — used to observe the
+/// watermark state at the moment each photo lands.
+class _CheckpointSpyDao extends FakeDao {
+  _CheckpointSpyDao(this.onSave);
+  final void Function() onSave;
+  @override
+  Future<int> saveMeal(Meal meal, {IngestionStatus? markStatus}) {
+    onSave();
+    return super.saveMeal(meal, markStatus: markStatus);
+  }
+}
 
 Future<AppSettings> settingsWith(
     {String? key,
@@ -257,6 +273,62 @@ void main() {
       expect(ok, isTrue);
       expect(intake.scans, 0);
       expect(prefs.getString(backgroundWatermarkPrefsKey), isNull);
+    });
+
+    test('retryable outcomes hold the final watermark at the frontier',
+        () async {
+      final settings = await settingsWith(key: 'k');
+      final frontierMark = DateTime(2026, 7, 24, 3, 0);
+      final intake = EmittingIntake()
+        ..batch = [photo(1), photo(2)]
+        ..frontier = frontierMark; // intake: coverage stops here
+      final analyzer = FakeAnalyzer()
+        ..nextPhotoOutcome = const AnalysisOutcome(
+            error: 'rate limit', retryable: true, wall: Duration.zero);
+      await headlessBackfillWith(
+        settings: settings,
+        prefs: prefs,
+        intake: intake,
+        pipeline: () async => PhotoPipeline(dao: FakeDao(), analyzer: analyzer),
+        showMealCard: (_, _) async {},
+        clock: () => DateTime(2026, 7, 24, 5, 0),
+      );
+      // NOT scanStart: released photos must stay ahead of the watermark.
+      expect(prefs.getString(backgroundWatermarkPrefsKey),
+          frontierMark.toIso8601String());
+    });
+
+    test('per-photo checkpoints persist the intake safeFrontier as they go',
+        () async {
+      final settings = await settingsWith(key: 'k');
+      final intake = EmittingIntake()
+        ..batch = [photo(1), photo(2)]
+        ..safeFrontiers = [
+          DateTime(2026, 7, 24, 1, 0),
+          DateTime(2026, 7, 24, 2, 0),
+        ];
+      final seenMarks = <String?>[];
+      final analyzer = FakeAnalyzer()
+        ..nextPhotoOutcome = const AnalysisOutcome(
+            analysis: {'is_food': true, 'food_items': []},
+            isFood: true,
+            wall: Duration.zero);
+      await headlessBackfillWith(
+        settings: settings,
+        prefs: prefs,
+        intake: intake,
+        pipeline: () async => PhotoPipeline(
+            dao: _CheckpointSpyDao(
+                () => seenMarks.add(
+                    prefs.getString(backgroundWatermarkPrefsKey))),
+            analyzer: analyzer),
+        showMealCard: (_, _) async {},
+        clock: () => DateTime(2026, 7, 24, 5, 0),
+      );
+      // The SECOND photo's save observed the FIRST photo's checkpoint —
+      // proof a WorkManager hard-stop mid-batch keeps prior progress.
+      expect(seenMarks.length, 2);
+      expect(seenMarks[1], DateTime(2026, 7, 24, 1, 0).toIso8601String());
     });
 
     test('an aborted scan does NOT advance the watermark', () async {

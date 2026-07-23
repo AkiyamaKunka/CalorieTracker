@@ -52,7 +52,7 @@ class PhotoPipeline {
   /// at a time). Returns non-retryable to the intake so released photos
   /// are re-offered by later scans.
   void bind(PhotoIntake intake) {
-    intake.attachSink((p) {
+    intake.attachSink((p, _) {
       final slot = _tail.then((_) => process(p));
       _tail = slot.then((_) {});
       return slot.then((o) => !o.retryable);

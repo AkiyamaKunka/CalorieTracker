@@ -64,13 +64,14 @@ class BackfillDrain {
 Future<BackfillDrain> drainBackfill(PhotoIntake intake, PhotoPipeline pipeline,
     {int lookbackDays = 0,
     DateTime? since,
-    Future<void> Function(IntakePhoto photo, PhotoOutcome outcome)?
+    Future<void> Function(
+            IntakePhoto photo, PhotoOutcome outcome, DateTime? safeFrontier)?
         onOutcome}) async {
   final outcomes = <PhotoOutcome>[];
-  intake.attachSink((p) async {
+  intake.attachSink((p, safeFrontier) async {
     final o = await pipeline.process(p);
     outcomes.add(o);
-    if (onOutcome != null) await onOutcome(p, o);
+    if (onOutcome != null) await onOutcome(p, o, safeFrontier);
     return !o.retryable;
   });
   var scanCompleted = false;
@@ -129,23 +130,23 @@ Future<bool> headlessBackfillWith({
   // The pipeline (and its database handle) is built ONLY past the guards:
   // most runs guard out or find nothing, and every needless cross-isolate
   // open is a shot at the shared-handle transaction races.
-  var checkpointOpen = true; // halts at the first retryable release
   final drain = await drainBackfill(
     intake,
     await pipeline(),
     since: since?.subtract(backgroundScanOverlap),
-    onOutcome: (photo, o) async {
+    onOutcome: (photo, o, safeFrontier) async {
       // Per photo, BEFORE the next one: a WorkManager hard-stop mid-batch
       // must not lose the notification for an already-saved meal, nor the
       // progress the run already made.
       if (o.kind == PhotoOutcomeKind.saved) {
         await showMealCard('🍽️ Meal logged automatically', o.message);
       }
-      if (o.retryable) {
-        checkpointOpen = false; // released photo: nothing may pass it
-      } else if (checkpointOpen) {
-        final at = photo.capturedAt;
-        if (at != null) await checkpoint(at);
+      // The intake's safeFrontier is the ONLY persistable value: it is
+      // createDate-based (the watermark's timebase), halts at transient
+      // failures, and is null for truncated windows. Deriving it from the
+      // photo (filename dates) skipped photos permanently.
+      if (!o.retryable && safeFrontier != null) {
+        await checkpoint(safeFrontier);
       }
     },
   );
@@ -171,9 +172,11 @@ Future<bool> runHeadlessBackfill() async {
   final settings = await AppSettings.load();
   final prefs = await SharedPreferences.getInstance();
   // Time-derived id seed: cards from successive runs stack instead of
-  // overwriting each other (ids 100..~100+8.6M over a day cycle).
+  // overwriting each other. Base 10000 keeps the whole range clear of the
+  // fixed daily-report id 9001 (a colliding meal card would silently
+  // REPLACE an unread daily report).
   final notifier = ReportNotifier(
-      mealCardIdSeed: 100 +
+      mealCardIdSeed: 10000 +
           (DateTime.now().millisecondsSinceEpoch ~/ 10000) % 8640000);
   return headlessBackfillWith(
     settings: settings,

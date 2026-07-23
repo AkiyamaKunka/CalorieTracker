@@ -70,8 +70,12 @@ class LibraryPhotoIntake implements PhotoIntake {
   final Set<String> _seenAssetIds = <String>{};
   DateTime? _incrementalCutoff;
   bool _scanning = false;
+  bool _rescanPending = false;
   bool _started = false;
-  Future<bool> Function(IntakePhoto)? _sink;
+  Future<bool> Function(IntakePhoto, DateTime?)? _sink;
+  // Asset ids whose delivery is still awaiting the sink: a CONCURRENT scan
+  // must not count them as covered — their release may still be coming.
+  final Set<String> _inFlightIds = <String>{};
   // stop() bumps this; in-flight emission loops observe the change and
   // quiesce instead of auto-logging on after the user disabled the watcher.
   int _generation = 0;
@@ -80,7 +84,9 @@ class LibraryPhotoIntake implements PhotoIntake {
   Stream<IntakePhoto> get photos => _controller.stream;
 
   @override
-  void attachSink(Future<bool> Function(IntakePhoto photo)? sink) {
+  void attachSink(
+      Future<bool> Function(IntakePhoto photo, DateTime? safeFrontier)?
+          sink) {
     _sink = sink;
   }
 
@@ -108,7 +114,14 @@ class LibraryPhotoIntake implements PhotoIntake {
   }
 
   Future<void> _incrementalScan() async {
-    if (_scanning) return; // change bursts collapse into one scan
+    if (_scanning) {
+      // A scan with a bound sink can run MINUTES (one Gemini call per
+      // photo) — dropping this event outright would blind the live
+      // watcher to every photo taken mid-scan. Mark dirty and re-scan
+      // when the current pass finishes.
+      _rescanPending = true;
+      return;
+    }
     _scanning = true;
     try {
       final cutoff = _incrementalCutoff ?? _clock();
@@ -131,6 +144,10 @@ class LibraryPhotoIntake implements PhotoIntake {
       // next change event retries the same window.
     } finally {
       _scanning = false;
+      if (_rescanPending) {
+        _rescanPending = false;
+        if (_started) unawaited(_incrementalScan());
+      }
     }
   }
 
@@ -150,12 +167,14 @@ class LibraryPhotoIntake implements PhotoIntake {
     // (a truncated scan under a watermark skips the tail forever).
     final assets =
         await _library.imagesCreatedAfter(cutoff, limit: backfillQueryLimit);
-    final frontier = await _emit(assets);
+    // Truncation is known BEFORE emission (query hit its cap): the unseen
+    // tail is OLDER than everything returned, so no frontier — per-photo
+    // or final — may be reported for this scan.
+    final truncated = assets.length >= backfillQueryLimit;
+    final frontier = await _emit(assets, reportFrontier: !truncated);
     // Signal AFTER emitting: the caller processes what was seen, but a
     // watermark must not advance over the unseen tail.
-    if (assets.length >= backfillQueryLimit) {
-      throw const BackfillWindowTruncated();
-    }
+    if (truncated) throw const BackfillWindowTruncated();
     return frontier;
   }
 
@@ -165,7 +184,10 @@ class LibraryPhotoIntake implements PhotoIntake {
   /// halts at the first transient failure or retryable release so callers
   /// never advance a cutoff/watermark past a photo that still needs a
   /// retry. Null = nothing covered.
-  Future<DateTime?> _emit(List<LibraryAsset> assets) async {
+  /// [reportFrontier] false (truncated window): every delivery carries
+  /// safeFrontier null — the unseen OLDER tail forbids any watermark claim.
+  Future<DateTime?> _emit(List<LibraryAsset> assets,
+      {bool reportFrontier = true}) async {
     // §6: newest-LAST emission — oldest first, so downstream meal rows land
     // in chronological order.
     final ordered = [...assets]
@@ -182,7 +204,13 @@ class LibraryPhotoIntake implements PhotoIntake {
       if (_controller.isClosed) break;
       if (_generation != generation) break; // stop(): quiesce mid-batch
       if (!_seenAssetIds.add(asset.id)) {
-        cover(asset); // already handled this session
+        if (_inFlightIds.contains(asset.id)) {
+          // A concurrent scan is still delivering it — its release may be
+          // coming; nothing may pass it yet.
+          frontierOpen = false;
+        } else {
+          cover(asset); // already terminally handled this session
+        }
         continue;
       }
       final Uint8List? bytes;
@@ -219,8 +247,19 @@ class LibraryPhotoIntake implements PhotoIntake {
       final sink = _sink;
       if (sink != null) {
         // Backpressured path: the next asset's bytes are read only after
-        // this photo fully processed — one photo resident at a time.
-        final terminal = await sink(photo);
+        // this photo fully processed — one photo resident at a time. The
+        // safeFrontier is what a consumer may persist if THIS photo
+        // terminates: createDate-based and halted at any earlier failure.
+        final safe = (reportFrontier && frontierOpen)
+            ? asset.createDateTime
+            : (reportFrontier ? frontier : null);
+        _inFlightIds.add(asset.id);
+        final bool terminal;
+        try {
+          terminal = await sink(photo, safe);
+        } finally {
+          _inFlightIds.remove(asset.id);
+        }
         if (terminal) {
           cover(asset);
         } else {

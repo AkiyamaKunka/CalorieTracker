@@ -140,11 +140,21 @@ abstract class PhotoIntake {
   /// the sink returns — instead of adding to [photos]. Without this, a scan
   /// reads the whole window's original bytes (25 MB each) ahead of a
   /// pipeline that takes 10–20 s per photo: a 200-photo backlog ≈ 1 GB
-  /// resident → OOM-killed background runs in a loop. The sink returns
-  /// false when the photo was RELEASED for retry (transient failure) — the
-  /// intake then forgets it was seen so a later scan re-offers it. Pass
-  /// null to detach.
-  void attachSink(Future<bool> Function(IntakePhoto photo)? sink);
+  /// resident → OOM-killed background runs in a loop.
+  ///
+  /// [safeFrontier] is the watermark value that is safe to persist IF this
+  /// photo terminates successfully: it is createDate-based, halts at any
+  /// transient failure earlier in the batch, and is null for the whole
+  /// scan when the window was truncated (unseen older tail). Consumers
+  /// checkpoint EXACTLY this value — deriving a watermark from the photo
+  /// itself (e.g. filename dates) diverges from the createDate timebase
+  /// the watermark filters on and skips photos permanently.
+  ///
+  /// The sink returns false when the photo was RELEASED for retry
+  /// (transient failure) — the intake then forgets it was seen so a later
+  /// scan re-offers it. Pass null to detach.
+  void attachSink(
+      Future<bool> Function(IntakePhoto photo, DateTime? safeFrontier)? sink);
 
   /// Scan the lookback window and emit every photo in it. [since], when
   /// LATER than the window cutoff, narrows the scan to photos created after

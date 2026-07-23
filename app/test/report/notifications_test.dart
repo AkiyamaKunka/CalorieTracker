@@ -53,7 +53,7 @@ void main() {
     final notifier = ReportNotifier(
       clock: () => now,
       presenter: (id, title, body) async => fired.add((id, title, body)),
-      dailyBody: () async => 'report body',
+      dailyBody: (slotDate) async => 'report body for $slotDate',
     );
 
     await notifier.scheduleDaily('08:00');
@@ -67,7 +67,9 @@ void main() {
     expect(fired.length, 1);
     expect(fired.single.$1, ReportNotifier.dailyReportNotificationId);
     expect(fired.single.$2, '📊 Daily Calorie Report');
-    expect(fired.single.$3, 'report body');
+    // The body is built FOR THE ARMED SLOT's date — a late fire (overnight
+    // suspension) must report the intended day, not the fresh morning.
+    expect(fired.single.$3, 'report body for ${DateTime(2026, 7, 17, 8, 0)}');
     // Reschedule-after-fire: the next slot is armed without a new call.
     expect(notifier.nextDailyFire, DateTime(2026, 7, 18, 8, 0));
 
@@ -131,7 +133,7 @@ void main() {
     final notifier = ReportNotifier(
       clock: () => now,
       presenter: (id, title, body) async => fired.add((id, title, body)),
-      dailyBody: () async => throw StateError('builder broke'),
+      dailyBody: (_) async => throw StateError('builder broke'),
     );
 
     await notifier.scheduleDaily('08:00');

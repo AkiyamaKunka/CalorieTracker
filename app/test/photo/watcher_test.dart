@@ -126,7 +126,7 @@ void main() {
           (i) => FakeAsset('t$i', 'IMG_t$i.jpg',
               DateTime(2026, 7, 17, 8, 0, i ~/ 60, i % 60 * 16), bytesOf(1)));
       final delivered = <String>[];
-      intake.attachSink((p) async {
+      intake.attachSink((p, _) async {
         delivered.add(p.assetId);
         return true;
       });
@@ -146,7 +146,7 @@ void main() {
         FakeAsset('b', 'IMG_b.jpg', DateTime(2026, 7, 17, 9), bytesOf(2),
             onRead: () => events.add('read:b')),
       ];
-      intake.attachSink((p) async {
+      intake.attachSink((p, _) async {
         events.add('sink:${p.assetId}');
         await Future<void>.delayed(const Duration(milliseconds: 5));
         events.add('done:${p.assetId}');
@@ -166,7 +166,7 @@ void main() {
         FakeAsset('retry', 'IMG_r.jpg', DateTime(2026, 7, 17, 9), bytesOf(2)),
       ];
       final delivered = <String>[];
-      intake.attachSink((p) async {
+      intake.attachSink((p, _) async {
         delivered.add(p.assetId);
         return p.assetId != 'retry'; // 'retry' → released
       });
@@ -182,7 +182,7 @@ void main() {
         FakeAsset('bad', 'IMG_2.jpg', DateTime(2026, 7, 17, 9), null),
         FakeAsset('ok2', 'IMG_3.jpg', DateTime(2026, 7, 17, 10), bytesOf(3)),
       ];
-      intake.attachSink((p) async => true);
+      intake.attachSink((p, _) async => true);
       final frontier = await intake.backfillScan(lookbackDays: 2);
       // ok2 processed fine, but the watermark may not pass 'bad'.
       expect(frontier, DateTime(2026, 7, 17, 8));
@@ -195,7 +195,7 @@ void main() {
             Uint8List(maxPhotoBytes + 1)),
         FakeAsset('flaky', 'IMG_f.jpg', DateTime(2026, 7, 17, 9), null),
       ];
-      intake.attachSink((p) async => true);
+      intake.attachSink((p, _) async => true);
       await intake.backfillScan(lookbackDays: 2);
       // Second scan: oversize NOT re-read (seen), flaky re-offered.
       var flakyReads = 0;
@@ -218,7 +218,7 @@ void main() {
         FakeAsset('fine', 'IMG_f.jpg', DateTime(2026, 7, 17, 9), bytesOf(1)),
       ];
       final delivered = <String>[];
-      intake.attachSink((p) async {
+      intake.attachSink((p, _) async {
         delivered.add(p.assetId);
         return true;
       });
@@ -235,7 +235,7 @@ void main() {
       library.permissionGranted = true;
       await intake.start();
       final delivered = <String>[];
-      intake.attachSink((p) async {
+      intake.attachSink((p, _) async {
         delivered.add(p.assetId);
         await intake.stop(); // user flips the toggle mid-batch
         return true;

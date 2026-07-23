@@ -105,8 +105,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       await widget.photoIntake?.start();
       // Instant feedback on enable: sweep the lookback window right away
       // instead of waiting for the next change event / background run.
-      // Only with a key — analyses cannot succeed without one.
-      if (widget.settings.apiKey.trim().isNotEmpty) {
+      // Only when analyses can actually succeed (key present, no quota
+      // pause) — otherwise the sweep reads bytes for nothing.
+      if (widget.settings.apiKey.trim().isNotEmpty &&
+          !widget.settings.isQuotaPaused) {
         unawaited(widget.photoIntake
             ?.backfillScan()
             .then((_) {}, onError: (Object _) {}));
@@ -232,6 +234,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
           controller: _modelController,
           autocorrect: false,
           onSubmitted: (v) => widget.settings.update(model: v.trim()),
+          // Tap-away must not lose the edit — onSubmitted only fires on the
+          // keyboard action key.
+          onTapOutside: (_) =>
+              widget.settings.update(model: _modelController.text.trim()),
           decoration: const InputDecoration(
             labelText: 'Model',
             helperText: 'Default: gemini-2.5-flash',

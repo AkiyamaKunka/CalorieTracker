@@ -169,6 +169,8 @@ class FakeSettings implements SettingsStore {
   @override
   String apiKey;
   @override
+  bool isQuotaPaused = false;
+  @override
   String model;
   @override
   int lookbackDays;
@@ -218,13 +220,16 @@ class FakeIntake implements PhotoIntake {
   final StreamController<IntakePhoto> controller =
       StreamController<IntakePhoto>.broadcast();
   bool started = false;
-  Future<bool> Function(IntakePhoto)? sink;
+  Future<bool> Function(IntakePhoto, DateTime?)? sink;
 
   @override
   Stream<IntakePhoto> get photos => controller.stream;
 
   @override
-  void attachSink(Future<bool> Function(IntakePhoto photo)? s) => sink = s;
+  void attachSink(
+          Future<bool> Function(IntakePhoto photo, DateTime? safeFrontier)?
+              s) =>
+      sink = s;
 
   int backfillScans = 0;
 

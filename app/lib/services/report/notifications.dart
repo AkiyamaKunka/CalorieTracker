@@ -24,7 +24,7 @@ class ReportNotifier {
     FlutterLocalNotificationsPlugin? plugin,
     DateTime Function()? clock,
     NotificationPresenter? presenter,
-    Future<String> Function()? dailyBody,
+    Future<String> Function(DateTime slotDate)? dailyBody,
     int? mealCardIdSeed,
   })  : _plugin = plugin ?? FlutterLocalNotificationsPlugin(),
         _clock = clock ?? DateTime.now,
@@ -48,12 +48,12 @@ class ReportNotifier {
   final DateTime Function() _clock;
   final NotificationPresenter? _presenter;
 
-  /// Body provider for the scheduled notification — the integrator passes a
-  /// closure over ReportBuilder.dailyReport/todaySummary (contracts.dart:
-  /// "the notification scheduler consumes dailyReport at the user's chosen
-  /// time"). A throwing provider degrades to a generic body, never a missed
-  /// notification.
-  final Future<String> Function()? _dailyBody;
+  /// Body provider for the scheduled notification, given the DATE the slot
+  /// was armed for — a Timer that fires late (overnight iOS suspension
+  /// delivers it at next resume) must report the intended day, not
+  /// whatever partial day it happens to fire in. A throwing provider
+  /// degrades to a generic body, never a missed notification.
+  final Future<String> Function(DateTime slotDate)? _dailyBody;
 
   Timer? _dailyTimer;
   ({int hour, int minute})? _dailyTime;
@@ -139,17 +139,18 @@ class ReportNotifier {
     _dailyTimer = Timer(next.difference(now), () {
       // Reschedule-after-fire: re-arm BEFORE presenting so a throwing body
       // can never kill tomorrow's schedule.
+      final slotDate = next;
       _armDailyTimer();
-      unawaited(_fireDaily());
+      unawaited(_fireDaily(slotDate));
     });
   }
 
-  Future<void> _fireDaily() async {
+  Future<void> _fireDaily(DateTime slotDate) async {
     var body = 'Your daily calorie report is ready.';
     final provider = _dailyBody;
     if (provider != null) {
       try {
-        body = await provider();
+        body = await provider(slotDate);
       } catch (_) {
         // Keep the fallback body; the schedule already re-armed.
       }
