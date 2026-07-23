@@ -28,14 +28,20 @@ void main() {
 
   Future<Uint8List?> readBytes(String path) async => files[path];
 
+  final cleaned = <String>[];
+
   ShareIntake build(FakeShareSource source, FakePhotoLibrary library) =>
       ShareIntake(
           source: source,
           library: library,
           readBytes: readBytes,
+          cleanup: (path) async => cleaned.add(path),
           clock: () => now);
 
-  setUp(files.clear);
+  setUp(() {
+    files.clear();
+    cleaned.clear();
+  });
 
   group('share stream', () {
     test('shared image becomes a deliberate IntakePhoto with filename date',
@@ -56,6 +62,28 @@ void main() {
       expect(photo.fileName, 'IMG_20260716_193042.jpg');
       expect(photo.capturedAt, DateTime(2026, 7, 16, 19, 30, 42));
       expect(photo.bytes, [1, 2, 3]);
+      // Plugin contract: the container copy is deleted once consumed —
+      // without this every shared photo leaks in the app group forever.
+      expect(cleaned, ['/shared/IMG_20260716_193042.jpg']);
+      await sub.cancel();
+    });
+
+    test('rejected shares (bad extension / oversized) still clean up the copy',
+        () async {
+      final source = FakeShareSource();
+      final intake = build(source, FakePhotoLibrary());
+      files['/shared/notes.txt'] = Uint8List.fromList([1]);
+      files['/shared/IMG_big.jpg'] =
+          Uint8List.fromList(List.filled(maxPhotoBytes + 1, 0));
+
+      final emitted = <IntakePhoto>[];
+      final sub = intake.photos().listen(emitted.add);
+      source.controller.add(['/shared/notes.txt', '/shared/IMG_big.jpg']);
+      await pumpEventQueue();
+
+      expect(emitted, isEmpty);
+      expect(cleaned,
+          containsAll(['/shared/notes.txt', '/shared/IMG_big.jpg']));
       await sub.cancel();
     });
 

@@ -59,6 +59,25 @@ void main() {
     expect(again.quotaPauseUntil, pause);
   });
 
+  test('CHANGING the key clears the quota-pause latch; re-saving it does not',
+      () async {
+    final (s, prefs, keys) = await freshSettings();
+    await s.setGeminiApiKey('key-A');
+    final pause = DateTime.now().add(const Duration(hours: 6));
+    await s.setQuotaPauseUntil(pause);
+
+    // Same key re-entered: the pause still belongs to it — keep the latch.
+    await s.setGeminiApiKey('key-A');
+    expect(s.quotaPauseUntil, pause);
+
+    // Different key: fresh project, fresh quota — a stale latch here means
+    // "Key OK" with silently dead analysis for up to 12 h.
+    await s.setGeminiApiKey('key-B');
+    expect(s.quotaPauseUntil, isNull);
+    final again = await AppSettings.load(prefs: prefs, keyStore: keys);
+    expect(again.quotaPauseUntil, isNull); // cleared in persistence too
+  });
+
   test('API key lives only in secure storage, never in prefs', () async {
     final (s, prefs, keys) = await freshSettings();
     await s.setGeminiApiKey('sk-secret');

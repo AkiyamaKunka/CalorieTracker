@@ -70,12 +70,25 @@ class ReceiveSharingIntentSource implements SharedMediaSource {
 }
 
 typedef FileBytesReader = Future<Uint8List?> Function(String path);
+typedef SharedFileCleanup = Future<void> Function(String path);
 
 Future<Uint8List?> _readFileBytes(String path) async {
   try {
     return await File(path).readAsBytes();
   } catch (_) {
     return null; // unreadable share target: skip, never crash intake
+  }
+}
+
+/// The plugin COPIES every share into the app's container (iOS app-group /
+/// Android app dir) and its API contract says the consumer deletes the copy
+/// after use — nothing else ever purges them, so skipping this leaks the
+/// full-size original of every shared photo forever (storage + privacy).
+Future<void> _deleteSharedFile(String path) async {
+  try {
+    await File(path).delete();
+  } catch (_) {
+    // Best effort: a vanished/locked file must not break intake.
   }
 }
 
@@ -93,14 +106,17 @@ class ShareIntake {
       {required this._source,
       required this._library,
       required this._readBytes,
+      SharedFileCleanup? cleanup,
       DateTime Function()? clock,
       // §8 CAPTURED_AT_MAX_AGE_DAYS: default 45, not user-editable.
       this._capturedAtMaxAgeDays = 45})
-      : _clock = clock ?? DateTime.now;
+      : _cleanup = cleanup ?? _deleteSharedFile,
+        _clock = clock ?? DateTime.now;
 
   final SharedMediaSource _source;
   final PhotoLibrary _library;
   final FileBytesReader _readBytes;
+  final SharedFileCleanup _cleanup;
   final DateTime Function() _clock;
   final int _capturedAtMaxAgeDays;
 
@@ -139,17 +155,24 @@ class ShareIntake {
   }
 
   Future<IntakePhoto?> _fromPath(String path) async {
-    final name = fileBaseName(path);
-    if (!hasSupportedPhotoExtension(name)) return null; // §6.1
-    final bytes = await _readBytes(path);
-    if (bytes == null || bytes.isEmpty) return null;
-    if (bytes.length > maxPhotoBytes) return null; // §8: 25 MB cap
-    // A shared file has no library asset date; filename timestamp or bust
-    // (§6.3 fallback = intake-time dating, expressed as capturedAt null).
-    final capturedAt = deriveCapturedAt(
-        fileName: name, now: _clock(), maxAgeDays: _capturedAtMaxAgeDays);
-    return IntakePhoto(bytes, '', name,
-        capturedAt: capturedAt, deliberate: true);
+    try {
+      final name = fileBaseName(path);
+      if (!hasSupportedPhotoExtension(name)) return null; // §6.1
+      final bytes = await _readBytes(path);
+      if (bytes == null || bytes.isEmpty) return null;
+      if (bytes.length > maxPhotoBytes) return null; // §8: 25 MB cap
+      // A shared file has no library asset date; filename timestamp or bust
+      // (§6.3 fallback = intake-time dating, expressed as capturedAt null).
+      final capturedAt = deriveCapturedAt(
+          fileName: name, now: _clock(), maxAgeDays: _capturedAtMaxAgeDays);
+      return IntakePhoto(bytes, '', name,
+          capturedAt: capturedAt, deliberate: true);
+    } finally {
+      // Always remove the plugin's container copy — accepted, rejected, or
+      // unreadable, it has served its purpose once we've looked at it (the
+      // bytes above are already in memory when accepted).
+      await _cleanup(path);
+    }
   }
 
   /// Recent library assets for the UI's own picker grid (the UI renders the

@@ -381,14 +381,20 @@ class GeminiAnalyzer implements AnalyzerService {
       // 400/401/403, never 429) — report the key as accepted so it persists.
       // Refusing to save a valid key while the daily quota is spent locked
       // users out of onboarding for hours (hit live on the iPhone,
-      // 2026-07-24).
-      switch (classifyGeminiError(e.message)) {
-        case GeminiErrorClass.quotaRateLimit:
-        case GeminiErrorClass.dailyQuotaExhausted:
-          return null;
-        default:
-          return _userMessageFor(e.message);
+      // 2026-07-24). ONLY a genuine HTTP response ('HTTP <status>: ...')
+      // may qualify: transport-error texts embed arbitrary strings —
+      // including the typed key inside the request URL — which could
+      // substring-match the 429/QUOTA classifier and persist garbage.
+      if (e.message.startsWith('HTTP ')) {
+        switch (classifyGeminiError(e.message)) {
+          case GeminiErrorClass.quotaRateLimit:
+          case GeminiErrorClass.dailyQuotaExhausted:
+            return null;
+          default:
+            break;
+        }
       }
+      return _userMessageFor(e.message);
     }
   }
 }

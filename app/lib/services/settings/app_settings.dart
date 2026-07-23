@@ -97,12 +97,21 @@ class AppSettings extends ChangeNotifier {
   /// Persists to secure storage only. Null/blank clears the key.
   Future<void> setGeminiApiKey(String? value) async {
     final v = (value ?? '').trim();
+    final changed = v != (_geminiApiKey ?? '');
     if (v.isEmpty) {
       _geminiApiKey = null;
       await _keys.delete(_kApiKey);
     } else {
       _geminiApiKey = v;
       await _keys.write(_kApiKey, v);
+    }
+    if (changed && _quotaPauseUntil != null) {
+      // The pause latch belongs to the PREVIOUS key's quota. A different
+      // key (fresh project, fresh quota) must not inherit up to 12 h of
+      // dead air — without this, "Key OK" on a new key while the stale
+      // latch silently skips every analysis.
+      _quotaPauseUntil = null;
+      await _prefs.remove(_kQuotaPauseUntil);
     }
     notifyListeners();
   }

@@ -65,6 +65,18 @@ class Harness {
     );
   }
 
+  Harness.throwing(this.settings, Object error) {
+    analyzer = GeminiAnalyzer(
+      settings,
+      client: MockClient((req) async {
+        requests.add(req);
+        throw error; // transport failure: no HTTP response at all
+      }),
+      sleep: (d) async => sleeps.add(d),
+      normalizer: (b) async => b,
+    );
+  }
+
   final AppSettings settings;
   final List<http.Request> requests = [];
   final List<Duration> sleeps = [];
@@ -419,6 +431,17 @@ void main() {
       // Refusing to persist a valid-but-throttled key locks users out of
       // onboarding until quota reset (live iPhone regression, 2026-07-24).
       expect(await h.analyzer.validateKey('k'), isNull);
+    });
+
+    test('quota-looking TRANSPORT errors are NOT accepted (key in URL trap)',
+        () async {
+      final s = await freshSettings(apiKey: null);
+      // Offline: http.Client throws; the exception text embeds the request
+      // URL — which contains the typed key. A key containing '429' must not
+      // classify as quota and sneak into secure storage.
+      final h = Harness.throwing(
+          s, Exception('Connection failed: uri=...key=abc429quota...'));
+      expect(await h.analyzer.validateKey('abc429quota'), isNotNull);
     });
 
     test('daily free-tier exhaustion also counts as ACCEPTED', () async {
