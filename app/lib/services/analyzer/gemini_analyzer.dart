@@ -377,7 +377,18 @@ class GeminiAnalyzer implements AnalyzerService {
       );
       return null;
     } on GeminiException catch (e) {
-      return _userMessageFor(e.message);
+      // A quota-class response PROVES the key authenticated (bad keys get
+      // 400/401/403, never 429) — report the key as accepted so it persists.
+      // Refusing to save a valid key while the daily quota is spent locked
+      // users out of onboarding for hours (hit live on the iPhone,
+      // 2026-07-24).
+      switch (classifyGeminiError(e.message)) {
+        case GeminiErrorClass.quotaRateLimit:
+        case GeminiErrorClass.dailyQuotaExhausted:
+          return null;
+        default:
+          return _userMessageFor(e.message);
+      }
     }
   }
 }

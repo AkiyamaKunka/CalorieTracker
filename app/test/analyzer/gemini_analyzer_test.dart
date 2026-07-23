@@ -406,5 +406,31 @@ void main() {
       expect(msg, isNotNull);
       expect(msg, contains('key'));
     });
+
+    test('429 rate limit counts as ACCEPTED — a 429 proves the key authed',
+        () async {
+      final s = await freshSettings(apiKey: null);
+      final h = Harness(s, [
+        http.Response(
+            '{"error":{"code":429,"status":"RESOURCE_EXHAUSTED",'
+            '"message":"You exceeded your current quota"}}',
+            429)
+      ]);
+      // Refusing to persist a valid-but-throttled key locks users out of
+      // onboarding until quota reset (live iPhone regression, 2026-07-24).
+      expect(await h.analyzer.validateKey('k'), isNull);
+    });
+
+    test('daily free-tier exhaustion also counts as ACCEPTED', () async {
+      final s = await freshSettings(apiKey: null);
+      final h = Harness(s, [
+        http.Response(
+            '{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":'
+            '"Quota exceeded for quota metric GenerateRequestsPerDayPerProject'
+            'PerModel-FreeTier"}}',
+            429)
+      ]);
+      expect(await h.analyzer.validateKey('k'), isNull);
+    });
   });
 }
