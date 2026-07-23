@@ -114,6 +114,9 @@ class LibraryPhotoIntake implements PhotoIntake {
   }
 
   Future<void> _incrementalScan() async {
+    // A change event racing stop() (queued before the platform unregister
+    // completed) must not start a fresh scan with the watcher disabled.
+    if (!_started) return;
     if (_scanning) {
       // A scan with a bound sink can run MINUTES (one Gemini call per
       // photo) — dropping this event outright would blind the live
@@ -126,13 +129,17 @@ class LibraryPhotoIntake implements PhotoIntake {
     try {
       final cutoff = _incrementalCutoff ?? _clock();
       final assets = await _library.imagesCreatedAfter(cutoff);
-      final frontier = await _emit(assets);
+      // Same truncation rule as backfillScan: a capped result set hides an
+      // OLDER tail — the cutoff must not advance over unseen photos
+      // (recovered by the full-window backfill layers meanwhile).
+      final truncated = assets.length >= 500;
+      final frontier = await _emit(assets, reportFrontier: !truncated);
       // Advance ONLY over the contiguous run of successfully-covered
       // photos (oldest-first), and never past the wall clock: a transient
       // read failure must stay inside the window so the next change event
       // retries it, and one future-skewed createDate (camera clock drift)
       // must not blind the live watcher for the skew duration.
-      if (frontier != null) {
+      if (!truncated && frontier != null) {
         final now = _clock();
         final capped = frontier.isAfter(now) ? now : frontier;
         final cur = _incrementalCutoff;
@@ -213,62 +220,66 @@ class LibraryPhotoIntake implements PhotoIntake {
         }
         continue;
       }
-      final Uint8List? bytes;
-      final String name;
+      // In-flight from the same instant it becomes "seen": a concurrent
+      // scan meeting this id during our byte-read awaits (seconds for a
+      // 25 MB original) must halt its frontier, not count it covered.
+      _inFlightIds.add(asset.id);
       try {
-        bytes = await asset.originBytes(); // ORIGINAL bytes (§6.2)
-        if (bytes == null || bytes.isEmpty) {
-          _seenAssetIds.remove(asset.id); // transient read failure: retryable
-          frontierOpen = false;
-          continue;
-        }
-        if (bytes.length > maxPhotoBytes) {
-          cover(asset); // §8 25 MB pre-decode cap: permanent skip
-          continue;
-        }
-        name = await asset.fileName();
-      } catch (_) {
-        // photo_manager REPLIES an error (not null) for unreadable/deleted
-        // assets on Android 11+ — one bad asset must skip, not abort the
-        // whole scan (a scan abort loses every photo behind it AND, in the
-        // background job, kills the run before its watermark logic).
-        _seenAssetIds.remove(asset.id);
-        frontierOpen = false;
-        continue;
-      }
-      final capturedAt = deriveCapturedAt(
-          fileName: name,
-          assetCreateDate: asset.createDateTime,
-          now: _clock(),
-          maxAgeDays: _capturedAtMaxAgeDays);
-      // deliberate=false: automated intake, strict reservation (§2.3).
-      final photo = IntakePhoto(bytes, asset.id, name,
-          capturedAt: capturedAt, deliberate: false);
-      final sink = _sink;
-      if (sink != null) {
-        // Backpressured path: the next asset's bytes are read only after
-        // this photo fully processed — one photo resident at a time. The
-        // safeFrontier is what a consumer may persist if THIS photo
-        // terminates: createDate-based and halted at any earlier failure.
-        final safe = (reportFrontier && frontierOpen)
-            ? asset.createDateTime
-            : (reportFrontier ? frontier : null);
-        _inFlightIds.add(asset.id);
-        final bool terminal;
+        final Uint8List? bytes;
+        final String name;
         try {
-          terminal = await sink(photo, safe);
-        } finally {
-          _inFlightIds.remove(asset.id);
-        }
-        if (terminal) {
-          cover(asset);
-        } else {
-          _seenAssetIds.remove(asset.id); // released: re-offer next scan
+          bytes = await asset.originBytes(); // ORIGINAL bytes (§6.2)
+          if (bytes == null || bytes.isEmpty) {
+            _seenAssetIds
+                .remove(asset.id); // transient read failure: retryable
+            frontierOpen = false;
+            continue;
+          }
+          if (bytes.length > maxPhotoBytes) {
+            cover(asset); // §8 25 MB pre-decode cap: permanent skip
+            continue;
+          }
+          name = await asset.fileName();
+        } catch (_) {
+          // photo_manager REPLIES an error (not null) for unreadable/
+          // deleted assets on Android 11+ — one bad asset must skip, not
+          // abort the whole scan (a scan abort loses every photo behind
+          // it AND, in the background job, kills the run before its
+          // watermark logic).
+          _seenAssetIds.remove(asset.id);
           frontierOpen = false;
+          continue;
         }
-      } else {
-        _controller.add(photo);
-        cover(asset);
+        final capturedAt = deriveCapturedAt(
+            fileName: name,
+            assetCreateDate: asset.createDateTime,
+            now: _clock(),
+            maxAgeDays: _capturedAtMaxAgeDays);
+        // deliberate=false: automated intake, strict reservation (§2.3).
+        final photo = IntakePhoto(bytes, asset.id, name,
+            capturedAt: capturedAt, deliberate: false);
+        final sink = _sink;
+        if (sink != null) {
+          // Backpressured path: the next asset's bytes are read only after
+          // this photo fully processed — one photo resident at a time. The
+          // safeFrontier is what a consumer may persist if THIS photo
+          // terminates: createDate-based and halted at any earlier failure.
+          final safe = (reportFrontier && frontierOpen)
+              ? asset.createDateTime
+              : (reportFrontier ? frontier : null);
+          final terminal = await sink(photo, safe);
+          if (terminal) {
+            cover(asset);
+          } else {
+            _seenAssetIds.remove(asset.id); // released: re-offer next scan
+            frontierOpen = false;
+          }
+        } else {
+          _controller.add(photo);
+          cover(asset);
+        }
+      } finally {
+        _inFlightIds.remove(asset.id);
       }
     }
     return frontier;

@@ -186,9 +186,13 @@ void main() {
       prefs = await SharedPreferences.getInstance();
     });
 
-    test('scans, notifies saved meals, and advances the watermark', () async {
+    test('scans, notifies saved meals, and advances to the FRONTIER',
+        () async {
       final settings = await settingsWith(key: 'k');
-      final intake = EmittingIntake()..batch = [photo(1), photo(2)];
+      final frontierMark = DateTime(2026, 7, 23, 11, 30);
+      final intake = EmittingIntake()
+        ..batch = [photo(1), photo(2)]
+        ..frontier = frontierMark;
       final analyzer = FakeAnalyzer()
         ..nextPhotoOutcome = const AnalysisOutcome(
             analysis: {'is_food': true, 'food_items': []},
@@ -208,8 +212,10 @@ void main() {
       expect(intake.scans, 1);
       expect(intake.sinceArgs.single, isNull); // first run: full window
       expect(cards, hasLength(2));
+      // FRONTIER, never scanStart: outcomes can't see photos whose byte
+      // read failed, so only the intake's frontier is coverage-honest.
       expect(prefs.getString(backgroundWatermarkPrefsKey),
-          scanStart.toIso8601String());
+          frontierMark.toIso8601String());
     });
 
     test('passes the persisted watermark minus the overlap', () async {

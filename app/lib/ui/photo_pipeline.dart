@@ -152,14 +152,18 @@ class PhotoPipeline {
     } catch (e) {
       // Containment: never rethrow (spec §6). Mark failed ONLY if we hold
       // the reservation — a pre-reservation throw (e.g. the duplicate
-      // check) must not burn an untracked hash into 'failed', which the
-      // automated path would then never reclaim.
+      // check or reserve itself, typically transient DB contention) must
+      // not burn an untracked hash into 'failed'. It also leaves NO ledger
+      // row, so report it RETRYABLE: the frontier then halts and a later
+      // scan re-offers the photo instead of the watermark passing over an
+      // unrecorded one.
       if (reserved) {
         try {
           await dao.markPhotoHash(hash, IngestionStatus.failed);
         } catch (_) {}
       }
-      return PhotoOutcome(PhotoOutcomeKind.failed, 'Photo intake failed: $e');
+      return PhotoOutcome(PhotoOutcomeKind.failed, 'Photo intake failed: $e',
+          retryable: !reserved);
     }
   }
 }

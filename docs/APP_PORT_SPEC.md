@@ -1003,3 +1003,19 @@ plan questions (`_maybe_answer_fitness_query`, `telegram_bot.py:3812-3839`). Pha
 Non-ported server knobs (no app meaning): Telegram token/chat id, PushPlus/WeChat, VPN
 enforcement (`telegram_bot.py:162-189`), watchdog/systemd (`telegram_bot.py:5136+`), Flask API
 key, heartbeat staleness warnings.
+
+## §9 App-only divergences (2026-07-24 hardening)
+
+Deliberate departures from server behavior, driven by mobile realities the
+server never faced (EMUI process kills, free-tier quotas, two isolates on
+one SQLite file). Each is pinned by tests named alongside.
+
+| Divergence | Server behavior | App behavior | Why | Pinned by |
+|---|---|---|---|---|
+| Transient analysis failure | mark `failed` | RELEASE the reservation (`AnalysisOutcome.retryable`) | automated intake never reclaims `failed`; a 12 h quota latch would silently drop photos forever | `photo_pipeline_test` retryable-release |
+| Launch reclaim sweep | all `processing` → `failed` | `app_watch` rows RELEASED, only >15 min stale rows touched | EMUI kills mid-analysis routinely; a live background isolate may own fresh rows | `meals_dao_reclaim_test` |
+| Backfill cadence | nightly `--sync` | 30-min WorkManager + launch/resume full-window catch-up + `safeFrontier` watermark | the app cannot rely on cron; watermark keeps 48 scans/day cheap | `background_glue_test` watermark suite |
+| Photo intake concurrency | sequential bot loop | backpressured sink (`PhotoIntake.attachSink`), one photo's bytes resident | 200-photo backlog ≈ 1 GB resident otherwise (OOM) | `watcher_test` backpressure |
+| Key validation | n/a (server key assumed valid) | quota-class HTTP responses count as ACCEPTED | a 429 proves auth; refusing to save locked onboarding for hours | `gemini_analyzer_test` validateKey 429 |
+| Share intake files | n/a | plugin container copies deleted after consumption | receive_sharing_intent contract; unbounded growth otherwise | `share_intake_test` cleanup |
+| Decode ceiling | none (server CLI) | 50 MP header-probe cap before full decode | 108 MP JPEG ≈ 432 MB RGBA in a background isolate | normalize cap (visual) |

@@ -210,6 +210,35 @@ void main() {
       expect(flakyReads, 1);
     });
 
+    test('safeFrontier per delivery: own createDate while clean, halted '
+        'value after a failure, null when truncated', () async {
+      library.assets = [
+        FakeAsset('a', 'IMG_a.jpg', DateTime(2026, 7, 17, 8), bytesOf(1)),
+        FakeAsset('bad', 'IMG_bad.jpg', DateTime(2026, 7, 17, 9), null),
+        FakeAsset('b', 'IMG_b.jpg', DateTime(2026, 7, 17, 10), bytesOf(2)),
+      ];
+      final safes = <DateTime?>[];
+      intake.attachSink((p, safe) async {
+        safes.add(safe);
+        return true;
+      });
+      await intake.backfillScan(lookbackDays: 2);
+      expect(safes, [
+        DateTime(2026, 7, 17, 8), // a: clean → its own createDate
+        DateTime(2026, 7, 17, 8), // b: after bad → halted at a
+      ]);
+
+      // Truncated window: NO frontier may be reported at all.
+      library.assets = List.generate(
+          backfillQueryLimit,
+          (i) => FakeAsset('tt$i', 'IMG_tt$i.jpg',
+              DateTime(2026, 7, 17, 9, 0, i ~/ 60, i % 60 * 16), bytesOf(1)));
+      safes.clear();
+      await expectLater(intake.backfillScan(lookbackDays: 2),
+          throwsA(isA<BackfillWindowTruncated>()));
+      expect(safes, everyElement(isNull));
+    });
+
     test('a THROWING asset (Android 11+ unreadable) skips, not aborts',
         () async {
       library.assets = [

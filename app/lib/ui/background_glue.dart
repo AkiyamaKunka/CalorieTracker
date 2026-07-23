@@ -150,17 +150,12 @@ Future<bool> headlessBackfillWith({
       }
     },
   );
-  // Final watermark: a clean scan with no retryable releases covers the
-  // whole window up to scanStart; anything less advances only to the
-  // intake's coverage frontier (photos behind a transient failure stay
-  // reachable for the next run).
-  final anyRetryable = drain.outcomes.any((o) => o.retryable);
-  if (drain.scanCompleted && !anyRetryable) {
-    await prefs.setString(
-        backgroundWatermarkPrefsKey, scanStart.toIso8601String());
-  } else if (drain.frontier != null) {
-    await checkpoint(drain.frontier!);
-  }
+  // Final watermark: ONLY the intake's frontier — no scanStart fast path.
+  // Outcomes can't see photos whose byte read failed (they never reach the
+  // sink), so "no retryable outcomes" does NOT mean full coverage; the
+  // frontier is the single honest source. Cost: the next run re-offers at
+  // most the newest covered photo (ledger absorbs it without a model call).
+  if (drain.frontier != null) await checkpoint(drain.frontier!);
   return true;
 }
 
