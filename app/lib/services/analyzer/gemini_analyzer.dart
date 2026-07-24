@@ -284,7 +284,8 @@ class GeminiAnalyzer implements AnalyzerService {
           // Spec §3.3: latch pause-until = now + cooldown, persisted. The
           // photo can succeed once the pause lifts → retryable.
           await _settings
-              .setQuotaPauseUntil(DateTime.now().add(dailyQuotaCooldown));
+              .setQuotaPauseUntil(DateTime.now().add(dailyQuotaCooldown),
+                  forProvider: AiProvider.gemini);
           return AnalysisOutcome(
               error: _pausedMessage(), retryable: true, wall: sw.elapsed);
         }
@@ -343,7 +344,8 @@ class GeminiAnalyzer implements AnalyzerService {
     } on GeminiException catch (e) {
       if (isDailyFreeTierQuotaError(e.message)) {
         await _settings
-            .setQuotaPauseUntil(DateTime.now().add(dailyQuotaCooldown));
+            .setQuotaPauseUntil(DateTime.now().add(dailyQuotaCooldown),
+                  forProvider: AiProvider.gemini);
       }
       return null;
     }

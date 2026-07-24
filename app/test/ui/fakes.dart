@@ -166,8 +166,13 @@ class FakeExecutor implements NlExecutor {
 }
 
 class FakeSettings implements SettingsStore {
+  /// Provider-scoped keys, like the real store: [apiKey] reads/writes the
+  /// CURRENT provider's slot so tests can catch cross-provider misrouting.
+  final Map<String, String> keysByProvider;
+
   @override
-  String apiKey;
+  String get apiKey => keysByProvider[provider] ?? '';
+  set apiKey(String v) => keysByProvider[provider] = v;
   @override
   String provider = 'gemini';
   @override
@@ -185,13 +190,13 @@ class FakeSettings implements SettingsStore {
   int updateCalls = 0;
 
   FakeSettings({
-    this.apiKey = 'k',
+    String apiKey = 'k',
     this.model = 'gemini-2.5-flash',
     this.lookbackDays = 2,
     this.reportTime = '21:00',
     this.watcherEnabled = false,
     this.dietaryProfile = '',
-  });
+  }) : keysByProvider = {'gemini': apiKey};
 
   @override
   Future<void> update({

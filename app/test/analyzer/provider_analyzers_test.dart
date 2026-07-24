@@ -86,6 +86,10 @@ void main() {
       final body = jsonDecode(req.body) as Map<String, dynamic>;
       expect(body['model'], 'gpt-4o-mini');
       expect(body['response_format'], {'type': 'json_object'});
+      // max_tokens is REJECTED (400) by o-series/gpt-5 models; the newer
+      // name is accepted across all current chat-completions models.
+      expect(body.containsKey('max_tokens'), isFalse);
+      expect(body['max_completion_tokens'], isA<int>());
       final content = ((body['messages'] as List).first
           as Map<String, dynamic>)['content'] as List;
       expect(
@@ -103,6 +107,38 @@ void main() {
       final out = await a.analyzePhoto(photo);
       expect(out.analysis, isNull);
       expect(out.retryable, isTrue);
+    });
+
+    test('429 insufficient_quota surfaces a billing message, stays retryable',
+        () async {
+      final s = await settingsWith();
+      final a = OpenAiAnalyzer(s,
+          client: MockClient((r) async => http.Response(
+              '{"error":{"type":"insufficient_quota","message":"..."}}', 429)),
+          sleep: (_) async {},
+          normalizer: (b) async => b);
+      final out = await a.analyzePhoto(photo);
+      expect(out.retryable, isTrue); // photo stays eligible
+      expect(out.error, contains('billing'));
+    });
+
+    test('missing key: retryable outcome, NO in-place retry sleeps, clear '
+        'message', () async {
+      final s = await settingsWith(openaiKey: null);
+      final sleeps = <Duration>[];
+      var calls = 0;
+      final a = OpenAiAnalyzer(s,
+          client: MockClient((r) async {
+            calls++;
+            return _openaiOk(_foodJson);
+          }),
+          sleep: (d) async => sleeps.add(d),
+          normalizer: (b) async => b);
+      final out = await a.analyzePhoto(photo);
+      expect(calls, 0);
+      expect(sleeps, isEmpty); // the condition can't change mid-call
+      expect(out.retryable, isTrue);
+      expect(out.error, contains('Settings'));
     });
 
     test('401 is permanent (auth), never retried', () async {
@@ -182,6 +218,44 @@ void main() {
           as Map<String, dynamic>)['content'] as List;
       expect((content.first as Map)['type'], 'image');
       expect((content.first as Map)['source']['media_type'], 'image/jpeg');
+    });
+
+    test('thinking-first content blocks: the TEXT block is extracted',
+        () async {
+      final s = await settingsWith(provider: 'anthropic');
+      final a = AnthropicAnalyzer(s,
+          client: MockClient((r) async => http.Response(
+              jsonEncode({
+                'content': [
+                  {'type': 'thinking', 'thinking': ''},
+                  {'type': 'text', 'text': _foodJson},
+                ]
+              }),
+              200)),
+          sleep: (_) async {},
+          normalizer: (b) async => b);
+      final out = await a.analyzePhoto(photo);
+      // Default model claude-sonnet-5 emits thinking blocks routinely —
+      // content.first would classify a SUCCESSFUL reply as permanent
+      // failure.
+      expect(out.isFood, isTrue);
+      expect(out.analysis!['total_calories'], 500);
+    });
+
+    test('validateKey accepts an HTTP 200 with NO text block (1-token reply)',
+        () async {
+      final s = await settingsWith(provider: 'anthropic');
+      final a = AnthropicAnalyzer(s,
+          client: MockClient((r) async => http.Response(
+              jsonEncode({
+                'content': [
+                  {'type': 'thinking', 'thinking': 'x'}
+                ]
+              }),
+              200)),
+          sleep: (_) async {},
+          normalizer: (b) async => b);
+      expect(await a.validateKey('k'), isNull); // Gemini MAX_TOKENS parity
     });
 
     test('fenced JSON reply is parsed (no JSON mode on this API)', () async {
@@ -273,6 +347,20 @@ void main() {
       expect(again.openaiApiKey, 'o');
       expect(again.anthropicApiKey, 'a');
       expect(again.openaiModel, 'gpt-x');
+    });
+
+    test('a latch armed FOR gemini never pauses another provider', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final s = await AppSettings.load(prefs: prefs, keyStore: MemKeys());
+      await s.setProvider(AiProvider.openai);
+      // An in-flight Gemini call arming its latch AFTER the user switched:
+      await s.setQuotaPauseUntil(DateTime.now().add(const Duration(hours: 6)),
+          forProvider: AiProvider.gemini);
+      expect(s.isQuotaPaused, isFalse); // OpenAI unaffected
+      await s.setProvider(AiProvider.gemini);
+      expect(s.isQuotaPaused, isFalse,
+          reason: 'setProvider(change) clears the latch entirely');
     });
 
     test('switching provider clears the quota-pause latch', () async {

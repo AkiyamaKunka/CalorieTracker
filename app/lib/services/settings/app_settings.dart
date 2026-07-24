@@ -58,6 +58,7 @@ class AppSettings extends ChangeNotifier {
   static const String _kDietaryProfile = 'settings.dietary_profile';
   static const String _kQuotaPauseUntil = 'settings.quota_pause_until';
   static const String _kProvider = 'settings.provider';
+  static const String _kQuotaPauseProvider = 'settings.quota_pause_provider';
   static const String _kOpenaiModel = 'settings.openai_model';
   static const String _kAnthropicModel = 'settings.anthropic_model';
 
@@ -287,16 +288,33 @@ class AppSettings extends ChangeNotifier {
   /// skipped and NL requests are refused. Null = not paused.
   DateTime? get quotaPauseUntil => _quotaPauseUntil;
 
-  Future<void> setQuotaPauseUntil(DateTime? value) async {
+  /// [forProvider] tags WHOSE quota this pause belongs to (defaults to the
+  /// current provider). An analyzer must pass its own identity: a Gemini
+  /// call still in flight after the user switched to OpenAI would
+  /// otherwise arm a pause the clear-on-switch rule already ran for —
+  /// dead-airing the NEW provider for up to 12 h.
+  Future<void> setQuotaPauseUntil(DateTime? value,
+      {AiProvider? forProvider}) async {
     _quotaPauseUntil = value;
     if (value == null) {
       await _prefs.remove(_kQuotaPauseUntil);
+      await _prefs.remove(_kQuotaPauseProvider);
     } else {
       await _prefs.setString(_kQuotaPauseUntil, value.toIso8601String());
+      await _prefs.setString(
+          _kQuotaPauseProvider, (forProvider ?? _provider).name);
     }
     notifyListeners();
   }
 
-  bool get isQuotaPaused =>
-      _quotaPauseUntil != null && DateTime.now().isBefore(_quotaPauseUntil!);
+  /// Paused only when the latch is live AND belongs to the CURRENT
+  /// provider — another provider's quota never gates this one.
+  bool get isQuotaPaused {
+    if (_quotaPauseUntil == null ||
+        !DateTime.now().isBefore(_quotaPauseUntil!)) {
+      return false;
+    }
+    final owner = _prefs.getString(_kQuotaPauseProvider);
+    return owner == null || owner == _provider.name;
+  }
 }

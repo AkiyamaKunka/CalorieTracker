@@ -78,8 +78,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _keyState = KeyValidationState.validating;
       _keyError = null;
     });
+    // Snapshot the provider: validation can take up to 90 s and the
+    // dropdown stays enabled — a mid-flight switch must not persist this
+    // key into the NEWLY selected provider's slot (and then show Key OK
+    // for a key that belongs to a different service).
+    final providerAtStart = widget.settings.provider;
     final error = await widget.analyzer.validateKey(key); // null = OK
     if (!mounted) return;
+    if (widget.settings.provider != providerAtStart) {
+      setState(() => _keyState = KeyValidationState.idle);
+      return; // stale validation: neither persist nor report
+    }
     if (error == null) {
       await widget.settings.update(apiKey: key);
       if (!mounted) return;

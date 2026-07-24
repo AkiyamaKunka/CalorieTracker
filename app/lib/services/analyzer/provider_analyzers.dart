@@ -57,21 +57,31 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
   /// Provider hooks.
   String? get apiKey;
   String get model;
+  String get providerLabel;
   http.Request buildRequest(String key,
       {required String prompt, Uint8List? jpegBytes, required int maxTokens});
   String extractText(Map<String, dynamic> body);
 
   /// One POST. Returns the reply text; throws [_ProviderException] with a
-  /// transient/permanent classification otherwise.
+  /// transient/permanent classification otherwise. [extract] false skips
+  /// text extraction entirely (validateKey: an HTTP 200 proves the key
+  /// regardless of reply shape — a 1-token reply may contain no text
+  /// block at all, same rule as Gemini's MAX_TOKENS case).
   Future<String> _post(
       {required String prompt,
       Uint8List? jpegBytes,
       String? apiKeyOverride,
-      int maxTokens = 2048}) async {
+      int maxTokens = 2048,
+      bool extract = true}) async {
     final key = (apiKeyOverride ?? apiKey ?? '').trim();
     if (key.isEmpty) {
-      throw const _ProviderException('No API key configured for this provider',
-          transient: true); // user state, not a photo defect
+      // User state, not a photo defect: the photo stays eligible
+      // (retryable) but re-attempting in place is pointless.
+      throw _ProviderException(
+          'No $providerLabel API key — add one in Settings.',
+          transient: true,
+          retryInPlace: false,
+          verbatimMessage: true);
     }
     final req = buildRequest(key,
         prompt: prompt, jpegBytes: jpegBytes, maxTokens: maxTokens);
@@ -89,10 +99,21 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
           transient: false, auth: true);
     }
     if (resp.statusCode != 200) {
-      throw _ProviderException('HTTP ${resp.statusCode}',
+      // OpenAI overloads 429 for BOTH transient rate limits and exhausted
+      // billing (insufficient_quota) — the latter needs the user, not a
+      // retry message.
+      final billingDead = resp.statusCode == 429 &&
+          resp.body.contains('insufficient_quota');
+      throw _ProviderException(
+          billingDead
+              ? 'Provider credits exhausted — check your '
+                  '$providerLabel billing.'
+              : 'HTTP ${resp.statusCode}',
           transient: _isTransientStatus(resp.statusCode),
-          quotaClass: resp.statusCode == 429);
+          quotaClass: resp.statusCode == 429,
+          verbatimMessage: billingDead);
     }
+    if (!extract) return '';
     try {
       return extractText(jsonDecode(resp.body) as Map<String, dynamic>);
     } catch (_) {
@@ -128,7 +149,10 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
       try {
         text = await _post(prompt: prompt, jpegBytes: sendBytes);
       } on _ProviderException catch (e) {
-        if (attempt < maxAttempts && e.transient && !e.quotaClass) {
+        if (attempt < maxAttempts &&
+            e.transient &&
+            e.retryInPlace &&
+            !e.quotaClass) {
           await _sleep(Duration(seconds: 5 * attempt));
           continue;
         }
@@ -180,7 +204,10 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
   @override
   Future<String?> validateKey(String apiKey) async {
     try {
-      await _post(prompt: 'ping', apiKeyOverride: apiKey, maxTokens: 1);
+      // extract:false — HTTP 200 alone proves the key; a 1-token reply may
+      // legitimately carry no text block (Gemini MAX_TOKENS parity).
+      await _post(
+          prompt: 'ping', apiKeyOverride: apiKey, maxTokens: 1, extract: false);
       return null;
     } on _ProviderException catch (e) {
       // Same rule as Gemini: a REAL HTTP quota-class response proves the
@@ -193,13 +220,26 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
 
 class _ProviderException implements Exception {
   const _ProviderException(this.message,
-      {required this.transient, this.auth = false, this.quotaClass = false});
+      {required this.transient,
+      this.auth = false,
+      this.quotaClass = false,
+      this.retryInPlace = true,
+      this.verbatimMessage = false});
   final String message;
   final bool transient;
   final bool auth;
   final bool quotaClass;
 
+  /// False for conditions that cannot change within this call (missing
+  /// key): still retryable at the OUTCOME level, but in-place sleeps are
+  /// pointless.
+  final bool retryInPlace;
+
+  /// True when [message] is already user-facing (skip the generic bucket).
+  final bool verbatimMessage;
+
   String get userMessage {
+    if (verbatimMessage) return message;
     if (auth) return 'The provider rejected the API key. Check Settings.';
     if (quotaClass) {
       return 'Provider rate/spend limit hit — will retry later.';
@@ -223,6 +263,8 @@ class OpenAiAnalyzer extends _HttpVisionAnalyzer {
   String? get apiKey => settings.openaiApiKey;
   @override
   String get model => settings.openaiModel;
+  @override
+  String get providerLabel => 'OpenAI';
 
   @override
   http.Request buildRequest(String key,
@@ -248,7 +290,9 @@ class OpenAiAnalyzer extends _HttpVisionAnalyzer {
         // Our shared prompts already instruct JSON; json_object mode makes
         // the syntax guarantee explicit (schema stays the coercers' job).
         if (jpegBytes != null) 'response_format': {'type': 'json_object'},
-        'max_tokens': maxTokens,
+        // NOT 'max_tokens': newer models (o-series, gpt-5 family) reject it
+        // with 400; max_completion_tokens is accepted across current models.
+        'max_completion_tokens': maxTokens,
       });
     return req;
   }
@@ -269,6 +313,8 @@ class AnthropicAnalyzer extends _HttpVisionAnalyzer {
   String? get apiKey => settings.anthropicApiKey;
   @override
   String get model => settings.anthropicModel;
+  @override
+  String get providerLabel => 'Anthropic';
 
   @override
   http.Request buildRequest(String key,
@@ -300,8 +346,16 @@ class AnthropicAnalyzer extends _HttpVisionAnalyzer {
   }
 
   @override
-  String extractText(Map<String, dynamic> body) =>
-      ((body['content'] as List).first as Map)['text'] as String;
+  String extractText(Map<String, dynamic> body) {
+    // Content may lead with thinking blocks (claude-sonnet-5's adaptive
+    // thinking) — the answer is the FIRST TEXT block, not content.first.
+    for (final block in body['content'] as List) {
+      if (block is Map && block['type'] == 'text') {
+        return block['text'] as String;
+      }
+    }
+    throw const FormatException('no text block in reply');
+  }
 }
 
 /// Per-call delegation on [AppSettings.provider]: switching providers in
