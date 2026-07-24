@@ -151,6 +151,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  String _providerLabel() => switch (widget.settings.provider) {
+        'openai' => 'OpenAI',
+        'anthropic' => 'Anthropic',
+        _ => 'Gemini',
+      };
+
+  String _modelHelperText() => switch (widget.settings.provider) {
+        'openai' => 'Default: gpt-4o-mini',
+        'anthropic' => 'Default: claude-sonnet-5',
+        _ => 'Default: gemini-2.5-flash',
+      };
+
   Widget _keyStatusIcon() {
     switch (_keyState) {
       case KeyValidationState.idle:
@@ -183,6 +195,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
       children: [
         Text('Gemini', style: theme.textTheme.titleMedium),
         const SizedBox(height: 8),
+        DropdownButtonFormField<String>(
+          key: const Key('providerDropdown'),
+          initialValue: widget.settings.provider,
+          decoration: const InputDecoration(
+            labelText: 'AI provider',
+            helperText:
+                'Key and model below belong to the selected provider.',
+            border: OutlineInputBorder(),
+          ),
+          items: const [
+            DropdownMenuItem(value: 'gemini', child: Text('Google Gemini')),
+            DropdownMenuItem(value: 'openai', child: Text('OpenAI')),
+            DropdownMenuItem(
+                value: 'anthropic', child: Text('Anthropic Claude')),
+          ],
+          onChanged: (v) async {
+            if (v == null) return;
+            await widget.settings.update(provider: v);
+            if (!mounted) return;
+            setState(() {
+              // The key/model fields are provider-scoped: reload them from
+              // the newly selected provider's stored values.
+              _keyController.text = widget.settings.apiKey;
+              _modelController.text = widget.settings.model;
+              _keyState = KeyValidationState.idle;
+              _keyError = null;
+            });
+          },
+        ),
+        const SizedBox(height: 12),
         TextField(
           key: const Key('apiKeyField'),
           controller: _keyController,
@@ -197,7 +239,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             }
           },
           decoration: InputDecoration(
-            labelText: 'Gemini API key',
+            labelText: '${_providerLabel()} API key',
             helperText: 'Stored securely on this device only.',
             border: const OutlineInputBorder(),
             suffixIcon: _keyStatusIcon(),
@@ -238,10 +280,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
           // keyboard action key.
           onTapOutside: (_) =>
               widget.settings.update(model: _modelController.text.trim()),
-          decoration: const InputDecoration(
+          decoration: InputDecoration(
             labelText: 'Model',
-            helperText: 'Default: gemini-2.5-flash',
-            border: OutlineInputBorder(),
+            helperText: _modelHelperText(),
+            border: const OutlineInputBorder(),
           ),
         ),
         const Divider(height: 32),

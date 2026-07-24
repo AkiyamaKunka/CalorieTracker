@@ -169,6 +169,8 @@ class FakeSettings implements SettingsStore {
   @override
   String apiKey;
   @override
+  String provider = 'gemini';
+  @override
   bool isQuotaPaused = false;
   @override
   String model;
@@ -194,6 +196,7 @@ class FakeSettings implements SettingsStore {
   @override
   Future<void> update({
     String? apiKey,
+    String? provider,
     String? model,
     int? lookbackDays,
     String? reportTime,
@@ -202,6 +205,7 @@ class FakeSettings implements SettingsStore {
   }) async {
     updateCalls++;
     if (apiKey != null) this.apiKey = apiKey;
+    if (provider != null) this.provider = provider;
     if (model != null) this.model = model;
     if (lookbackDays != null) this.lookbackDays = lookbackDays;
     if (reportTime != null) this.reportTime = reportTime;

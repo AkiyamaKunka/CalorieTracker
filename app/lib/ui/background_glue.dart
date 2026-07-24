@@ -24,7 +24,7 @@ import 'package:workmanager/workmanager.dart';
 
 import '../core/contracts.dart';
 import '../data/meals_dao_impl.dart';
-import '../services/analyzer/gemini_analyzer.dart';
+import '../services/analyzer/provider_analyzers.dart';
 import '../services/photo/background.dart';
 import '../services/photo/watcher.dart';
 import '../services/report/notifications.dart';
@@ -109,7 +109,7 @@ Future<bool> headlessBackfillWith({
   // No key yet / quota latch armed: analyses cannot succeed, so don't even
   // read photo bytes. The watermark stays put — those photos are scanned
   // once the blocker clears (release-not-burn keeps them eligible).
-  if ((settings.geminiApiKey ?? '').isEmpty) return true;
+  if ((settings.activeApiKey ?? '').isEmpty) return true;
   if (settings.isQuotaPaused) return true;
 
   final scanStart = clock();
@@ -178,7 +178,8 @@ Future<bool> runHeadlessBackfill() async {
     prefs: prefs,
     intake: createPhotoIntake(settings),
     pipeline: () async => PhotoPipeline(
-        dao: await createMealsDao(), analyzer: createAnalyzer(settings)),
+        dao: await createMealsDao(),
+        analyzer: createMultiProviderAnalyzer(settings)),
     showMealCard: (title, body) async {
       await notifier.init(); // idempotent; deferred until a card exists
       await notifier.showMealCard(title, body);

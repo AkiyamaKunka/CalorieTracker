@@ -11,12 +11,18 @@ import '../core/contracts.dart';
 /// di.dart adapts the concrete AppSettings onto this; tests use in-memory
 /// fakes.
 abstract class SettingsStore {
+  /// The ACTIVE provider's API key — [apiKey]/[model] always read and
+  /// write the provider selected by [provider].
   String get apiKey;
+
+  /// Active AI provider: 'gemini' | 'openai' | 'anthropic'. String-typed so
+  /// the UI seam stays free of module imports (di adapts the enum).
+  String get provider;
 
   /// Spec §3.3 quota-pause latch: while true, analyses cannot succeed —
   /// backfill triggers skip the byte-reads entirely.
   bool get isQuotaPaused;
-  String get model; // default gemini-2.5-flash (spec §8)
+  String get model; // ACTIVE provider's model string
   int get lookbackDays; // backfill window, clamp 1–30 (spec §6.4/§8)
   String get reportTime; // 'HH:mm' local, daily-report notification time
   bool get watcherEnabled;
@@ -24,6 +30,7 @@ abstract class SettingsStore {
 
   Future<void> update({
     String? apiKey,
+    String? provider,
     String? model,
     int? lookbackDays,
     String? reportTime,

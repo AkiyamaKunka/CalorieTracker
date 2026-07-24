@@ -34,14 +34,21 @@ class FlutterSecureKeyStore implements SecureKeyStore {
   Future<void> delete(String key) => _storage.delete(key: key);
 }
 
+/// AI providers the analyzer can call. Gemini is the original and default;
+/// OpenAI/Anthropic are BYO-key alternatives (also the escape hatch from
+/// Gemini's free-tier daily cap).
+enum AiProvider { gemini, openai, anthropic }
+
 class AppSettings extends ChangeNotifier {
   AppSettings._(this._prefs, this._keys);
 
   final SharedPreferences _prefs;
   final SecureKeyStore _keys;
 
-  // Secure-storage key (never written to shared_preferences).
+  // Secure-storage keys (never written to shared_preferences).
   static const String _kApiKey = 'gemini_api_key';
+  static const String _kOpenaiKey = 'openai_api_key';
+  static const String _kAnthropicKey = 'anthropic_api_key';
 
   // shared_preferences keys.
   static const String _kModel = 'settings.model';
@@ -50,6 +57,9 @@ class AppSettings extends ChangeNotifier {
   static const String _kWatcherEnabled = 'settings.watcher_enabled';
   static const String _kDietaryProfile = 'settings.dietary_profile';
   static const String _kQuotaPauseUntil = 'settings.quota_pause_until';
+  static const String _kProvider = 'settings.provider';
+  static const String _kOpenaiModel = 'settings.openai_model';
+  static const String _kAnthropicModel = 'settings.anthropic_model';
 
   /// Spec §8: Gemini model default (config.py:26), from shared/.
   static const String defaultModel = SharedConstants.geminiModelDefault;
@@ -63,7 +73,16 @@ class AppSettings extends ChangeNotifier {
   static const String defaultReportTime = '21:30';
   static final RegExp _reportTimeRe = RegExp(r'^([01]?\d|2[0-3]):[0-5]\d$');
 
+  /// Vision-capable, cost-sane defaults; user-editable like the Gemini one.
+  static const String defaultOpenaiModel = 'gpt-4o-mini';
+  static const String defaultAnthropicModel = 'claude-sonnet-5';
+
   String? _geminiApiKey;
+  String? _openaiApiKey;
+  String? _anthropicApiKey;
+  AiProvider _provider = AiProvider.gemini;
+  String _openaiModel = defaultOpenaiModel;
+  String _anthropicModel = defaultAnthropicModel;
   String _model = defaultModel;
   int _lookbackDays = defaultLookbackDays;
   String _reportTime = defaultReportTime;
@@ -78,8 +97,19 @@ class AppSettings extends ChangeNotifier {
     final s = AppSettings._(p, k);
     final storedKey = (await k.read(_kApiKey))?.trim();
     s._geminiApiKey = (storedKey == null || storedKey.isEmpty) ? null : storedKey;
+    final oaKey = (await k.read(_kOpenaiKey))?.trim();
+    s._openaiApiKey = (oaKey == null || oaKey.isEmpty) ? null : oaKey;
+    final anKey = (await k.read(_kAnthropicKey))?.trim();
+    s._anthropicApiKey = (anKey == null || anKey.isEmpty) ? null : anKey;
+    s._provider = AiProvider.values.firstWhere(
+        (v) => v.name == (p.getString(_kProvider) ?? ''),
+        orElse: () => AiProvider.gemini);
     final model = (p.getString(_kModel) ?? '').trim();
     s._model = model.isEmpty ? defaultModel : model;
+    final oaModel = (p.getString(_kOpenaiModel) ?? '').trim();
+    s._openaiModel = oaModel.isEmpty ? defaultOpenaiModel : oaModel;
+    final anModel = (p.getString(_kAnthropicModel) ?? '').trim();
+    s._anthropicModel = anModel.isEmpty ? defaultAnthropicModel : anModel;
     s._lookbackDays = (p.getInt(_kLookbackDays) ?? defaultLookbackDays)
         .clamp(minLookbackDays, maxLookbackDays);
     final rt = p.getString(_kReportTime) ?? defaultReportTime;
@@ -123,6 +153,88 @@ class AppSettings extends ChangeNotifier {
     final v = value.trim();
     _model = v.isEmpty ? defaultModel : v;
     await _prefs.setString(_kModel, _model);
+    notifyListeners();
+  }
+
+  /// The provider all analyses route through (delegated per call — no
+  /// restart needed). Switching clears the quota-pause latch: it belongs
+  /// to the OLD provider's quota.
+  AiProvider get provider => _provider;
+
+  Future<void> setProvider(AiProvider value) async {
+    final changed = value != _provider;
+    _provider = value;
+    await _prefs.setString(_kProvider, value.name);
+    if (changed && _quotaPauseUntil != null) {
+      _quotaPauseUntil = null;
+      await _prefs.remove(_kQuotaPauseUntil);
+    }
+    notifyListeners();
+  }
+
+  String? get openaiApiKey => _openaiApiKey;
+  String? get anthropicApiKey => _anthropicApiKey;
+  String get openaiModel => _openaiModel;
+  String get anthropicModel => _anthropicModel;
+
+  /// The ACTIVE provider's key (what every "can analysis succeed" guard
+  /// must check — a Gemini key does nothing when OpenAI is selected).
+  String? get activeApiKey => switch (_provider) {
+        AiProvider.gemini => _geminiApiKey,
+        AiProvider.openai => _openaiApiKey,
+        AiProvider.anthropic => _anthropicApiKey,
+      };
+
+  /// The ACTIVE provider's model string.
+  String get activeModel => switch (_provider) {
+        AiProvider.gemini => _model,
+        AiProvider.openai => _openaiModel,
+        AiProvider.anthropic => _anthropicModel,
+      };
+
+  Future<void> setOpenaiApiKey(String? value) =>
+      _setProviderKey(value, _kOpenaiKey, (v) => _openaiApiKey = v,
+          () => _openaiApiKey, AiProvider.openai);
+
+  Future<void> setAnthropicApiKey(String? value) =>
+      _setProviderKey(value, _kAnthropicKey, (v) => _anthropicApiKey = v,
+          () => _anthropicApiKey, AiProvider.anthropic);
+
+  Future<void> _setProviderKey(
+      String? value,
+      String storeKey,
+      void Function(String?) assign,
+      String? Function() current,
+      AiProvider owner) async {
+    final v = (value ?? '').trim();
+    final changed = v != (current() ?? '');
+    if (v.isEmpty) {
+      assign(null);
+      await _keys.delete(storeKey);
+    } else {
+      assign(v);
+      await _keys.write(storeKey, v);
+    }
+    // Same rule as the Gemini setter: a changed key on the ACTIVE provider
+    // must not inherit the previous key's quota pause.
+    if (changed && _provider == owner && _quotaPauseUntil != null) {
+      _quotaPauseUntil = null;
+      await _prefs.remove(_kQuotaPauseUntil);
+    }
+    notifyListeners();
+  }
+
+  Future<void> setOpenaiModel(String value) async {
+    final v = value.trim();
+    _openaiModel = v.isEmpty ? defaultOpenaiModel : v;
+    await _prefs.setString(_kOpenaiModel, _openaiModel);
+    notifyListeners();
+  }
+
+  Future<void> setAnthropicModel(String value) async {
+    final v = value.trim();
+    _anthropicModel = v.isEmpty ? defaultAnthropicModel : v;
+    await _prefs.setString(_kAnthropicModel, _anthropicModel);
     notifyListeners();
   }
 

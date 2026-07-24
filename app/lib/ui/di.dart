@@ -10,7 +10,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../core/contracts.dart';
 import '../data/meals_dao_impl.dart';
-import '../services/analyzer/gemini_analyzer.dart';
+import '../services/analyzer/provider_analyzers.dart';
 import '../services/nl/executor.dart';
 import '../services/photo/share_intake.dart';
 import '../services/photo/watcher.dart';
@@ -43,7 +43,7 @@ class AppServices {
     // Any 'processing' ledger row at launch is a crashed run — reclaim it
     // before services start (spec §2.3 single-process simplification).
     await dao.reclaimStaleProcessing();
-    final analyzer = createAnalyzer(settings);
+    final analyzer = createMultiProviderAnalyzer(settings);
     final executor = createExecutor(dao, analyzer, settings);
     // The photo module reads lookbackDays through the live settings object,
     // so slider edits apply to the next scan without rewiring (spec §6.4).
@@ -97,7 +97,8 @@ class AppServices {
       // minutes after backgrounding — photos taken since are picked up here.
       // Fire-and-forget: startup must not block on Gemini analyses. Key
       // guard: without a key nothing can succeed, so don't read photo bytes.
-      if ((settings.geminiApiKey ?? '').isNotEmpty && !settings.isQuotaPaused) {
+      if ((settings.activeApiKey ?? '').isNotEmpty &&
+          !settings.isQuotaPaused) {
         unawaited(photoIntake.backfillScan().then((_) {},
             onError: (Object e) {
           // Truncation must not vanish silently: >2000 window images means
@@ -130,11 +131,13 @@ class _AppSettingsStore implements SettingsStore {
   _AppSettingsStore(this._s, this._notifier);
 
   @override
-  String get apiKey => _s.geminiApiKey ?? '';
+  String get apiKey => _s.activeApiKey ?? '';
+  @override
+  String get provider => _s.provider.name;
   @override
   bool get isQuotaPaused => _s.isQuotaPaused;
   @override
-  String get model => _s.model;
+  String get model => _s.activeModel;
   @override
   int get lookbackDays => _s.lookbackDays;
   @override
@@ -147,14 +150,33 @@ class _AppSettingsStore implements SettingsStore {
   @override
   Future<void> update({
     String? apiKey,
+    String? provider,
     String? model,
     int? lookbackDays,
     String? reportTime,
     bool? watcherEnabled,
     String? dietaryProfile,
   }) async {
-    if (apiKey != null) await _s.setGeminiApiKey(apiKey);
-    if (model != null) await _s.setModel(model);
+    if (provider != null) {
+      await _s.setProvider(AiProvider.values
+          .firstWhere((v) => v.name == provider, orElse: () => _s.provider));
+    }
+    // apiKey/model always target the ACTIVE provider (the UI's key and
+    // model fields are provider-scoped by design).
+    if (apiKey != null) {
+      await switch (_s.provider) {
+        AiProvider.gemini => _s.setGeminiApiKey(apiKey),
+        AiProvider.openai => _s.setOpenaiApiKey(apiKey),
+        AiProvider.anthropic => _s.setAnthropicApiKey(apiKey),
+      };
+    }
+    if (model != null) {
+      await switch (_s.provider) {
+        AiProvider.gemini => _s.setModel(model),
+        AiProvider.openai => _s.setOpenaiModel(model),
+        AiProvider.anthropic => _s.setAnthropicModel(model),
+      };
+    }
     if (lookbackDays != null) {
       await _s.setLookbackDays(lookbackDays);
       await syncBackgroundScan(_s);
