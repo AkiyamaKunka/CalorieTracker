@@ -360,21 +360,121 @@ class AnthropicAnalyzer extends _HttpVisionAnalyzer {
 
 /// Per-call delegation on [AppSettings.provider]: switching providers in
 /// Settings takes effect on the NEXT request — no DI rewiring, no restart.
+/// The user's OWN CalorieTracker server as an analyzer: photos and prompts
+/// go to its /api/analyze_photo and /api/text_intent endpoints, which run
+/// the Claude Code CLI under the owner's Claude SUBSCRIPTION — so analyses
+/// cost no API money.
+///
+/// Why the phone does NOT carry a subscription token directly: Claude
+/// subscription credentials authorize Claude Code itself, not arbitrary
+/// third-party clients, and an APK is a shipping container for whatever is
+/// baked into it (this build gets handed to other people). The server
+/// already holds that credential legitimately and runs the real CLI, so the
+/// device only ever stores the server's own upload key.
+///
+/// Reachability caveat worth knowing: this points at a plain-HTTP endpoint
+/// on the user's VM, so the upload key and photo bytes cross the network
+/// unencrypted — same exposure the existing Termux watcher already accepts.
+/// TLS in front of Flask is the fix; the app is ready for an https:// base
+/// URL the moment the server has one.
+class ServerAnalyzer extends _HttpVisionAnalyzer {
+  ServerAnalyzer(super.settings, {super.client, super.sleep, super.normalizer});
+
+  @override
+  String? get apiKey => settings.serverApiKey;
+  @override
+  String get model => 'server';
+  @override
+  String get providerLabel => 'server';
+
+  Uri _uri(String path) => Uri.parse('${settings.serverBaseUrl}$path');
+
+  @override
+  http.Request buildRequest(String key,
+      {required String prompt, Uint8List? jpegBytes, required int maxTokens}) {
+    if (settings.serverBaseUrl.isEmpty) {
+      // Retryable at the OUTCOME level (the user may add the address later)
+      // but nothing to retry in place.
+      throw const _ProviderException(
+          'Add your server address in Settings to use the subscription path.',
+          transient: true,
+          retryInPlace: false,
+          verbatimMessage: true);
+    }
+    final isPhoto = jpegBytes != null;
+    return http.Request(
+        'POST', _uri(isPhoto ? '/api/analyze_photo' : '/api/text_intent'))
+      ..headers['content-type'] = 'application/json'
+      ..headers['X-API-Key'] = key
+      ..headers['X-Client-Platform'] = 'app'
+      // The PROMPT travels with the request so the app's dietary profile
+      // still applies: the server would otherwise use its own copy of the
+      // shared prompt without the appendix.
+      ..body = jsonEncode({
+        'prompt': prompt,
+        if (isPhoto) 'image_b64': base64Encode(jpegBytes),
+      });
+  }
+
+  @override
+  String extractText(Map<String, dynamic> body) {
+    // Photos answer {ok, analysis}, text answers {ok, result}. The base
+    // layer wants TEXT to parseAiJson, so hand the payload back as JSON —
+    // that keeps every downstream rule (coerceIsFood, bare-array handling)
+    // identical to the direct-API providers.
+    final payload = body['analysis'] ?? body['result'];
+    if (payload == null) throw const FormatException('no payload');
+    return jsonEncode(payload);
+  }
+
+  /// /ping proves "address reachable + key accepted" and costs no CLI run —
+  /// validation must never occupy the analyzer lock a photo could be using.
+  @override
+  Future<String?> validateKey(String apiKey) async {
+    final base = settings.serverBaseUrl;
+    if (base.isEmpty) return 'Add your server address first.';
+    final key = apiKey.trim();
+    if (key.isEmpty) return 'Enter your server upload key.';
+    final req = http.Request('POST', _uri('/ping'))
+      ..headers['content-type'] = 'application/json'
+      ..headers['X-API-Key'] = key
+      ..headers['X-Client-Platform'] = 'app'
+      ..body = '{}';
+    try {
+      final streamed =
+          await client.send(req).timeout(_HttpVisionAnalyzer.httpDeadline);
+      final resp = await http.Response.fromStream(streamed);
+      if (resp.statusCode == 200) return null;
+      if (resp.statusCode == 401 || resp.statusCode == 403) {
+        return 'Your server rejected that key.';
+      }
+      return 'Server answered HTTP ${resp.statusCode}.';
+    } on TimeoutException {
+      return 'Server did not respond (timeout).';
+    } catch (e) {
+      return 'Could not reach $base.';
+    }
+  }
+}
+
 class MultiProviderAnalyzer implements AnalyzerService {
   MultiProviderAnalyzer(this._settings, {http.Client? client})
       : _gemini = createAnalyzer(_settings, client: client),
         _openai = OpenAiAnalyzer(_settings, client: client),
-        _anthropic = AnthropicAnalyzer(_settings, client: client);
+        _anthropic = AnthropicAnalyzer(_settings, client: client),
+        _server = ServerAnalyzer(_settings, client: client);
 
   final AppSettings _settings;
   final AnalyzerService _gemini;
   final OpenAiAnalyzer _openai;
   final AnthropicAnalyzer _anthropic;
+  final ServerAnalyzer _server;
 
   AnalyzerService get _active => switch (_settings.provider) {
         AiProvider.gemini => _gemini,
         AiProvider.openai => _openai,
         AiProvider.anthropic => _anthropic,
+        AiProvider.server => _server,
       };
 
   @override

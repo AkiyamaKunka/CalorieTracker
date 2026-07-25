@@ -28,6 +28,9 @@ abstract class SettingsStore {
   bool get watcherEnabled;
   String get dietaryProfile; // spec §1.3 photo-prompt appendix
 
+  /// Base URL of the user's own server (AiProvider.server); '' when unset.
+  String get serverBaseUrl;
+
   Future<void> update({
     String? apiKey,
     String? provider,
@@ -36,6 +39,7 @@ abstract class SettingsStore {
     String? reportTime,
     bool? watcherEnabled,
     String? dietaryProfile,
+    String? serverBaseUrl,
   });
 }
 

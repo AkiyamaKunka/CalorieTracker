@@ -37,6 +37,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late final TextEditingController _keyController;
   late final TextEditingController _modelController;
   late final TextEditingController _profileController;
+  late final TextEditingController _serverUrlController;
   KeyValidationState _keyState = KeyValidationState.idle;
   String? _keyError;
   late int _lookbackDays;
@@ -52,6 +53,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _modelController = TextEditingController(
         text: s.model.isEmpty ? 'gemini-2.5-flash' : s.model);
     _profileController = TextEditingController(text: s.dietaryProfile);
+    _serverUrlController = TextEditingController(text: s.serverBaseUrl);
     _lookbackDays = s.lookbackDays.clamp(1, 30); // spec §6.4 range
     _reportTime = s.reportTime.isEmpty ? '21:00' : s.reportTime;
     _watcherEnabled = s.watcherEnabled;
@@ -62,6 +64,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _keyController.dispose();
     _modelController.dispose();
     _profileController.dispose();
+    _serverUrlController.dispose();
     super.dispose();
   }
 
@@ -163,8 +166,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String _providerLabel() => switch (widget.settings.provider) {
         'openai' => 'OpenAI',
         'anthropic' => 'Anthropic',
+        'server' => 'Server',
         _ => 'Gemini',
       };
+
+  bool get _isServerProvider => widget.settings.provider == 'server';
 
   String _modelHelperText() => switch (widget.settings.provider) {
         'openai' => 'Default: gpt-4o-mini',
@@ -209,8 +215,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           initialValue: widget.settings.provider,
           decoration: const InputDecoration(
             labelText: 'AI provider',
-            helperText:
-                'Key and model below belong to the selected provider.',
+            helperText: 'Key and model below belong to the selected '
+                'provider. "My server" analyses run on your own server '
+                'under your Claude subscription — no API charges.',
             border: OutlineInputBorder(),
           ),
           items: const [
@@ -218,6 +225,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
             DropdownMenuItem(value: 'openai', child: Text('OpenAI')),
             DropdownMenuItem(
                 value: 'anthropic', child: Text('Anthropic Claude')),
+            DropdownMenuItem(
+                value: 'server',
+                child: Text('My server (Claude subscription)')),
           ],
           onChanged: (v) async {
             if (v == null) return;
@@ -234,6 +244,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
           },
         ),
         const SizedBox(height: 12),
+        if (_isServerProvider) ...[
+          TextField(
+            key: const Key('serverUrlField'),
+            controller: _serverUrlController,
+            autocorrect: false,
+            keyboardType: TextInputType.url,
+            decoration: const InputDecoration(
+              labelText: 'Server address',
+              hintText: 'http://your.server.ip',
+              helperText: 'Your CalorieTracker server — it analyses photos '
+                  'with your Claude subscription.',
+              border: OutlineInputBorder(),
+            ),
+            onSubmitted: (v) =>
+                widget.settings.update(serverBaseUrl: v.trim()),
+            onTapOutside: (_) => widget.settings
+                .update(serverBaseUrl: _serverUrlController.text.trim()),
+          ),
+          const SizedBox(height: 12),
+        ],
         TextField(
           key: const Key('apiKeyField'),
           controller: _keyController,
@@ -248,8 +278,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
             }
           },
           decoration: InputDecoration(
-            labelText: '${_providerLabel()} API key',
-            helperText: 'Stored securely on this device only.',
+            labelText: _isServerProvider
+                ? 'Server upload key'
+                : '${_providerLabel()} API key',
+            helperText: _isServerProvider
+                ? 'The X-API-Key your server expects. Stored securely on '
+                    'this device only.'
+                : 'Stored securely on this device only.',
             border: const OutlineInputBorder(),
             suffixIcon: _keyStatusIcon(),
           ),
@@ -276,25 +311,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onPressed: _keyState == KeyValidationState.validating
                 ? null
                 : _validateKey,
-            child: const Text('Validate key'),
+            child: Text(_isServerProvider ? 'Test connection' : 'Validate key'),
           ),
         ),
         const SizedBox(height: 12),
-        TextField(
-          key: const Key('modelField'),
-          controller: _modelController,
-          autocorrect: false,
-          onSubmitted: (v) => widget.settings.update(model: v.trim()),
-          // Tap-away must not lose the edit — onSubmitted only fires on the
-          // keyboard action key.
-          onTapOutside: (_) =>
-              widget.settings.update(model: _modelController.text.trim()),
-          decoration: InputDecoration(
-            labelText: 'Model',
-            helperText: _modelHelperText(),
-            border: const OutlineInputBorder(),
+        // The server path has no model field: the VM's own
+        // CLAUDE_ANALYZER_MODEL decides, and a phone-side value would be a
+        // lie the user could not act on.
+        if (!_isServerProvider)
+          TextField(
+            key: const Key('modelField'),
+            controller: _modelController,
+            autocorrect: false,
+            onSubmitted: (v) => widget.settings.update(model: v.trim()),
+            // Tap-away must not lose the edit — onSubmitted only fires on
+            // the keyboard action key.
+            onTapOutside: (_) =>
+                widget.settings.update(model: _modelController.text.trim()),
+            decoration: InputDecoration(
+              labelText: 'Model',
+              helperText: _modelHelperText(),
+              border: const OutlineInputBorder(),
+            ),
           ),
-        ),
         const Divider(height: 32),
         Text('Photo intake', style: theme.textTheme.titleMedium),
         SwitchListTile(

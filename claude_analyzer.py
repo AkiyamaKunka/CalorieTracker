@@ -101,10 +101,10 @@ def _dispatch_mode() -> str:
     return "file" if raw == "file" else "stream"
 
 
-def _build_prompt(image_path: str) -> str:
+def _build_prompt(image_path: str, prompt: Optional[str] = None) -> str:
     return (
         f"Read the image file at {image_path} and analyze it.\n\n"
-        f"{FOOD_DETECTION_PROMPT}"
+        f"{prompt or FOOD_DETECTION_PROMPT}"
     )
 
 
@@ -141,7 +141,7 @@ def _cli_env() -> Dict[str, str]:
     return env
 
 
-def _stream_stdin(image_bytes: bytes) -> str:
+def _stream_stdin(image_bytes: bytes, prompt: Optional[str] = None) -> str:
     """One stream-json user message: the analysis prompt plus the image as a
     base64 content block. Callers pass already-normalized JPEG bytes (the
     single-decode photo pipeline), hence the fixed image/jpeg media type."""
@@ -152,7 +152,8 @@ def _stream_stdin(image_bytes: bytes) -> str:
             "content": [
                 {
                     "type": "text",
-                    "text": f"Analyze the attached image.\n\n{FOOD_DETECTION_PROMPT}",
+                    "text": "Analyze the attached image.\n\n"
+                            f"{prompt or FOOD_DETECTION_PROMPT}",
                 },
                 {
                     "type": "image",
@@ -239,7 +240,8 @@ def _finish_analysis(envelope: Dict, result_text: str, start: float) -> Optional
 
 
 def _attempt_stream(
-    cli: str, image_bytes: bytes, env: Dict[str, str], start: float
+    cli: str, image_bytes: bytes, env: Dict[str, str], start: float,
+    prompt: Optional[str] = None,
 ) -> Tuple[Optional[Dict], bool]:
     """Single-turn dispatch: image on stdin, no temp file, no tool turns.
 
@@ -262,7 +264,7 @@ def _attempt_stream(
     try:
         proc = subprocess.run(
             cmd,
-            input=_stream_stdin(image_bytes),
+            input=_stream_stdin(image_bytes, prompt),
             capture_output=True,
             text=True,
             timeout=_timeout_seconds(),
@@ -289,7 +291,8 @@ def _attempt_stream(
 
 
 def _attempt_file(
-    cli: str, image_bytes: bytes, env: Dict[str, str], start: float
+    cli: str, image_bytes: bytes, env: Dict[str, str], start: float,
+    prompt: Optional[str] = None,
 ) -> Optional[Dict]:
     """Two-turn dispatch: temp image file + a Read-tool prompt. The
     compatibility fallback for CLIs without stream-json support, and the
@@ -305,7 +308,7 @@ def _attempt_file(
             tmp.write(image_bytes)
 
         cmd = [
-            cli, "-p", _build_prompt(tmp_path),
+            cli, "-p", _build_prompt(tmp_path, prompt),
             "--output-format", "json",
             "--allowedTools", "Read",
         ]
@@ -346,8 +349,76 @@ def _attempt_file(
                 pass
 
 
-def analyze_food_photo(image_bytes: bytes) -> Optional[Dict]:
-    """Analyze a food photo via the Claude Code CLI; None means 'use Gemini'."""
+def analyze_text_prompt(prompt: str) -> Optional[Dict]:
+    """Run an arbitrary JSON-answering prompt through the CLI (subscription).
+
+    Used by the app-facing /api/text_intent endpoint so the phone's NL
+    corrections cost no API money either. Same discipline as the photo path:
+    single turn, no tools, serialized by _CLI_LOCK, and a contended CLI
+    returns None (caller decides — the app falls back to its own provider)
+    rather than queueing behind a 120 s photo run.
+    """
+    if not is_configured():
+        return None
+    cli = _cli_path()
+    if cli is None or not (prompt or "").strip():
+        return None
+    if not _CLI_LOCK.acquire(blocking=False):
+        log.info("Claude CLI busy — text intent declined.")
+        return None
+    start = time.time()
+    try:
+        cmd = [cli, "-p", "--output-format", "json", "--tools", ""]
+        _append_model_and_extra_flags(cmd)
+        proc = subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=_timeout_seconds(),
+            env=_cli_env(),
+        )
+        if proc.returncode != 0:
+            _log_cli_exit(proc)
+            return None
+        try:
+            envelope = json.loads(proc.stdout or "{}")
+        except ValueError:
+            log.warning("Claude CLI text output was not JSON.")
+            return None
+        text = _result_text(envelope)
+        if text is None:
+            log.warning("Claude CLI text envelope was unusable.")
+            return None
+        parsed = parse_ai_json(text)
+        if not isinstance(parsed, (dict, list)):
+            log.warning("Claude text reply was not a JSON object/array.")
+            return None
+        log.info(
+            "Claude text intent ok in %.1fs (turns=%s)",
+            time.time() - start,
+            envelope.get("num_turns"),
+        )
+        return {"result": parsed}
+    except subprocess.TimeoutExpired:
+        log.warning(f"Claude CLI text intent timed out after {_timeout_seconds()}s.")
+        return None
+    except Exception as e:
+        log.warning(f"Claude text intent failed: {type(e).__name__}: {e}")
+        return None
+    finally:
+        _CLI_LOCK.release()
+
+
+def analyze_food_photo(
+    image_bytes: bytes, prompt: Optional[str] = None
+) -> Optional[Dict]:
+    """Analyze a food photo via the Claude Code CLI; None means 'use Gemini'.
+
+    [prompt] overrides the built-in FOOD_DETECTION_PROMPT — the mobile app
+    sends its own copy (same shared/ source) WITH the user's dietary-profile
+    appendix, which the server has no other way to know about.
+    """
     if not is_configured():
         return None
     cli = _cli_path()
@@ -367,13 +438,14 @@ def analyze_food_photo(image_bytes: bytes) -> Optional[Dict]:
     try:
         env = _cli_env()
         if _dispatch_mode() == "stream":
-            analysis, retry_via_file = _attempt_stream(cli, image_bytes, env, start)
+            analysis, retry_via_file = _attempt_stream(
+                cli, image_bytes, env, start, prompt)
             if not retry_via_file:
                 return analysis
             log.warning(
                 "Claude stream-json dispatch failed — retrying once via the "
                 "two-turn Read-file path."
             )
-        return _attempt_file(cli, image_bytes, env, start)
+        return _attempt_file(cli, image_bytes, env, start, prompt)
     finally:
         _CLI_LOCK.release()

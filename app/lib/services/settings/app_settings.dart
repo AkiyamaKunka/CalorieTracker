@@ -37,7 +37,11 @@ class FlutterSecureKeyStore implements SecureKeyStore {
 /// AI providers the analyzer can call. Gemini is the original and default;
 /// OpenAI/Anthropic are BYO-key alternatives (also the escape hatch from
 /// Gemini's free-tier daily cap).
-enum AiProvider { gemini, openai, anthropic }
+/// `server` routes analysis through the user's OWN CalorieTracker server,
+/// which runs the Claude Code CLI under their Claude subscription — the
+/// analysis costs no API money. No credential for Anthropic ever reaches
+/// the phone: the device holds only this server's own upload key.
+enum AiProvider { gemini, openai, anthropic, server }
 
 class AppSettings extends ChangeNotifier {
   AppSettings._(this._prefs, this._keys);
@@ -49,6 +53,7 @@ class AppSettings extends ChangeNotifier {
   static const String _kApiKey = 'gemini_api_key';
   static const String _kOpenaiKey = 'openai_api_key';
   static const String _kAnthropicKey = 'anthropic_api_key';
+  static const String _kServerKey = 'server_api_key';
 
   // shared_preferences keys.
   static const String _kModel = 'settings.model';
@@ -61,6 +66,7 @@ class AppSettings extends ChangeNotifier {
   static const String _kQuotaPauseProvider = 'settings.quota_pause_provider';
   static const String _kOpenaiModel = 'settings.openai_model';
   static const String _kAnthropicModel = 'settings.anthropic_model';
+  static const String _kServerBaseUrl = 'settings.server_base_url';
 
   /// Spec §8: Gemini model default (config.py:26), from shared/.
   static const String defaultModel = SharedConstants.geminiModelDefault;
@@ -81,6 +87,8 @@ class AppSettings extends ChangeNotifier {
   String? _geminiApiKey;
   String? _openaiApiKey;
   String? _anthropicApiKey;
+  String? _serverApiKey;
+  String _serverBaseUrl = '';
   AiProvider _provider = AiProvider.gemini;
   String _openaiModel = defaultOpenaiModel;
   String _anthropicModel = defaultAnthropicModel;
@@ -102,6 +110,9 @@ class AppSettings extends ChangeNotifier {
     s._openaiApiKey = (oaKey == null || oaKey.isEmpty) ? null : oaKey;
     final anKey = (await k.read(_kAnthropicKey))?.trim();
     s._anthropicApiKey = (anKey == null || anKey.isEmpty) ? null : anKey;
+    final svKey = (await k.read(_kServerKey))?.trim();
+    s._serverApiKey = (svKey == null || svKey.isEmpty) ? null : svKey;
+    s._serverBaseUrl = (p.getString(_kServerBaseUrl) ?? '').trim();
     s._provider = AiProvider.values.firstWhere(
         (v) => v.name == (p.getString(_kProvider) ?? ''),
         orElse: () => AiProvider.gemini);
@@ -184,6 +195,10 @@ class AppSettings extends ChangeNotifier {
         AiProvider.gemini => _geminiApiKey,
         AiProvider.openai => _openaiApiKey,
         AiProvider.anthropic => _anthropicApiKey,
+        // The server path needs BOTH a URL and a key to be usable; the
+        // guards treat a missing URL as "no key configured".
+        AiProvider.server =>
+          _serverBaseUrl.isEmpty ? null : _serverApiKey,
       };
 
   /// The ACTIVE provider's model string.
@@ -191,6 +206,9 @@ class AppSettings extends ChangeNotifier {
         AiProvider.gemini => _model,
         AiProvider.openai => _openaiModel,
         AiProvider.anthropic => _anthropicModel,
+        // The server picks the model (CLAUDE_ANALYZER_MODEL on the VM);
+        // the phone deliberately has no say, so nothing is user-editable.
+        AiProvider.server => 'server (Claude subscription)',
       };
 
   Future<void> setOpenaiApiKey(String? value) =>
@@ -200,6 +218,28 @@ class AppSettings extends ChangeNotifier {
   Future<void> setAnthropicApiKey(String? value) =>
       _setProviderKey(value, _kAnthropicKey, (v) => _anthropicApiKey = v,
           () => _anthropicApiKey, AiProvider.anthropic);
+
+  /// The upload key for the user's own server (same X-API-Key the phone
+  /// watcher uses). Secure storage — never shared_preferences.
+  String? get serverApiKey => _serverApiKey;
+
+  Future<void> setServerApiKey(String? value) =>
+      _setProviderKey(value, _kServerKey, (v) => _serverApiKey = v,
+          () => _serverApiKey, AiProvider.server);
+
+  /// Base URL of the user's server, e.g. http://1.2.3.4 — trailing slashes
+  /// trimmed so path joins never double up.
+  String get serverBaseUrl => _serverBaseUrl;
+
+  Future<void> setServerBaseUrl(String value) async {
+    var v = value.trim();
+    while (v.endsWith('/')) {
+      v = v.substring(0, v.length - 1);
+    }
+    _serverBaseUrl = v;
+    await _prefs.setString(_kServerBaseUrl, v);
+    notifyListeners();
+  }
 
   Future<void> _setProviderKey(
       String? value,

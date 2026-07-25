@@ -146,6 +146,8 @@ class _AppSettingsStore implements SettingsStore {
   bool get watcherEnabled => _s.watcherEnabled;
   @override
   String get dietaryProfile => _s.dietaryProfile ?? '';
+  @override
+  String get serverBaseUrl => _s.serverBaseUrl;
 
   @override
   Future<void> update({
@@ -156,6 +158,7 @@ class _AppSettingsStore implements SettingsStore {
     String? reportTime,
     bool? watcherEnabled,
     String? dietaryProfile,
+    String? serverBaseUrl,
   }) async {
     if (provider != null) {
       await _s.setProvider(AiProvider.values
@@ -168,6 +171,7 @@ class _AppSettingsStore implements SettingsStore {
         AiProvider.gemini => _s.setGeminiApiKey(apiKey),
         AiProvider.openai => _s.setOpenaiApiKey(apiKey),
         AiProvider.anthropic => _s.setAnthropicApiKey(apiKey),
+        AiProvider.server => _s.setServerApiKey(apiKey),
       };
     }
     if (model != null) {
@@ -175,6 +179,8 @@ class _AppSettingsStore implements SettingsStore {
         AiProvider.gemini => _s.setModel(model),
         AiProvider.openai => _s.setOpenaiModel(model),
         AiProvider.anthropic => _s.setAnthropicModel(model),
+        // The server chooses its own model; the field is hidden in the UI.
+        AiProvider.server => Future<void>.value(),
       };
     }
     if (lookbackDays != null) {
@@ -194,6 +200,7 @@ class _AppSettingsStore implements SettingsStore {
       await syncBackgroundScan(_s); // register/cancel the periodic job
     }
     if (dietaryProfile != null) await _s.setDietaryProfile(dietaryProfile);
+    if (serverBaseUrl != null) await _s.setServerBaseUrl(serverBaseUrl);
   }
 }
 

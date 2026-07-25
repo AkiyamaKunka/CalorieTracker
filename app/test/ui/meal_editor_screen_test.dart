@@ -45,7 +45,7 @@ void useTallSurface(WidgetTester tester) {
 }
 
 void main() {
-  final clock = () => DateTime(2026, 7, 24, 19, 5);
+  DateTime clock() => DateTime(2026, 7, 24, 19, 5);
 
   testWidgets('editing totals saves through updateMealFields, keeping the id',
       (tester) async {

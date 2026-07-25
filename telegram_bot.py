@@ -16,6 +16,8 @@ Usage:
     python3 telegram_bot.py
 """
 
+import base64
+import binascii
 import io
 import ipaddress
 import json
@@ -137,6 +139,14 @@ ECHO_UPLOAD_PHOTOS = parse_boolish(os.environ.get("ECHO_UPLOAD_PHOTOS")) is not 
 BOT_SERVICE_NAME = os.environ.get("CALORIE_BOT_SERVICE_NAME", "caloriebot.service")
 RETRY_ALL_FAILED_MAX = _env_int("RETRY_ALL_FAILED_MAX", 10, 1, 50)
 MAX_API_UPLOAD_BYTES = _env_int("MAX_API_UPLOAD_BYTES", 25 * 1024 * 1024, 1024, 100 * 1024 * 1024)
+# /api/analyze_photo takes the app's ALREADY-NORMALIZED jpeg (1568px q85,
+# ~200-400 KB), so it needs nowhere near the /upload ceiling; a tighter cap
+# keeps a stray full-resolution POST from occupying the CLI lock.
+API_ANALYZE_MAX_BYTES = _env_int(
+    "API_ANALYZE_MAX_BYTES", 6 * 1024 * 1024, 1024, MAX_API_UPLOAD_BYTES)
+# The app's text-intent prompt embeds the recent-meals list; 200 KB is far
+# above the real shape and still bounds what one request can spend.
+API_TEXT_MAX_CHARS = _env_int("API_TEXT_MAX_CHARS", 200_000, 1000, 2_000_000)
 # Admission control for photo-analysis fan-out: every analysis thread pins its
 # full image bytes for its whole life, and the threads convoy on the Claude
 # CLI lock — a 10-photo album on the 1GB host is an OOM. Slots are taken
@@ -4789,6 +4799,77 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         database.update_android_heartbeat(timezone=tz)
         log.info(f"📡 Heartbeat ping received from Android Watcher (TZ: {tz or 'unchanged'})")
         return jsonify({"status": "ok"})
+
+    @app.route('/api/analyze_photo', methods=['POST'])
+    def api_analyze_photo():
+        """Analyze a photo with the Claude Code CLI and RETURN the analysis.
+
+        The mobile app's "my server (Claude subscription)" provider calls
+        this: the CLI runs under the owner's Claude subscription on this VM,
+        so phone analyses cost no API money. Unlike /upload this endpoint is
+        PURE — no meal row, no ledger entry, no Telegram card: the app owns
+        its own database and decides what to keep.
+        """
+        if not _authorized_api_request():
+            return jsonify({"error": "Unauthorized"}), 401
+        prompt = None
+        if request.is_json:
+            # The app's shape: {image_b64, prompt}. The prompt travels with
+            # the request so the phone's dietary-profile appendix applies —
+            # the server's own copy of the shared prompt lacks it.
+            payload = request.get_json(silent=True) or {}
+            raw = payload.get("image_b64")
+            if not isinstance(raw, str) or not raw.strip():
+                return jsonify({"error": "no_image"}), 400
+            try:
+                data = base64.b64decode(raw, validate=True)
+            except (binascii.Error, ValueError):
+                return jsonify({"error": "bad_image_encoding"}), 400
+            candidate = payload.get("prompt")
+            if isinstance(candidate, str) and candidate.strip():
+                if len(candidate) > API_TEXT_MAX_CHARS:
+                    return jsonify({"error": "prompt_too_large"}), 413
+                prompt = candidate
+        elif 'photo' in request.files:
+            data = request.files['photo'].read()
+        else:
+            data = request.get_data(cache=False) or b""
+        if not data:
+            return jsonify({"error": "no_image"}), 400
+        if len(data) > API_ANALYZE_MAX_BYTES:
+            return jsonify({"error": "image_too_large"}), 413
+        if not claude_analyzer.is_configured():
+            return jsonify({"error": "claude_unavailable",
+                            "reason": "analyzer not configured"}), 503
+        analysis = claude_analyzer.analyze_food_photo(data, prompt)
+        if not analysis:
+            # Busy CLI (another photo owns it), timeout, or a junk reply.
+            # 503 tells the app "transient" so the photo stays eligible.
+            return jsonify({"error": "claude_unavailable"}), 503
+        return jsonify({"ok": True, "analysis": analysis,
+                        "analyzed_by": "claude"})
+
+    @app.route('/api/text_intent', methods=['POST'])
+    def api_text_intent():
+        """Run the app's natural-language prompt through the CLI and return
+        the model's JSON. Same subscription rationale as /api/analyze_photo;
+        the app keeps its own executor semantics (this only supplies JSON)."""
+        if not _authorized_api_request():
+            return jsonify({"error": "Unauthorized"}), 401
+        payload = request.get_json(silent=True) or {}
+        prompt = payload.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            return jsonify({"error": "no_prompt"}), 400
+        if len(prompt) > API_TEXT_MAX_CHARS:
+            return jsonify({"error": "prompt_too_large"}), 413
+        if not claude_analyzer.is_configured():
+            return jsonify({"error": "claude_unavailable",
+                            "reason": "analyzer not configured"}), 503
+        out = claude_analyzer.analyze_text_prompt(prompt)
+        if not out:
+            return jsonify({"error": "claude_unavailable"}), 503
+        return jsonify({"ok": True, "result": out["result"],
+                        "analyzed_by": "claude"})
 
     @app.route('/reconcile', methods=['POST'])
     def reconcile():
