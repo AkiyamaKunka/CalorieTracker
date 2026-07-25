@@ -82,6 +82,10 @@ class UiServices {
   /// Library access for coverage thumbnails; null in tests.
   final PhotoLibrary? photoLibrary;
 
+  /// Server-provider Claude OAuth re-connect; null hides the button.
+  final Future<({String? url, String? error})> Function()? startClaudeAuth;
+  final Future<String?> Function(String code)? completeClaudeAuth;
+
   const UiServices({
     required this.dao,
     required this.analyzer,
@@ -95,5 +99,7 @@ class UiServices {
     this.coverage,
     this.processPhoto,
     this.photoLibrary,
+    this.startClaudeAuth,
+    this.completeClaudeAuth,
   });
 }

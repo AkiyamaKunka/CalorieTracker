@@ -12,7 +12,8 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../core/contracts.dart';
 import '../data/meals_dao_impl.dart';
-import '../services/analyzer/provider_analyzers.dart';
+import '../services/analyzer/provider_analyzers.dart'
+    show ServerAnalyzer, createMultiProviderAnalyzer;
 import '../services/nl/executor.dart';
 import '../services/photo/coverage.dart';
 import '../services/photo/photo_hash.dart' show originalBytesMd5;
@@ -50,6 +51,10 @@ class AppServices {
     // before services start (spec §2.3 single-process simplification).
     await dao.reclaimStaleProcessing();
     final analyzer = createMultiProviderAnalyzer(settings);
+    // A dedicated ServerAnalyzer instance for the OAuth re-connect calls:
+    // they exist regardless of the currently selected provider (the user
+    // may re-connect Claude while temporarily on Gemini).
+    final serverAnalyzer = ServerAnalyzer(settings);
     final executor = createExecutor(dao, analyzer, settings);
     // The photo module reads lookbackDays through the live settings object,
     // so slider edits apply to the next scan without rewiring (spec §6.4).
@@ -106,6 +111,8 @@ class AppServices {
       // enqueue() chains onto the tail; process() would race it.
       processPhoto: pipeline.enqueue,
       photoLibrary: photoLibrary,
+      startClaudeAuth: serverAnalyzer.startClaudeAuth,
+      completeClaudeAuth: serverAnalyzer.completeClaudeAuth,
     );
     pipeline.bind(photoIntake); // automated watch (deliberate=false)
     pipeline.bindStream(shareIntake.photos()); // share sheet (deliberate)

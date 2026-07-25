@@ -53,6 +53,7 @@ except ImportError:
     pass
 
 import claude_analyzer
+import claude_auth
 import database
 import fitness_plan
 import nutrition
@@ -4831,6 +4832,49 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         if not _authorized_api_request():
             return jsonify({"error": "Unauthorized"}), 401
         return jsonify({"ok": True, "analyzer": claude_analyzer.status_label()})
+
+    @app.route('/api/claude_auth/start', methods=['POST'])
+    def api_claude_auth_start():
+        """Begin the phone-driven OAuth re-connect: spawn the CLI's own
+        setup-token flow and hand back Anthropic's OFFICIAL authorize URL
+        for the phone's browser. The PKCE verifier stays inside the CLI
+        process on this machine; the token this flow mints authorizes the
+        genuine Claude Code client here — nothing is impersonated and no
+        credential ever travels to the phone."""
+        if not _authorized_api_request():
+            return jsonify({"error": "Unauthorized"}), 401
+        cli = claude_analyzer._cli_path()
+        if cli is None:
+            return jsonify({"error": "claude_cli_missing"}), 503
+        result = claude_auth.start_session(cli, claude_analyzer._cli_env())
+        if "error" in result:
+            return jsonify({"error": "start_failed",
+                            "reason": result["error"]}), 502
+        return jsonify({"ok": True, "url": result["url"],
+                        "expires_in": claude_auth.SESSION_TTL_SECONDS})
+
+    @app.route('/api/claude_auth/complete', methods=['POST'])
+    def api_claude_auth_complete():
+        if not _authorized_api_request():
+            return jsonify({"error": "Unauthorized"}), 401
+        payload = request.get_json(silent=True) or {}
+        code = payload.get("code")
+        if not isinstance(code, str) or not code.strip():
+            return jsonify({"error": "no_code"}), 400
+        result = claude_auth.complete_session(
+            code, claude_auth.apply_token_to_env)
+        if "error" in result:
+            return jsonify({"error": "complete_failed",
+                            "reason": result["error"]}), 502
+        return jsonify({"ok": True,
+                        "analyzer": claude_analyzer.status_label()})
+
+    @app.route('/api/claude_auth/cancel', methods=['POST'])
+    def api_claude_auth_cancel():
+        if not _authorized_api_request():
+            return jsonify({"error": "Unauthorized"}), 401
+        return jsonify({"ok": True,
+                        "cancelled": claude_auth.cancel_session()})
 
     @app.route('/api/analyze_photo', methods=['POST'])
     def api_analyze_photo():

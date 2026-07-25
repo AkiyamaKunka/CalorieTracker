@@ -14,6 +14,7 @@ import 'fakes.dart';
 Widget _wrap(Widget child) => MaterialApp(home: Scaffold(body: child));
 
 void main() {
+  connectClaudeTests();
   testWidgets('validate key shows loading then success', (tester) async {
     final analyzer = FakeAnalyzer();
     final completer = Completer<String?>();
@@ -103,5 +104,112 @@ void main() {
         find.text(
             'Photo library permission is required for automatic intake.'),
         findsOneWidget);
+  });
+}
+
+// ── Claude OAuth re-connect flow (server provider) ──────────────────
+
+Widget _serverWrap({
+  required FakeSettings settings,
+  required Future<({String? url, String? error})> Function() start,
+  required Future<String?> Function(String) complete,
+  required Future<bool> Function(Uri) openUrl,
+}) =>
+    MaterialApp(
+        home: Scaffold(
+            body: SettingsScreen(
+      settings: settings,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      requestPhotoPermission: () async => true,
+      startClaudeAuth: start,
+      completeClaudeAuth: complete,
+      openUrl: openUrl,
+    )));
+
+void connectClaudeTests() {
+  testWidgets('connect: opens the OFFICIAL url, collects code, completes',
+      (tester) async {
+    final settings = FakeSettings()..provider = 'server';
+    final opened = <Uri>[];
+    final completed = <String>[];
+    await tester.pumpWidget(_serverWrap(
+      settings: settings,
+      start: () async =>
+          (url: 'https://claude.ai/oauth/authorize?code=true', error: null),
+      complete: (code) async {
+        completed.add(code);
+        return null;
+      },
+      openUrl: (uri) async {
+        opened.add(uri);
+        return true;
+      },
+    ));
+
+    await tester.tap(find.byKey(const Key('connectClaudeButton')));
+    // Fixed pumps: the busy spinner animates while the dialog is up, so
+    // pumpAndSettle would wait forever.
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump(const Duration(milliseconds: 300));
+    // RFC 8252: the system browser got Anthropic's own page.
+    expect(opened.single.host, 'claude.ai');
+    expect(find.text('Finish connecting Claude'), findsOneWidget);
+
+    await tester.enterText(
+        find.byKey(const Key('claudeAuthCodeField')), ' abc#state ');
+    await tester.tap(find.byKey(const Key('claudeAuthSubmit')));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(completed.single, 'abc#state'); // trimmed
+    expect(find.textContaining('Claude connected'), findsOneWidget);
+  });
+
+  testWidgets('connect: start failure surfaces the reason, no dialog',
+      (tester) async {
+    final settings = FakeSettings()..provider = 'server';
+    await tester.pumpWidget(_serverWrap(
+      settings: settings,
+      start: () async => (url: null, error: 'the CLI did not produce a URL'),
+      complete: (_) async => fail('must not be called'),
+      openUrl: (_) async => fail('must not be called'),
+    ));
+    await tester.tap(find.byKey(const Key('connectClaudeButton')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('did not produce'), findsOneWidget);
+    expect(find.text('Finish connecting Claude'), findsNothing);
+  });
+
+  testWidgets('connect: cancelling the dialog completes nothing',
+      (tester) async {
+    final settings = FakeSettings()..provider = 'server';
+    var completions = 0;
+    await tester.pumpWidget(_serverWrap(
+      settings: settings,
+      start: () async => (url: 'https://claude.ai/oauth/x', error: null),
+      complete: (_) async {
+        completions++;
+        return null;
+      },
+      openUrl: (_) async => true,
+    ));
+    await tester.tap(find.byKey(const Key('connectClaudeButton')));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('Cancel'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(completions, 0);
+  });
+
+  testWidgets('button hidden off the server provider and without wiring',
+      (tester) async {
+    final settings = FakeSettings(); // gemini
+    await tester.pumpWidget(_serverWrap(
+      settings: settings,
+      start: () async => (url: null, error: null),
+      complete: (_) async => null,
+      openUrl: (_) async => true,
+    ));
+    expect(find.byKey(const Key('connectClaudeButton')), findsNothing);
   });
 }

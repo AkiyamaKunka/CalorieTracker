@@ -212,6 +212,59 @@ void main() {
     expect(analyzer.deadline.inSeconds, greaterThanOrEqualTo(240));
   });
 
+  test('startClaudeAuth returns the official URL; completes with null on 200',
+      () async {
+    final s = await serverSettings();
+    final calls = <http.Request>[];
+    final analyzer = ServerAnalyzer(s, client: MockClient((req) async {
+      calls.add(req);
+      if (req.url.path == '/api/claude_auth/start') {
+        return http.Response(
+            jsonEncode({
+              'ok': true,
+              'url': 'https://claude.ai/oauth/authorize?code=true&x=1',
+            }),
+            200);
+      }
+      return http.Response(jsonEncode({'ok': true}), 200);
+    }));
+
+    final started = await analyzer.startClaudeAuth();
+    expect(started.error, isNull);
+    expect(started.url, startsWith('https://claude.ai/oauth/authorize'));
+    expect(calls.single.headers['X-API-Key'], 'upload-key');
+
+    expect(await analyzer.completeClaudeAuth('code#state'), isNull);
+    expect(jsonDecode(calls.last.body)['code'], 'code#state');
+    expect(calls.last.url.path, '/api/claude_auth/complete');
+  });
+
+  test('auth failures surface the server reason, never a crash', () async {
+    final s = await serverSettings();
+    final analyzer = ServerAnalyzer(s, client: MockClient((req) async {
+      // charset header matters: Flask sends UTF-8, and http.Response's
+      // default (latin-1) cannot encode the reason's em dash.
+      return http.Response(
+          jsonEncode({'error': 'complete_failed',
+                      'reason': 'the sign-in expired — start again'}),
+          502,
+          headers: {'content-type': 'application/json; charset=utf-8'});
+    }));
+    final started = await analyzer.startClaudeAuth();
+    expect(started.url, isNull);
+    expect(started.error, contains('expired'));
+    expect(await analyzer.completeClaudeAuth('x'), contains('expired'));
+  });
+
+  test('startClaudeAuth refuses without an address/key', () async {
+    final s = await serverSettings(url: null);
+    final analyzer = ServerAnalyzer(s, client: MockClient((_) async {
+      fail('must not call the network unconfigured');
+    }));
+    final started = await analyzer.startClaudeAuth();
+    expect(started.error, contains('address'));
+  });
+
   test('MultiProviderAnalyzer routes to the server when selected', () async {
     final s = await serverSettings();
     final paths = <String>[];

@@ -7,6 +7,7 @@ import 'dart:async' show unawaited;
 
 import 'package:flutter/material.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart' as launcher;
 
 import '../../core/contracts.dart';
 import '../../services/photo/coverage.dart';
@@ -24,6 +25,12 @@ class SettingsScreen extends StatefulWidget {
   final Future<bool> Function() requestPhotoPermission;
   final PhotoIntake? photoIntake; // started/stopped on watcher toggle
 
+  /// Claude OAuth re-connect (server provider). Nulls in tests hide the
+  /// button; [openUrl] is injectable so widget tests need no url_launcher.
+  final Future<({String? url, String? error})> Function()? startClaudeAuth;
+  final Future<String?> Function(String code)? completeClaudeAuth;
+  final Future<bool> Function(Uri url)? openUrl;
+
   /// Coverage-audit pieces; all three null in tests → the tile is hidden.
   final CoverageAuditor? coverage;
   final Future<PhotoOutcome> Function(IntakePhoto photo)? processPhoto;
@@ -39,6 +46,9 @@ class SettingsScreen extends StatefulWidget {
     this.coverage,
     this.processPhoto,
     this.photoLibrary,
+    this.startClaudeAuth,
+    this.completeClaudeAuth,
+    this.openUrl,
   });
 
   @override
@@ -183,6 +193,84 @@ class _SettingsScreenState extends State<SettingsScreen> {
       };
 
   bool get _isServerProvider => widget.settings.provider == 'server';
+  bool _authBusy = false;
+
+  /// The phone half of the server's Claude OAuth re-connect: fetch the
+  /// OFFICIAL Anthropic authorize URL from our server, open it in the
+  /// system browser (RFC 8252: never an in-app login form), then collect
+  /// the pasted code and hand it back. No credential touches this device.
+  Future<void> _connectClaude() async {
+    final start = widget.startClaudeAuth;
+    final complete = widget.completeClaudeAuth;
+    if (start == null || complete == null || _authBusy) return;
+    setState(() => _authBusy = true);
+    try {
+      final started = await start();
+      if (!mounted) return;
+      if (started.url == null) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(started.error ?? 'Could not start the sign-in.')));
+        return;
+      }
+      final open = widget.openUrl ??
+          (uri) => launcher.launchUrl(uri,
+              mode: launcher.LaunchMode.externalApplication);
+      final opened = await open(Uri.parse(started.url!));
+      if (!mounted) return;
+      if (!opened) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Could not open the browser.')));
+        return;
+      }
+      final code = await showDialog<String>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) {
+          final ctrl = TextEditingController();
+          return AlertDialog(
+            title: const Text('Finish connecting Claude'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                    'Sign in on the Anthropic page that just opened. It '
+                    'will show you a code — paste it here.'),
+                const SizedBox(height: 12),
+                TextField(
+                  key: const Key('claudeAuthCodeField'),
+                  controller: ctrl,
+                  autocorrect: false,
+                  decoration: const InputDecoration(
+                    labelText: 'Authorization code',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(null),
+                  child: const Text('Cancel')),
+              FilledButton(
+                key: const Key('claudeAuthSubmit'),
+                onPressed: () => Navigator.of(ctx).pop(ctrl.text.trim()),
+                child: const Text('Connect'),
+              ),
+            ],
+          );
+        },
+      );
+      if (!mounted) return;
+      if (code == null || code.isEmpty) return; // user cancelled
+      final error = await complete(code);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(error ??
+              'Claude connected — analyses run on your subscription.')));
+    } finally {
+      if (mounted) setState(() => _authBusy = false);
+    }
+  }
 
   String _modelHelperText() => switch (widget.settings.provider) {
         'openai' => 'Default: gpt-4o-mini',
@@ -318,12 +406,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
         const SizedBox(height: 8),
         Align(
           alignment: Alignment.centerLeft,
-          child: FilledButton.tonal(
-            key: const Key('validateKeyButton'),
-            onPressed: _keyState == KeyValidationState.validating
-                ? null
-                : _validateKey,
-            child: Text(_isServerProvider ? 'Test connection' : 'Validate key'),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              FilledButton.tonal(
+                key: const Key('validateKeyButton'),
+                onPressed: _keyState == KeyValidationState.validating
+                    ? null
+                    : _validateKey,
+                child: Text(
+                    _isServerProvider ? 'Test connection' : 'Validate key'),
+              ),
+              if (_isServerProvider &&
+                  widget.startClaudeAuth != null) ...[
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  key: const Key('connectClaudeButton'),
+                  onPressed: _authBusy ? null : _connectClaude,
+                  icon: _authBusy
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.link, size: 16),
+                  label: const Text('Connect Claude'),
+                ),
+              ],
+            ],
           ),
         ),
         const SizedBox(height: 12),

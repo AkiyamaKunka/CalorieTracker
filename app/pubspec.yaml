@@ -48,6 +48,7 @@ dependencies:
   share_plus: ^13.2.1
   intl: ^0.20.3
   permission_handler: ^12.0.3
+  url_launcher: ^6.3.2
 
 dev_dependencies:
   flutter_test:

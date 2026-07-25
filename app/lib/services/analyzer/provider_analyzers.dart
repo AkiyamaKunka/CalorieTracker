@@ -446,6 +446,57 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
     return jsonEncode(payload);
   }
 
+  /// Begin the server's Claude OAuth re-connect (the server spawns its own
+  /// `claude setup-token`): returns the OFFICIAL Anthropic authorize URL
+  /// for the system browser, or an error message. No credential is
+  /// involved on this side beyond the server upload key.
+  Future<({String? url, String? error})> startClaudeAuth() async {
+    final base = settings.serverBaseUrl;
+    final key = (settings.serverApiKey ?? '').trim();
+    if (base.isEmpty || key.isEmpty) {
+      return (url: null, error: 'Set the server address and key first.');
+    }
+    try {
+      final req = http.Request('POST', _uri('/api/claude_auth/start'))
+        ..headers['content-type'] = 'application/json'
+        ..headers['X-API-Key'] = key
+        ..body = '{}';
+      final resp = await http.Response.fromStream(
+          await client.send(req).timeout(deadline));
+      final body = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (resp.statusCode == 200 && body['url'] is String) {
+        return (url: body['url'] as String, error: null);
+      }
+      return (
+        url: null,
+        error: (body['reason'] ?? 'Server answered HTTP ${resp.statusCode}.')
+            .toString()
+      );
+    } catch (e) {
+      return (url: null, error: 'Could not reach the server.');
+    }
+  }
+
+  /// Hand the pasted authorization code to the waiting server flow.
+  /// Null = connected; otherwise a user-facing error.
+  Future<String?> completeClaudeAuth(String code) async {
+    final key = (settings.serverApiKey ?? '').trim();
+    try {
+      final req = http.Request('POST', _uri('/api/claude_auth/complete'))
+        ..headers['content-type'] = 'application/json'
+        ..headers['X-API-Key'] = key
+        ..body = jsonEncode({'code': code.trim()});
+      final resp = await http.Response.fromStream(
+          await client.send(req).timeout(deadline));
+      if (resp.statusCode == 200) return null;
+      final body = jsonDecode(resp.body) as Map<String, dynamic>;
+      return (body['reason'] ?? 'Server answered HTTP ${resp.statusCode}.')
+          .toString();
+    } catch (e) {
+      return 'Could not reach the server.';
+    }
+  }
+
   /// /api/auth_check proves "address reachable + key accepted" with no side
   /// effects and no CLI run. Deliberately NOT /ping: that is the Termux
   /// watcher's liveness channel, and stamping it from here would forge
