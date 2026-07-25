@@ -6,6 +6,8 @@ library;
 
 import 'dart:async' show unawaited;
 
+import 'package:flutter/foundation.dart' show compute;
+
 import 'package:permission_handler/permission_handler.dart';
 
 import '../core/contracts.dart';
@@ -94,9 +96,15 @@ class AppServices {
       requestPhotoPermission: _requestPhotosPermission,
       thumbs: MealThumbResolver(dao: dao, library: photoLibrary),
       coverage: CoverageAuditor(
-          library: photoLibrary, dao: dao, hasher: originalBytesMd5),
-      // The audit's log/retry actions share the pipeline's global FIFO.
-      processPhoto: pipeline.process,
+          library: photoLibrary,
+          dao: dao,
+          // compute(): the audit hashes up to 2000 originals back-to-back —
+          // synchronous md5 on the UI isolate would freeze scrolling for
+          // the whole sweep.
+          hasher: (bytes) => compute(originalBytesMd5, bytes)),
+      // The audit's log/retry actions share the pipeline's global FIFO —
+      // enqueue() chains onto the tail; process() would race it.
+      processPhoto: pipeline.enqueue,
       photoLibrary: photoLibrary,
     );
     pipeline.bind(photoIntake); // automated watch (deliberate=false)

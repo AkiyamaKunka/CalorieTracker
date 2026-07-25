@@ -416,11 +416,22 @@ ON CONFLICT(chat_id, date) DO UPDATE SET
   @override
   Future<void> saveMealThumb(int mealId, Uint8List jpeg) async {
     if (jpeg.isEmpty) return;
-    await _db.insert(
-      'meal_thumbs',
-      {'meal_id': mealId, 'jpeg': jpeg},
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+    await _db.transaction((txn) async {
+      // The thumb is written AFTER the meal insert, outside that
+      // transaction — a user deleting the meal in between must not leave
+      // an immortal orphan blob (nothing else ever cleans this table).
+      final exists = await txn.query('meals',
+          columns: ['id'],
+          where: 'id = ? AND chat_id = ?',
+          whereArgs: [mealId, localChatId],
+          limit: 1);
+      if (exists.isEmpty) return;
+      await txn.insert(
+        'meal_thumbs',
+        {'meal_id': mealId, 'jpeg': jpeg},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    });
   }
 
   @override

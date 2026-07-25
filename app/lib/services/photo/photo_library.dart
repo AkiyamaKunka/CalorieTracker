@@ -34,6 +34,15 @@ abstract class PhotoLibrary {
   /// coverage audit's missing-photo list.
   Future<Uint8List?> thumbnailByAssetId(String assetId, {int size = 160});
 
+  /// ORIGINAL bytes for a known asset id (md5-identity grade, §6.2);
+  /// null when gone/unreadable. Direct fetch — no window re-query.
+  Future<Uint8List?> originBytesByAssetId(String assetId);
+
+  /// True when the OS granted FULL library access; false for iOS limited /
+  /// Android selected-photos mode, where scans see only a subset and no
+  /// coverage promise can be made for the rest.
+  Future<bool> hasFullAccess();
+
   /// Images whose createDate is at/after [cutoff] (spec §6.4 backfill
   /// window). Order unspecified — callers sort for emission.
   Future<List<LibraryAsset>> imagesCreatedAfter(DateTime cutoff,
@@ -76,6 +85,30 @@ class PhotoManagerLibrary implements PhotoLibrary {
       return await entity.thumbnailDataWithSize(ThumbnailSize.square(size));
     } catch (_) {
       return null; // deleted asset / revoked permission: display-degrade
+    }
+  }
+
+  @override
+  Future<Uint8List?> originBytesByAssetId(String assetId) async {
+    if (assetId.isEmpty) return null;
+    try {
+      final entity = await AssetEntity.fromId(assetId);
+      return await entity?.originBytes;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
+  Future<bool> hasFullAccess() async {
+    try {
+      final state = await PhotoManager.getPermissionState(
+          requestOption: const PermissionRequestOption());
+      return state == PermissionState.authorized;
+    } catch (_) {
+      // Unknown → assume full: the caveat line is advisory, and a false
+      // "limited" would permanently deny the green summary.
+      return true;
     }
   }
 

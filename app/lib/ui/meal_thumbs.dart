@@ -31,9 +31,25 @@ class MealThumbResolver {
 
   static const int _cacheCap = 200; // ~200 × ~10 KB ≈ 2 MB ceiling
   final Map<int, Uint8List?> _cache = {};
+  // In-flight dedup: a list build calls thumbFor for every visible row at
+  // once; without this, each rebuild before resolve re-hits the DB/library.
+  final Map<int, Future<Uint8List?>> _inFlight = {};
 
-  Future<Uint8List?> thumbFor(Meal meal) async {
-    if (_cache.containsKey(meal.id)) return _cache[meal.id];
+  Future<Uint8List?> thumbFor(Meal meal) {
+    if (_cache.containsKey(meal.id)) {
+      return Future.value(_cache[meal.id]);
+    }
+    return _inFlight.putIfAbsent(
+        meal.id,
+        // Braces matter: Map.remove RETURNS the removed value — the future
+        // itself — and whenComplete awaits a returned future, so the arrow
+        // form makes the future await itself (verified deadlock).
+        () => _resolve(meal).whenComplete(() {
+              _inFlight.remove(meal.id);
+            }));
+  }
+
+  Future<Uint8List?> _resolve(Meal meal) async {
     var bytes = await _dao.mealThumb(meal.id);
     if (bytes == null &&
         meal.fileId.isNotEmpty &&
@@ -55,8 +71,12 @@ class MealThumbResolver {
     return _cache[meal.id] = bytes;
   }
 
-  /// Editor/day screens call this after an edit changed nothing visual —
-  /// but deletes go through here so a re-used row id can't show the old
-  /// meal's photo.
-  void evict(int mealId) => _cache.remove(mealId);
+  /// Called by the Today/day screens when returning from the editor: the
+  /// meal may have been deleted (SQLite can reuse the rowid later) or its
+  /// photo association changed, and a session-cached negative result would
+  /// otherwise stick until restart.
+  void evict(int mealId) {
+    _cache.remove(mealId);
+    _inFlight.remove(mealId);
+  }
 }

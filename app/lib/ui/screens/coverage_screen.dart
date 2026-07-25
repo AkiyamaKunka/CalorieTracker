@@ -47,7 +47,14 @@ class _CoverageScreenState extends State<CoverageScreen> {
   int _progressDone = 0;
   int _progressTotal = 0;
   int _actedOn = 0;
-  final Map<String, Uint8List?> _thumbCache = {};
+  // FUTURE-cached: dedupes in-flight fetches across rebuilds (the bytes
+  // cache alternative re-fired a platform call per rebuild until resolve).
+  final Map<String, Future<Uint8List?>> _thumbCache = {};
+
+  /// Tiles rendered per section; an audit can return hundreds of missing
+  /// photos and building them all eagerly fires that many thumbnail
+  /// fetches in one frame.
+  static const int _maxTiles = 60;
 
   Future<void> _runAudit() async {
     final granted = await widget.requestPhotoPermission();
@@ -121,11 +128,10 @@ class _CoverageScreenState extends State<CoverageScreen> {
     await _runAudit();
   }
 
-  Future<Uint8List?> _thumbFor(CoverageItem item) async {
-    if (_thumbCache.containsKey(item.assetId)) return _thumbCache[item.assetId];
-    final bytes = await widget.library?.thumbnailByAssetId(item.assetId);
-    return _thumbCache[item.assetId] = bytes;
-  }
+  Future<Uint8List?> _thumbFor(CoverageItem item) =>
+      _thumbCache.putIfAbsent(item.assetId,
+          () => widget.library?.thumbnailByAssetId(item.assetId) ??
+              Future.value(null));
 
   @override
   Widget build(BuildContext context) {
@@ -212,8 +218,16 @@ class _CoverageScreenState extends State<CoverageScreen> {
                   ),
                 ],
               ),
-              for (final item in report.missing)
+              for (final item in report.missing.take(_maxTiles))
                 _PhotoTile(item: item, thumb: _thumbFor(item)),
+              if (report.missing.length > _maxTiles)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Text(
+                      '…and ${report.missing.length - _maxTiles} more — '
+                      '"Log all" still covers every one.',
+                      style: theme.textTheme.bodySmall),
+                ),
             ],
             if (report.failed.isNotEmpty) ...[
               const SizedBox(height: 16),
@@ -232,8 +246,16 @@ class _CoverageScreenState extends State<CoverageScreen> {
                   ),
                 ],
               ),
-              for (final item in report.failed)
+              for (final item in report.failed.take(_maxTiles))
                 _PhotoTile(item: item, thumb: _thumbFor(item)),
+              if (report.failed.length > _maxTiles)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Text(
+                      '…and ${report.failed.length - _maxTiles} more — '
+                      '"Retry all" still covers every one.',
+                      style: theme.textTheme.bodySmall),
+                ),
             ],
           ],
         ],
@@ -290,9 +312,22 @@ class _SummaryCard extends StatelessWidget {
                 if (report.inFlight > 0) '${report.inFlight} in progress',
                 if (report.unreadable > 0)
                     '${report.unreadable} unreadable',
+                if (report.tooLargeToAnalyze > 0)
+                    '${report.tooLargeToAnalyze} too large to analyze',
               ].join(' · '),
               style: theme.textTheme.bodySmall,
             ),
+            if (report.limitedAccess)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  'Note: the app has LIMITED photo access — only the '
+                  'selected photos can be checked. Grant full access in '
+                  'system settings for a complete answer.',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.error),
+                ),
+              ),
             if (report.truncated)
               Padding(
                 padding: const EdgeInsets.only(top: 8),

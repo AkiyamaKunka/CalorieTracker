@@ -61,6 +61,17 @@ class PhotoPipeline {
     });
   }
 
+  /// FIFO-honest single-photo entry: chains onto the same global tail the
+  /// watcher sink and share stream use, so callers (coverage Log/Retry)
+  /// QUEUE BEHIND — never race — an in-flight scan. Calling process()
+  /// directly would run a second analyzer call concurrently (free-tier RPM
+  /// 429s) and hold two originals in memory.
+  Future<PhotoOutcome> enqueue(IntakePhoto photo) {
+    final slot = _tail.then((_) => process(photo));
+    _tail = slot.then((_) {});
+    return slot;
+  }
+
   /// Also used for the share-sheet intake stream (deliberate adds, spec §6).
   void bindStream(Stream<IntakePhoto> photos) {
     _subs.add(photos.listen((p) {

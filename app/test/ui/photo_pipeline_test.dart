@@ -33,6 +33,44 @@ Map<String, dynamic> _foodAnalysis() => {
     };
 
 void main() {
+  test('enqueue() serializes with the bound-stream FIFO — never concurrent',
+      () async {
+    final dao = FakeDao();
+    var active = 0, maxActive = 0;
+    final analyzer = FakeAnalyzer()
+      ..nextPhotoOutcome = const AnalysisOutcome(
+          analysis: {'is_food': true}, isFood: true, wall: Duration.zero)
+      ..onAnalyze = () async {
+        active++;
+        if (active > maxActive) maxActive = active;
+        await Future<void>.delayed(const Duration(milliseconds: 8));
+        active--;
+      };
+    final pipeline = PhotoPipeline(dao: dao, analyzer: analyzer);
+    final stream = StreamController<IntakePhoto>();
+    pipeline.bindStream(stream.stream);
+
+    IntakePhoto photo(int n, String id) => IntakePhoto(
+        Uint8List.fromList([n]), id, 'IMG_$n.jpg', deliberate: true);
+
+    // Interleave stream photos (the watcher path) with direct enqueues
+    // (the coverage screen's Log all): the whole point of enqueue over
+    // process is that these NEVER overlap an analyzer call.
+    stream.add(photo(1, 's1'));
+    stream.add(photo(2, 's2'));
+    final e1 = pipeline.enqueue(photo(3, 'e1'));
+    stream.add(photo(4, 's3'));
+    final e2 = pipeline.enqueue(photo(5, 'e2'));
+    await Future.wait([e1, e2]);
+    await stream.close();
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+
+    expect(maxActive, 1,
+        reason: 'a second concurrent analyzer call is the free-tier RPM '
+            '429 self-inflict the FIFO exists to prevent');
+    expect(dao.meals, hasLength(5));
+  });
+
   test('a saved photo meal gets a stored thumbnail (spec §9)', () async {
     final dao = FakeDao();
     final analyzer = FakeAnalyzer()

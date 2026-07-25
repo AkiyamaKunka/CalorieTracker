@@ -78,6 +78,7 @@ class TodayScreenState extends State<TodayScreen> {
     await Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => MealEditorScreen(dao: widget.dao, meal: meal),
     ));
+    widget.thumbs?.evict(meal.id); // deleted/re-dated: cache must not lie
     if (mounted) await reload();
   }
 
@@ -150,6 +151,7 @@ class TodayScreenState extends State<TodayScreen> {
           else
             for (final meal in foodMeals)
               MealCard(
+                key: ValueKey('meal${meal.id}'),
                 meal: meal,
                 onTap: () => _editMeal(meal),
                 thumb: widget.thumbs?.thumbFor(meal),

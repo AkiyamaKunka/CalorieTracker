@@ -11,6 +11,8 @@ library;
 
 // ignore_for_file: prefer_initializing_formals
 
+import 'dart:typed_data';
+
 import '../../core/contracts.dart';
 import 'filename_dates.dart';
 import 'photo_library.dart';
@@ -46,6 +48,8 @@ class CoverageReport {
     required this.missing,
     required this.unreadable,
     required this.truncated,
+    required this.tooLargeToAnalyze,
+    required this.limitedAccess,
   });
 
   final int windowDays;
@@ -80,11 +84,27 @@ class CoverageReport {
   /// examined and the report cannot promise completeness.
   final bool truncated;
 
-  bool get fullyCovered => !truncated && missing.isEmpty && unreadable == 0;
+  /// No ledger row AND intake refuses them by the §8 25 MB byte cap: they
+  /// can never be auto-logged, and calling them "not food" (the earlier
+  /// behavior) was a lie the green summary then repeated.
+  final int tooLargeToAnalyze;
+
+  /// The OS granted only a photo SUBSET (iOS limited / Android selected
+  /// photos): the audit can only vouch for what it can see.
+  final bool limitedAccess;
+
+  bool get fullyCovered =>
+      !truncated &&
+      !limitedAccess &&
+      missing.isEmpty &&
+      unreadable == 0 &&
+      tooLargeToAnalyze == 0;
 }
 
-/// Digest function seam (production: md5 over original bytes, normalized).
-typedef PhotoHasher = String Function(List<int> bytes);
+/// Digest function seam (production: md5 over original bytes via a compute
+/// isolate — the audit hashes up to 2000 originals back-to-back, which
+/// would freeze the UI thread if done synchronously).
+typedef PhotoHasher = Future<String> Function(Uint8List bytes);
 
 class CoverageAuditor {
   CoverageAuditor({
@@ -119,12 +139,19 @@ class CoverageAuditor {
     final failed = <CoverageItem>[];
     final missing = <CoverageItem>[];
     var skipped = 0, deleted = 0, inFlight = 0, unreadable = 0, done = 0;
+    var tooLarge = 0;
 
     for (final asset in assets) {
       onProgress?.call(done++, assets.length);
       final bytes = await asset.originBytes();
       if (bytes == null || bytes.isEmpty) {
         unreadable++;
+        continue;
+      }
+      // Size gate BEFORE hashing: intake refuses these by design (§8), so
+      // spending an md5 over 25+ MB just to learn that is pure waste.
+      if (bytes.length > maxPhotoBytes) {
+        tooLarge++;
         continue;
       }
       String name;
@@ -138,15 +165,9 @@ class CoverageAuditor {
         fileName: name,
         createDate: asset.createDateTime,
       );
-      final row = await _dao.photoStatus(_hasher(bytes));
+      final row = await _dao.photoStatus(await _hasher(bytes));
       if (row == null) {
-        // Oversize photos are refused by intake by DESIGN (spec §8 25 MB
-        // cap) — report them as covered-by-policy, not as missing.
-        if (bytes.length > maxPhotoBytes) {
-          skipped++;
-        } else {
-          missing.add(item);
-        }
+        missing.add(item);
         continue;
       }
       switch (row.status) {
@@ -168,6 +189,7 @@ class CoverageAuditor {
       }
     }
     onProgress?.call(assets.length, assets.length);
+    final limited = !await _library.hasFullAccess();
     return CoverageReport(
       windowDays: days,
       scanned: assets.length,
@@ -179,33 +201,29 @@ class CoverageAuditor {
       missing: missing,
       unreadable: unreadable,
       truncated: truncated,
+      tooLargeToAnalyze: tooLarge,
+      limitedAccess: limited,
     );
   }
 
-  /// Re-fetch one audited photo as an [IntakePhoto] for processing.
-  /// [deliberate] true: the user explicitly asked to log/retry it — the
-  /// reservation may reclaim failed rows (spec §2.3 deliberate re-send).
+  /// Re-fetch one audited photo as an [IntakePhoto] for processing —
+  /// DIRECTLY by asset id (a windowed re-query capped at 2000 newest could
+  /// miss the target in a large library). [deliberate] true: the user
+  /// explicitly asked to log/retry it — the reservation may reclaim failed
+  /// rows (spec §2.3 deliberate re-send).
   Future<IntakePhoto?> loadForProcessing(CoverageItem item,
       {bool deliberate = true}) async {
-    final assets = await _library.imagesCreatedAfter(
-      item.createDate.subtract(const Duration(seconds: 1)),
-      limit: backfillQueryLimit,
-    );
-    for (final asset in assets) {
-      if (asset.id != item.assetId) continue;
-      final bytes = await asset.originBytes();
-      if (bytes == null || bytes.isEmpty || bytes.length > maxPhotoBytes) {
-        return null;
-      }
-      final capturedAt = deriveCapturedAt(
-        fileName: item.fileName,
-        assetCreateDate: asset.createDateTime,
-        now: _clock(),
-        maxAgeDays: 45,
-      );
-      return IntakePhoto(bytes, asset.id, item.fileName,
-          capturedAt: capturedAt, deliberate: deliberate);
+    final bytes = await _library.originBytesByAssetId(item.assetId);
+    if (bytes == null || bytes.isEmpty || bytes.length > maxPhotoBytes) {
+      return null; // vanished, unreadable, or refused by the §8 cap
     }
-    return null; // asset vanished between audit and action
+    final capturedAt = deriveCapturedAt(
+      fileName: item.fileName,
+      assetCreateDate: item.createDate,
+      now: _clock(),
+      maxAgeDays: 45,
+    );
+    return IntakePhoto(bytes, item.assetId, item.fileName,
+        capturedAt: capturedAt, deliberate: deliberate);
   }
 }

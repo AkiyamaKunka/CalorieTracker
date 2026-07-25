@@ -13,7 +13,7 @@ import '../ui/fakes.dart' show FakeDao;
 import 'watcher_test.dart' show FakeAsset, FakePhotoLibrary, bytesOf;
 
 /// Test hasher: hex-free but deterministic — `h<firstByte>`.
-String testHash(List<int> bytes) => 'h${bytes.first}';
+Future<String> testHash(List<int> bytes) async => 'h${bytes.first}';
 
 void main() {
   final now = DateTime(2026, 7, 26, 12, 0);
@@ -91,15 +91,29 @@ void main() {
     expect(report.fullyCovered, isFalse); // can't promise coverage
   });
 
-  test('oversize photos count as covered-by-policy (intake refuses them)',
+  test('oversize photos get their OWN honest bucket, never "not food"',
       () async {
     library.assets = [
       FakeAsset('big', 'IMG_big.jpg', DateTime(2026, 7, 26, 9),
           Uint8List(maxPhotoBytes + 1)),
     ];
     final report = await auditor.audit(lookbackDays: 2);
-    expect(report.missing, isEmpty);
-    expect(report.skippedNonFood, 1);
+    expect(report.missing, isEmpty); // intake refuses them by design (§8)
+    expect(report.skippedNonFood, 0,
+        reason: 'calling an unanalyzable photo "not food" was a lie');
+    expect(report.tooLargeToAnalyze, 1);
+    expect(report.fullyCovered, isFalse,
+        reason: 'a photo that can never be logged is not "accounted for"');
+  });
+
+  test('limited photo access denies the full-coverage claim', () async {
+    library.assets = [asset(1)];
+    dao.ledger['h1'] = IngestionStatus.saved;
+    library.fullAccess = false;
+    final report = await auditor.audit(lookbackDays: 2);
+    expect(report.limitedAccess, isTrue);
+    expect(report.fullyCovered, isFalse,
+        reason: 'the audit only saw the granted subset');
   });
 
   test('a capped window reports truncated and never claims full coverage',

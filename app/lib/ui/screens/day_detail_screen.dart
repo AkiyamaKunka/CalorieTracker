@@ -75,7 +75,12 @@ class _DayDetailScreenState extends State<DayDetailScreen> {
         now: widget.now,
       ),
     ));
-    if (saved == true) await _load();
+    if (saved == true) {
+      // The editor may have deleted the meal (SQLite can reuse a rowid
+      // later) or re-dated it; drop any cached thumb for this id.
+      if (meal != null) widget.thumbs?.evict(meal.id);
+      await _load();
+    }
   }
 
   @override
@@ -145,6 +150,11 @@ class _DayDetailScreenState extends State<DayDetailScreen> {
                           ),
                         for (final m in _meals)
                           _MealRow(
+                            // Identity key: element state must follow the
+                            // MEAL when the list shifts (a delete above
+                            // otherwise leaves this row showing its old
+                            // neighbour's resolving photo).
+                            key: ValueKey('meal${m.id}'),
                             meal: m,
                             thumb: widget.thumbs?.thumbFor(m),
                             onTap: () => _openEditor(meal: m),
@@ -163,7 +173,8 @@ class _DayDetailScreenState extends State<DayDetailScreen> {
 }
 
 class _MealRow extends StatelessWidget {
-  const _MealRow({required this.meal, required this.onTap, this.thumb});
+  const _MealRow(
+      {super.key, required this.meal, required this.onTap, this.thumb});
 
   final Meal meal;
   final VoidCallback onTap;

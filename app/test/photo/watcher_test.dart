@@ -38,10 +38,22 @@ class FakePhotoLibrary implements PhotoLibrary {
   void Function()? changeListener;
   final List<DateTime> queriedCutoffs = [];
   final Map<String, Uint8List> thumbnails = {};
+  bool fullAccess = true;
 
   @override
   Future<Uint8List?> thumbnailByAssetId(String assetId, {int size = 160}) async =>
       thumbnails[assetId];
+
+  @override
+  Future<Uint8List?> originBytesByAssetId(String assetId) async {
+    for (final a in assets) {
+      if (a.id == assetId) return a.originBytes();
+    }
+    return null;
+  }
+
+  @override
+  Future<bool> hasFullAccess() async => fullAccess;
 
   @override
   Future<bool> requestPermission() async {

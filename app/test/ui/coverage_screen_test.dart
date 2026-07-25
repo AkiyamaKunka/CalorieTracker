@@ -10,7 +10,7 @@ import 'package:flutter_test/flutter_test.dart';
 import '../photo/watcher_test.dart' show FakeAsset, FakePhotoLibrary, bytesOf;
 import 'fakes.dart';
 
-String testHash(List<int> bytes) => 'h${bytes.first}';
+Future<String> testHash(List<int> bytes) async => 'h${bytes.first}';
 
 void main() {
   late FakePhotoLibrary library;
@@ -35,7 +35,7 @@ void main() {
           processPhoto: (photo) async {
             processed.add(photo);
             // Simulate the pipeline logging it: ledger gains the hash.
-            dao.ledger[testHash(photo.bytes)] = IngestionStatus.saved;
+            dao.ledger[await testHash(photo.bytes)] = IngestionStatus.saved;
             return const PhotoOutcome(PhotoOutcomeKind.saved, 'ok');
           },
           requestPhotoPermission: () async => true,
