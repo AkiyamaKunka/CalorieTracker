@@ -37,6 +37,11 @@ class FakePhotoLibrary implements PhotoLibrary {
   int permissionRequests = 0;
   void Function()? changeListener;
   final List<DateTime> queriedCutoffs = [];
+  final Map<String, Uint8List> thumbnails = {};
+
+  @override
+  Future<Uint8List?> thumbnailByAssetId(String assetId, {int size = 160}) async =>
+      thumbnails[assetId];
 
   @override
   Future<bool> requestPermission() async {

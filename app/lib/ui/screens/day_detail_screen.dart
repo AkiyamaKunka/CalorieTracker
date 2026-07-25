@@ -3,11 +3,15 @@
 /// to add a meal by hand to THIS date.
 library;
 
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 
 import '../../core/contracts.dart';
 import '../format.dart';
+import '../meal_thumbs.dart';
 import '../widgets/macro_chart.dart';
+import '../widgets/meal_thumb.dart';
 import 'meal_editor_screen.dart';
 
 class DayDetailScreen extends StatefulWidget {
@@ -16,11 +20,15 @@ class DayDetailScreen extends StatefulWidget {
     required this.dao,
     required this.date,
     this.now,
+    this.thumbs,
   });
 
   final MealsDao dao;
   final String date; // YYYY-MM-DD
   final DateTime Function()? now;
+
+  /// Photo thumbnails for the rows; null (tests) renders placeholders.
+  final MealThumbResolver? thumbs;
 
   @override
   State<DayDetailScreen> createState() => _DayDetailScreenState();
@@ -138,6 +146,7 @@ class _DayDetailScreenState extends State<DayDetailScreen> {
                         for (final m in _meals)
                           _MealRow(
                             meal: m,
+                            thumb: widget.thumbs?.thumbFor(m),
                             onTap: () => _openEditor(meal: m),
                           ),
                       ],
@@ -154,10 +163,11 @@ class _DayDetailScreenState extends State<DayDetailScreen> {
 }
 
 class _MealRow extends StatelessWidget {
-  const _MealRow({required this.meal, required this.onTap});
+  const _MealRow({required this.meal, required this.onTap, this.thumb});
 
   final Meal meal;
   final VoidCallback onTap;
+  final Future<Uint8List?>? thumb;
 
   @override
   Widget build(BuildContext context) {
@@ -177,6 +187,9 @@ class _MealRow extends StatelessWidget {
             children: [
               Row(
                 children: [
+                  MealThumbView(
+                      thumb: thumb, isPhotoMeal: meal.imageHash.isNotEmpty),
+                  const SizedBox(width: 10),
                   Expanded(
                     child: Text(mealDescription(a),
                         style: theme.textTheme.titleSmall),

@@ -104,14 +104,21 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       body: IndexedStack(
         index: _index,
         children: [
-          TodayScreen(key: _todayKey, dao: s.dao, executor: s.executor),
-          HistoryScreen(key: _historyKey, dao: s.dao),
+          TodayScreen(
+              key: _todayKey,
+              dao: s.dao,
+              executor: s.executor,
+              thumbs: s.thumbs),
+          HistoryScreen(key: _historyKey, dao: s.dao, thumbs: s.thumbs),
           SettingsScreen(
             settings: s.settings,
             analyzer: s.analyzer,
             dao: s.dao,
             requestPhotoPermission: s.requestPhotoPermission,
             photoIntake: s.photoIntake,
+            coverage: s.coverage,
+            processPhoto: s.processPhoto,
+            photoLibrary: s.photoLibrary,
           ),
         ],
       ),

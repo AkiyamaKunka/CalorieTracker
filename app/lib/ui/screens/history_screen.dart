@@ -6,13 +6,16 @@ import 'package:flutter/material.dart';
 
 import '../../core/contracts.dart';
 import '../format.dart';
+import '../meal_thumbs.dart';
 import '../widgets/macro_chart.dart';
 import 'day_detail_screen.dart';
 
 class HistoryScreen extends StatefulWidget {
   final MealsDao dao;
   final int days;
-  const HistoryScreen({super.key, required this.dao, this.days = 30});
+  final MealThumbResolver? thumbs;
+  const HistoryScreen(
+      {super.key, required this.dao, this.days = 30, this.thumbs});
 
   @override
   State<HistoryScreen> createState() => HistoryScreenState();
@@ -60,7 +63,8 @@ class HistoryScreenState extends State<HistoryScreen> {
   /// result back through a system back-gesture.
   Future<void> _openDay(String date) async {
     await Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => DayDetailScreen(dao: widget.dao, date: date),
+      builder: (_) =>
+          DayDetailScreen(dao: widget.dao, date: date, thumbs: widget.thumbs),
     ));
     if (mounted) await reload();
   }

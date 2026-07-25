@@ -6,6 +6,7 @@
 library;
 
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:sqflite/sqflite.dart';
 
@@ -110,6 +111,9 @@ class SqfliteMealsDao implements MealsDao {
         where: 'id = ? AND chat_id = ?',
         whereArgs: [mealId, localChatId],
       );
+      // App-only thumb rides the meal row's lifecycle.
+      await txn.delete('meal_thumbs',
+          where: 'meal_id = ?', whereArgs: [mealId]);
       if (hash.isNotEmpty) {
         await txn.update(
           'photo_ingestions',
@@ -383,6 +387,51 @@ ON CONFLICT(chat_id, date) DO UPDATE SET
   }
 
   // -------------------------------------------------------------- export
+
+  @override
+  Future<({IngestionStatus status, int? mealId})?> photoStatus(
+      String imageHash) async {
+    final hash = normalizeImageHash(imageHash);
+    if (hash.isEmpty) return null;
+    final rows = await _db.query(
+      'photo_ingestions',
+      columns: ['status', 'meal_id'],
+      where: 'chat_id = ? AND image_hash = ?',
+      whereArgs: [localChatId, hash],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    final raw = (rows.first['status'] as String?) ?? '';
+    final status = IngestionStatus.values
+        .where((v) => v.name == raw)
+        .firstOrNull;
+    // An unknown status string (foreign import, future version) reads as
+    // processing: "in flight, do not touch" is the conservative bucket.
+    return (
+      status: status ?? IngestionStatus.processing,
+      mealId: rows.first['meal_id'] as int?
+    );
+  }
+
+  @override
+  Future<void> saveMealThumb(int mealId, Uint8List jpeg) async {
+    if (jpeg.isEmpty) return;
+    await _db.insert(
+      'meal_thumbs',
+      {'meal_id': mealId, 'jpeg': jpeg},
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  @override
+  Future<Uint8List?> mealThumb(int mealId) async {
+    final rows = await _db.query('meal_thumbs',
+        columns: ['jpeg'], where: 'meal_id = ?', whereArgs: [mealId], limit: 1);
+    if (rows.isEmpty) return null;
+    final blob = rows.first['jpeg'];
+    if (blob is Uint8List && blob.isNotEmpty) return blob;
+    return null;
+  }
 
   @override
   Future<String> exportJson() async {

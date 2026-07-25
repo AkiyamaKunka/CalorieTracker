@@ -6,6 +6,10 @@
 library;
 
 import '../core/contracts.dart';
+import '../services/photo/coverage.dart';
+import '../services/photo/photo_library.dart';
+import 'meal_thumbs.dart';
+import 'photo_pipeline.dart';
 
 /// The settings surface the UI needs (spec §8 knobs the user edits).
 /// di.dart adapts the concrete AppSettings onto this; tests use in-memory
@@ -63,6 +67,21 @@ class UiServices {
   final RecentPhotoPicker picker;
   final Future<bool> Function() requestPhotoPermission;
 
+  /// Meal-photo thumbnails for the list UIs; null in tests → placeholders.
+  final MealThumbResolver? thumbs;
+
+  /// The coverage audit (spec §9): null in tests / when the photo module
+  /// is absent.
+  final CoverageAuditor? coverage;
+
+  /// Process one photo through the app's ONE serialized pipeline — the
+  /// coverage screen's "log missing / retry failed" actions go through
+  /// here so they share the global FIFO with the watcher and share sheet.
+  final Future<PhotoOutcome> Function(IntakePhoto photo)? processPhoto;
+
+  /// Library access for coverage thumbnails; null in tests.
+  final PhotoLibrary? photoLibrary;
+
   const UiServices({
     required this.dao,
     required this.analyzer,
@@ -72,5 +91,9 @@ class UiServices {
     required this.requestPhotoPermission,
     this.photoIntake,
     this.reports,
+    this.thumbs,
+    this.coverage,
+    this.processPhoto,
+    this.photoLibrary,
   });
 }

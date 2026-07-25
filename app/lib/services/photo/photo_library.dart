@@ -28,6 +28,12 @@ abstract class PhotoLibrary {
   /// Request read access; limited/partial grants count as access.
   Future<bool> requestPermission();
 
+  /// Small display thumbnail for a known asset id; null when the asset is
+  /// gone, unreadable, or permission is missing. Used to lazily backfill
+  /// meal thumbs for meals logged before thumbs existed, and for the
+  /// coverage audit's missing-photo list.
+  Future<Uint8List?> thumbnailByAssetId(String assetId, {int size = 160});
+
   /// Images whose createDate is at/after [cutoff] (spec §6.4 backfill
   /// window). Order unspecified — callers sort for emission.
   Future<List<LibraryAsset>> imagesCreatedAfter(DateTime cutoff,
@@ -60,6 +66,18 @@ class _PhotoManagerAsset implements LibraryAsset {
 
 class PhotoManagerLibrary implements PhotoLibrary {
   void Function(MethodCall)? _changeCallback;
+
+  @override
+  Future<Uint8List?> thumbnailByAssetId(String assetId, {int size = 160}) async {
+    if (assetId.isEmpty) return null;
+    try {
+      final entity = await AssetEntity.fromId(assetId);
+      if (entity == null) return null;
+      return await entity.thumbnailDataWithSize(ThumbnailSize.square(size));
+    } catch (_) {
+      return null; // deleted asset / revoked permission: display-degrade
+    }
+  }
 
   @override
   Future<bool> requestPermission() async {

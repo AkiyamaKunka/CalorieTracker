@@ -66,6 +66,18 @@ abstract class MealsDao {
       {int? mealId});
   Future<void> releasePhotoHash(String imageHash);
   Future<void> reclaimStaleProcessing(); // launch-time sweep (spec §2 delta)
+
+  /// Read-only ledger lookup for the coverage audit: the status of one
+  /// photo hash (and the meal it became, when saved). Null = never seen —
+  /// the photo has NOT been through intake.
+  Future<({IngestionStatus status, int? mealId})?> photoStatus(
+      String imageHash);
+
+  /// Tiny per-meal JPEG (spec §9 app-only): written by the pipeline at
+  /// save time, deleted with the meal, shown beside the analysis so the
+  /// user can check the numbers against the actual photo.
+  Future<void> saveMealThumb(int mealId, Uint8List jpeg);
+  Future<Uint8List?> mealThumb(int mealId);
   // Fitness (phase 1: weight + activity only)
   Future<void> saveBodyWeight(String date, double kg);
   Future<void> saveActivity(String date,

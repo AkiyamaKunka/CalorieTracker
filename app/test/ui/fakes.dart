@@ -134,6 +134,24 @@ class FakeDao implements MealsDao {
   @override
   Future<void> reclaimStaleProcessing() async {}
 
+  final Map<int, Uint8List> thumbs = {};
+
+  @override
+  Future<({IngestionStatus status, int? mealId})?> photoStatus(
+      String imageHash) async {
+    final st = ledger[imageHash];
+    if (st == null) return null;
+    final meal = meals.where((m) => m.imageHash == imageHash).toList();
+    return (status: st, mealId: meal.isEmpty ? null : meal.first.id);
+  }
+
+  @override
+  Future<void> saveMealThumb(int mealId, Uint8List jpeg) async =>
+      thumbs[mealId] = jpeg;
+
+  @override
+  Future<Uint8List?> mealThumb(int mealId) async => thumbs[mealId];
+
   @override
   Future<void> saveBodyWeight(String date, double kg) async {}
 

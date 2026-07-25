@@ -3,6 +3,7 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
@@ -32,6 +33,56 @@ Map<String, dynamic> _foodAnalysis() => {
     };
 
 void main() {
+  test('a saved photo meal gets a stored thumbnail (spec §9)', () async {
+    final dao = FakeDao();
+    final analyzer = FakeAnalyzer()
+      ..nextPhotoOutcome = const AnalysisOutcome(
+          analysis: {'is_food': true, 'total_calories': 100},
+          isFood: true,
+          wall: Duration.zero);
+    final pipeline = PhotoPipeline(dao: dao, analyzer: analyzer);
+    // Real 1x1 JPEG so the thumbnailer can decode it.
+    final jpeg = base64Decode(
+        '/9j/4AAQSkZJRgABAQEAAAAAAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLD'
+        'BkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2w'
+        'BDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjI'
+        'yMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAHwAA'
+        'AQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAA'
+        'AF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGR'
+        'olJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXq'
+        'DhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT'
+        '1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAA'
+        'AAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBh'
+        'JBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg'
+        '5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOU'
+        'lZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5'
+        'ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD3+iiigD//2Q==');
+    final outcome = await pipeline.process(
+        IntakePhoto(jpeg, 'a1', 'IMG_1.jpg', deliberate: true));
+    expect(outcome.kind, PhotoOutcomeKind.saved);
+    final mealId = dao.meals.single.id;
+    expect(dao.thumbs[mealId], isNotNull,
+        reason: 'the pipeline persists a thumbnail at save time');
+    expect(dao.thumbs[mealId]!.length, lessThan(jpeg.length + 4096),
+        reason: 'thumb stays small');
+  });
+
+  test('a throwing thumb save never un-saves the meal', () async {
+    final dao = _ThumbThrowingDao();
+    final analyzer = FakeAnalyzer()
+      ..nextPhotoOutcome = const AnalysisOutcome(
+          analysis: {'is_food': true},
+          isFood: true,
+          wall: Duration.zero);
+    final pipeline = PhotoPipeline(dao: dao, analyzer: analyzer);
+    final outcome = await pipeline.process(IntakePhoto(
+        Uint8List.fromList([1, 2, 3]), 'a1', 'x.jpg',
+        deliberate: true));
+    expect(outcome.kind, PhotoOutcomeKind.saved);
+    expect(dao.meals, hasLength(1));
+  });
+
+
   test('food photo → reserved, saved meal, ledger saved, sanitized items',
       () async {
     final dao = FakeDao();
@@ -171,6 +222,14 @@ void main() {
 class _ThrowingSaveDao extends FakeDao {
   @override
   Future<int> saveMeal(Meal meal, {IngestionStatus? markStatus}) async {
+    throw StateError('disk full');
+  }
+}
+
+
+class _ThumbThrowingDao extends FakeDao {
+  @override
+  Future<void> saveMealThumb(int mealId, Uint8List jpeg) async {
     throw StateError('disk full');
   }
 }

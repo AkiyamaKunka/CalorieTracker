@@ -12,6 +12,9 @@ import '../core/contracts.dart';
 import '../data/meals_dao_impl.dart';
 import '../services/analyzer/provider_analyzers.dart';
 import '../services/nl/executor.dart';
+import '../services/photo/coverage.dart';
+import '../services/photo/photo_hash.dart' show originalBytesMd5;
+import '../services/photo/photo_library.dart';
 import '../services/photo/share_intake.dart';
 import '../services/photo/watcher.dart';
 import '../services/report/builders.dart';
@@ -19,6 +22,7 @@ import '../services/report/notifications.dart';
 import '../services/settings/app_settings.dart';
 import 'background_glue.dart';
 import 'format.dart' show isoDate;
+import 'meal_thumbs.dart';
 import 'photo_pipeline.dart';
 import 'services.dart';
 
@@ -73,6 +77,12 @@ class AppServices {
       }
     }());
 
+    // Photo pipeline glue (spec §2.3/§3/§6): intake streams → md5 → reserve
+    // → analyze → save/skip/fail, notification-style snackbar on save.
+    final pipeline =
+        PhotoPipeline(dao: dao, analyzer: analyzer, notify: notify);
+
+    final photoLibrary = PhotoManagerLibrary();
     final ui = UiServices(
       dao: dao,
       analyzer: analyzer,
@@ -82,12 +92,13 @@ class AppServices {
       settings: _AppSettingsStore(settings, notifier),
       picker: _ShareIntakePicker(shareIntake),
       requestPhotoPermission: _requestPhotosPermission,
+      thumbs: MealThumbResolver(dao: dao, library: photoLibrary),
+      coverage: CoverageAuditor(
+          library: photoLibrary, dao: dao, hasher: originalBytesMd5),
+      // The audit's log/retry actions share the pipeline's global FIFO.
+      processPhoto: pipeline.process,
+      photoLibrary: photoLibrary,
     );
-
-    // Photo pipeline glue (spec §2.3/§3/§6): intake streams → md5 → reserve
-    // → analyze → save/skip/fail, notification-style snackbar on save.
-    final pipeline =
-        PhotoPipeline(dao: dao, analyzer: analyzer, notify: notify);
     pipeline.bind(photoIntake); // automated watch (deliberate=false)
     pipeline.bindStream(shareIntake.photos()); // share sheet (deliberate)
     if (settings.watcherEnabled) {

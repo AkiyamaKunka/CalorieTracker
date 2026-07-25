@@ -7,7 +7,10 @@ import 'package:flutter/material.dart';
 
 import '../../core/coerce.dart';
 import '../../core/contracts.dart';
+import 'dart:typed_data';
+
 import '../format.dart';
+import 'meal_thumb.dart';
 
 class MealCard extends StatelessWidget {
   final Meal meal;
@@ -16,8 +19,16 @@ class MealCard extends StatelessWidget {
   /// Optional drill-in (Today taps through to the editor). Null keeps the
   /// card inert, which is what the report/notification-style usages want.
   final VoidCallback? onTap;
+
+  /// Resolved photo thumbnail; null skips the leading image entirely
+  /// (tests / contexts without a resolver).
+  final Future<Uint8List?>? thumb;
   const MealCard(
-      {super.key, required this.meal, this.showItems = true, this.onTap});
+      {super.key,
+      required this.meal,
+      this.showItems = true,
+      this.onTap,
+      this.thumb});
 
   @override
   Widget build(BuildContext context) {
@@ -36,6 +47,12 @@ class MealCard extends StatelessWidget {
           children: [
             Row(
               children: [
+                if (thumb != null) ...[
+                  MealThumbView(
+                      thumb: thumb,
+                      isPhotoMeal: meal.imageHash.isNotEmpty),
+                  const SizedBox(width: 10),
+                ],
                 Expanded(
                   child: Text(
                     mealDescription(a),

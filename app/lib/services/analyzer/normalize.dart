@@ -26,6 +26,41 @@ const int kAnalysisJpegQuality = SharedConstants.normalizeJpegQuality;
 /// admits every mainstream camera's full-resolution output.
 const int kMaxDecodePixels = 50 * 1000 * 1000;
 
+/// Tiny history thumbnail (spec §9 app-only): long side [kThumbLongSidePx],
+/// modest quality — target ~5-15 KB so a year of meals costs a few MB.
+/// Null on any failure; a meal without a thumb is display-degraded, never
+/// an error. Top-level so callers can run it in a compute() isolate.
+const int kThumbLongSidePx = 160;
+const int kThumbJpegQuality = 70;
+
+Uint8List? makeMealThumb(Uint8List original) {
+  try {
+    final decoder = img.findDecoderForData(original);
+    final info = decoder?.startDecode(original);
+    if (info != null && info.width * info.height > kMaxDecodePixels) {
+      return null; // same decode-bomb ceiling as analysis normalization
+    }
+    var decoded = img.decodeImage(original);
+    if (decoded == null) return null;
+    decoded = img.bakeOrientation(decoded);
+    final longest =
+        decoded.width > decoded.height ? decoded.width : decoded.height;
+    if (longest > kThumbLongSidePx) {
+      decoded = decoded.width >= decoded.height
+          ? img.copyResize(decoded,
+              width: kThumbLongSidePx,
+              interpolation: img.Interpolation.average)
+          : img.copyResize(decoded,
+              height: kThumbLongSidePx,
+              interpolation: img.Interpolation.average);
+    }
+    return Uint8List.fromList(
+        img.encodeJpg(decoded, quality: kThumbJpegQuality));
+  } catch (_) {
+    return null;
+  }
+}
+
 /// Returns the normalized JPEG, or null on ANY failure — spec §3.1 step 6:
 /// callers then send the original bytes if < 5 MB, else fail.
 Uint8List? normalizeForAnalysis(Uint8List original) {

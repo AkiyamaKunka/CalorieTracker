@@ -8,10 +8,12 @@ library;
 import 'dart:async';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart' show compute;
 import 'package:intl/intl.dart';
 
 import '../core/coerce.dart';
 import '../core/contracts.dart';
+import '../services/analyzer/normalize.dart' show makeMealThumb;
 import 'format.dart';
 
 enum PhotoOutcomeKind { saved, skipped, failed, duplicate, alreadyTracked }
@@ -144,6 +146,14 @@ class PhotoPipeline {
         ),
         markStatus: IngestionStatus.saved, // atomic saved mark (spec §2.3)
       );
+      // History thumbnail from the ORIGINAL bytes we already hold (spec §9
+      // app-only). Best-effort AND awaited: the pipeline is serialized, so
+      // finishing the thumb before the next photo keeps memory flat; any
+      // failure must never un-save the meal.
+      try {
+        final thumb = await compute(makeMealThumb, photo.bytes);
+        if (thumb != null) await dao.saveMealThumb(id, thumb);
+      } catch (_) {}
       final summary =
           '${mealDescription(analysis)} — ~${displayTotalCalories(analysis)} kcal';
       notify?.call('Meal logged: $summary');

@@ -8,8 +8,11 @@ library;
 
 import 'package:sqflite/sqflite.dart';
 
-/// Schema version 1 — the full spec §2.1 table set ships at once.
-const int kSchemaVersion = 1;
+/// v1: the full spec §2.1 table set. v2: meal_thumbs (app-only, spec §9 —
+/// the server never stores thumbnails; the app keeps a tiny JPEG per photo
+/// meal so history can show the picture even after the gallery original is
+/// gone).
+const int kSchemaVersion = 2;
 
 const String kDatabaseFileName = 'calorie_tracker.db';
 
@@ -118,6 +121,13 @@ CREATE TABLE IF NOT EXISTS fitness_profile (
     extra TEXT,
     updated_at TEXT
 )''',
+  // App-only (spec §9): one small JPEG per photo meal, written by the
+  // pipeline at save time from the ORIGINAL bytes. Deleted with the meal.
+  '''
+CREATE TABLE IF NOT EXISTS meal_thumbs (
+    meal_id INTEGER PRIMARY KEY,
+    jpeg BLOB NOT NULL
+)''',
 ];
 
 /// Table names included in the full export (spec §8: exportJson covers all
@@ -152,6 +162,13 @@ Future<Database> openAppDatabase({String? path}) async {
       // database.py:16 — foreign keys ON.
       onConfigure: (db) => db.execute('PRAGMA foreign_keys = ON'),
       onCreate: (db, version) async {
+        for (final ddl in kSchemaDdl) {
+          await db.execute(ddl);
+        }
+      },
+      // Every DDL statement is IF NOT EXISTS, so upgrade = re-run the list;
+      // v(n) → v(n+1) only ever ADDS tables/indexes.
+      onUpgrade: (db, oldVersion, newVersion) async {
         for (final ddl in kSchemaDdl) {
           await db.execute(ddl);
         }

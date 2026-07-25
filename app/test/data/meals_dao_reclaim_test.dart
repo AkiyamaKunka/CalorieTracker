@@ -1,6 +1,9 @@
 // Real-SQLite tests for the reclaim sweep (spec §2.3 as adjusted for the
 // two-isolate reality) — the first DB-backed harness in the suite: the
 // reclaim SQL had ZERO tests before this file (loop cycle 2 critical gap).
+import 'dart:typed_data';
+
+import 'package:calorie_tracker/core/contracts.dart';
 import 'package:calorie_tracker/data/db.dart';
 import 'package:calorie_tracker/data/meals_dao_impl.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -70,5 +73,47 @@ void main() {
     expect(await dao.reservePhotoHash('c' * 32, source: 'app_watch'), isFalse,
         reason: 'a live background run\'s reservation must survive the '
             'launch sweep (double-log race otherwise)');
+  });
+
+  test('meal_thumbs: round-trip, replace, delete cascade (spec §9)', () async {
+    final id = await dao.saveMeal(Meal(
+      id: 0,
+      date: '2026-07-26',
+      time: '12:00 PM',
+      timestamp: now.toIso8601String(),
+      source: 'app_watch',
+      imageHash: 'd' * 32,
+      analysis: const {'is_food': true},
+    ));
+    await dao.saveMealThumb(id, Uint8List.fromList([1, 2, 3]));
+    expect(await dao.mealThumb(id), [1, 2, 3]);
+
+    await dao.saveMealThumb(id, Uint8List.fromList([9]));
+    expect(await dao.mealThumb(id), [9]); // replace, not stack
+
+    await dao.deleteMeal(id);
+    expect(await dao.mealThumb(id), isNull,
+        reason: 'thumb rides the meal row lifecycle');
+  });
+
+  test('photoStatus reads the ledger without writing it', () async {
+    expect(await dao.photoStatus('e' * 32), isNull);
+    final id = await dao.saveMeal(
+      Meal(
+        id: 0,
+        date: '2026-07-26',
+        time: '12:00 PM',
+        timestamp: now.toIso8601String(),
+        source: 'app_watch',
+        imageHash: 'e' * 32,
+        analysis: const {'is_food': true},
+      ),
+      markStatus: IngestionStatus.saved,
+    );
+    final row = await dao.photoStatus('e' * 32);
+    expect(row!.status, IngestionStatus.saved);
+    expect(row.mealId, id);
+    // Reading must not have created/altered ledger state.
+    expect(await dao.reservePhotoHash('e' * 32, source: 'app_watch'), isFalse);
   });
 }

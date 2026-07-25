@@ -9,7 +9,11 @@ import 'package:flutter/material.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../core/contracts.dart';
+import '../../services/photo/coverage.dart';
+import '../../services/photo/photo_library.dart';
+import '../photo_pipeline.dart';
 import '../services.dart';
+import 'coverage_screen.dart';
 
 enum KeyValidationState { idle, validating, valid, invalid }
 
@@ -20,6 +24,11 @@ class SettingsScreen extends StatefulWidget {
   final Future<bool> Function() requestPhotoPermission;
   final PhotoIntake? photoIntake; // started/stopped on watcher toggle
 
+  /// Coverage-audit pieces; all three null in tests → the tile is hidden.
+  final CoverageAuditor? coverage;
+  final Future<PhotoOutcome> Function(IntakePhoto photo)? processPhoto;
+  final PhotoLibrary? photoLibrary;
+
   const SettingsScreen({
     super.key,
     required this.settings,
@@ -27,6 +36,9 @@ class SettingsScreen extends StatefulWidget {
     required this.dao,
     required this.requestPhotoPermission,
     this.photoIntake,
+    this.coverage,
+    this.processPhoto,
+    this.photoLibrary,
   });
 
   @override
@@ -336,6 +348,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         const Divider(height: 32),
         Text('Photo intake', style: theme.textTheme.titleMedium),
+        if (widget.coverage != null && widget.processPhoto != null)
+          ListTile(
+            key: const Key('coverageCheckTile'),
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.fact_check_outlined),
+            title: const Text('Check photo coverage'),
+            subtitle: const Text(
+                'Verify every recent photo was scanned and logged'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.of(context).push(MaterialPageRoute(
+              builder: (_) => CoverageScreen(
+                auditor: widget.coverage!,
+                processPhoto: widget.processPhoto!,
+                requestPhotoPermission: widget.requestPhotoPermission,
+                initialLookbackDays: _lookbackDays,
+                library: widget.photoLibrary,
+              ),
+            )),
+          ),
         SwitchListTile(
           key: const Key('watcherToggle'),
           contentPadding: EdgeInsets.zero,

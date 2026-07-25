@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/contracts.dart';
 import '../format.dart';
+import '../meal_thumbs.dart';
 import '../nl_presenter.dart';
 import '../widgets/meal_card.dart';
 import 'meal_editor_screen.dart';
@@ -14,7 +15,11 @@ import 'meal_editor_screen.dart';
 class TodayScreen extends StatefulWidget {
   final MealsDao dao;
   final NlExecutor executor;
-  const TodayScreen({super.key, required this.dao, required this.executor});
+
+  /// Photo thumbnails for the cards; null (tests) renders placeholders.
+  final MealThumbResolver? thumbs;
+  const TodayScreen(
+      {super.key, required this.dao, required this.executor, this.thumbs});
 
   @override
   State<TodayScreen> createState() => TodayScreenState();
@@ -144,7 +149,11 @@ class TodayScreenState extends State<TodayScreen> {
             )
           else
             for (final meal in foodMeals)
-              MealCard(meal: meal, onTap: () => _editMeal(meal)),
+              MealCard(
+                meal: meal,
+                onTap: () => _editMeal(meal),
+                thumb: widget.thumbs?.thumbFor(meal),
+              ),
         ],
       ),
     );
