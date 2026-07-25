@@ -10,6 +10,7 @@ import 'package:intl/intl.dart';
 
 import '../core/coerce.dart';
 import '../core/contracts.dart';
+import 'meal_edit_logic.dart' show parseClock;
 
 final NumberFormat _thousands = NumberFormat('#,##0');
 
@@ -49,6 +50,29 @@ String displayTotalCalories(Map<String, dynamic> analysis) {
 String displayMacro(Map<String, dynamic> analysis, String key) {
   final v = analysis[key];
   return isFoodTruthy(v) ? '$v' : '0';
+}
+
+/// Meals in the order the user experienced them: by the DISPLAY clock, not
+/// the ingestion timestamp the DAO sorts on. A meal moved to another day (or
+/// added by hand later) otherwise lands wherever its row was created —
+/// always last on the target day. Unparseable times keep their relative
+/// order at the end.
+List<Meal> byMealClock(Iterable<Meal> meals) {
+  int minutes(Meal m) {
+    final t = parseClock(m.time);
+    return t == null ? 24 * 60 + 1 : t.hour * 60 + t.minute;
+  }
+
+  // Index-decorated so the sort is STABLE without pulling in a package:
+  // equal (date, clock) pairs keep the DAO's own order.
+  final decorated = meals.toList().asMap().entries.toList();
+  decorated.sort((a, b) {
+    final byDate = a.value.date.compareTo(b.value.date);
+    if (byDate != 0) return byDate;
+    final byClock = minutes(a.value).compareTo(minutes(b.value));
+    return byClock != 0 ? byClock : a.key.compareTo(b.key);
+  });
+  return [for (final e in decorated) e.value];
 }
 
 /// Numeric macro grams for CHARTS (the display helpers above return

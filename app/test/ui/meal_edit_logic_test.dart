@@ -140,7 +140,9 @@ void main() {
         ];
       final errors = d.validate();
       expect(errors, hasLength(1));
-      expect(errors.single, contains('Item 1 calories'));
+      // Numbered by the ROW the user sees (the blank row counts), so the
+      // message points at the right field.
+      expect(errors.single, contains('Item 2 calories'));
     });
   });
 
@@ -187,6 +189,35 @@ void main() {
         'fat_g': 2,
       });
     });
+  });
+
+  test('numeric STRING totals load into the fields (no silent zeroing)', () {
+    // The analyzer stores model output raw, so "450" is a real stored shape.
+    // Loading it as blank made a no-op save persist 0 and wipe the meal.
+    final draft = MealDraft.fromMeal(mealWith({
+      'is_food': true,
+      'total_calories': '450',
+      'total_protein_g': '50.5',
+      'food_items': [
+        {'name': 'Chicken', 'estimated_calories': '280'},
+      ],
+    }));
+    expect(draft.calories, '450');
+    expect(draft.protein, '50.5');
+    expect(draft.items.single.calories, '280');
+    // And a save round-trips the numbers instead of zeroing them.
+    final out = draft.toAnalysis();
+    expect(out['total_calories'], 450);
+    expect(out['total_protein_g'], 50.5);
+  });
+
+  test('item sums are tidied, not float garbage', () {
+    final d = MealDraft.blank(DateTime(2026, 7, 24))
+      ..items = [
+        MealItemDraft(name: 'A', fat: '0.1'),
+        MealItemDraft(name: 'B', fat: '0.2'),
+      ];
+    expect(d.itemTotals().fat, 0.3); // not 0.30000000000000004
   });
 
   test('itemTotals sums only filled rows', () {

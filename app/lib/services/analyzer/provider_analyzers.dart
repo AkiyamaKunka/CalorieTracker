@@ -52,6 +52,12 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
 
   static const int maxAttempts = 3; // parity with spec §3.3
   static const Duration httpDeadline = Duration(seconds: 90); // spec §3.2
+
+  /// Per-provider wall clock. Direct model APIs keep the §3.2 90 s; a
+  /// provider fronting slower work (a CLI run on the user's server) must
+  /// allow more, or the client gives up while the server is still working
+  /// and the retry only meets its own busy lock.
+  Duration get deadline => httpDeadline;
   static const int maxOriginalFallbackBytes = 5 * 1024 * 1024; // spec §3.1
 
   /// Provider hooks.
@@ -87,7 +93,7 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
         prompt: prompt, jpegBytes: jpegBytes, maxTokens: maxTokens);
     http.StreamedResponse streamed;
     try {
-      streamed = await client.send(req).timeout(httpDeadline);
+      streamed = await client.send(req).timeout(deadline);
     } on TimeoutException {
       throw const _ProviderException('client deadline hit', transient: true);
     } catch (e) {
@@ -387,6 +393,14 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
   @override
   String get providerLabel => 'server';
 
+  /// The server runs a Claude CLI analysis (up to ~120 s, and up to ~240 s
+  /// across its internal stream→file fallback) behind a synchronous Flask
+  /// handler, so the 90 s API default would abandon work that is still
+  /// running — and the retry would only meet the server's own
+  /// single-flight lock, turning a slow success into a hard failure.
+  @override
+  Duration get deadline => const Duration(minutes: 5);
+
   Uri _uri(String path) => Uri.parse('${settings.serverBaseUrl}$path');
 
   @override
@@ -407,13 +421,18 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
       ..headers['content-type'] = 'application/json'
       ..headers['X-API-Key'] = key
       ..headers['X-Client-Platform'] = 'app'
-      // The PROMPT travels with the request so the app's dietary profile
-      // still applies: the server would otherwise use its own copy of the
-      // shared prompt without the appendix.
-      ..body = jsonEncode({
-        'prompt': prompt,
-        if (isPhoto) 'image_b64': base64Encode(jpegBytes),
-      });
+      // PHOTO: send only the dietary PROFILE, never a whole prompt. The
+      // server composes the analysis prompt from its own shared/ copy — a
+      // caller-authored prompt is an instruction channel into the CLI, and
+      // the CLI's image path necessarily has the Read tool enabled.
+      // TEXT: the prompt IS the user's request, and that endpoint runs
+      // with tools disabled.
+      ..body = jsonEncode(isPhoto
+          ? {
+              'image_b64': base64Encode(jpegBytes),
+              'dietary_profile': settings.dietaryProfile ?? '',
+            }
+          : {'prompt': prompt});
   }
 
   @override
@@ -427,22 +446,23 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
     return jsonEncode(payload);
   }
 
-  /// /ping proves "address reachable + key accepted" and costs no CLI run —
-  /// validation must never occupy the analyzer lock a photo could be using.
+  /// /api/auth_check proves "address reachable + key accepted" with no side
+  /// effects and no CLI run. Deliberately NOT /ping: that is the Termux
+  /// watcher's liveness channel, and stamping it from here would forge
+  /// watcher liveness and mute the stale-watcher outage alert.
   @override
   Future<String?> validateKey(String apiKey) async {
     final base = settings.serverBaseUrl;
     if (base.isEmpty) return 'Add your server address first.';
     final key = apiKey.trim();
     if (key.isEmpty) return 'Enter your server upload key.';
-    final req = http.Request('POST', _uri('/ping'))
+    final req = http.Request('POST', _uri('/api/auth_check'))
       ..headers['content-type'] = 'application/json'
       ..headers['X-API-Key'] = key
       ..headers['X-Client-Platform'] = 'app'
       ..body = '{}';
     try {
-      final streamed =
-          await client.send(req).timeout(_HttpVisionAnalyzer.httpDeadline);
+      final streamed = await client.send(req).timeout(deadline);
       final resp = await http.Response.fromStream(streamed);
       if (resp.statusCode == 200) return null;
       if (resp.statusCode == 401 || resp.statusCode == 403) {

@@ -411,13 +411,23 @@ def analyze_text_prompt(prompt: str) -> Optional[Dict]:
 
 
 def analyze_food_photo(
-    image_bytes: bytes, prompt: Optional[str] = None
+    image_bytes: bytes,
+    prompt: Optional[str] = None,
+    allow_file_fallback: bool = True,
 ) -> Optional[Dict]:
     """Analyze a food photo via the Claude Code CLI; None means 'use Gemini'.
 
-    [prompt] overrides the built-in FOOD_DETECTION_PROMPT — the mobile app
-    sends its own copy (same shared/ source) WITH the user's dietary-profile
-    appendix, which the server has no other way to know about.
+    [prompt] overrides the built-in FOOD_DETECTION_PROMPT (the API endpoint
+    composes one from the app's dietary profile).
+
+    [allow_file_fallback] MUST be False whenever any part of the prompt came
+    from a network caller. The stream dispatch runs with `--tools ""`, but
+    the file fallback necessarily enables the Read tool to load the temp
+    image — and a caller who can steer that prompt could read arbitrary
+    files (e.g. the .env holding the subscription token) and have the
+    content returned inside the analysis JSON. Reaching the fallback does
+    not even need the rollback knob: a prompt that produces no output makes
+    the stream attempt look like a CLI-shape failure.
     """
     if not is_configured():
         return None
@@ -442,6 +452,13 @@ def analyze_food_photo(
                 cli, image_bytes, env, start, prompt)
             if not retry_via_file:
                 return analysis
+            if not allow_file_fallback:
+                # Caller-influenced prompt: refuse the Read-enabled path.
+                log.warning(
+                    "Claude stream dispatch failed for an API-originated "
+                    "request — NOT falling back to the Read-tool path."
+                )
+                return None
             log.warning(
                 "Claude stream-json dispatch failed — retrying once via the "
                 "two-turn Read-file path."

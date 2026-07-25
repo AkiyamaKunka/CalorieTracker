@@ -43,7 +43,7 @@ Future<AppSettings> serverSettings({
 Uint8List jpeg() => Uint8List.fromList([1, 2, 3, 4]);
 
 void main() {
-  test('photo call hits /api/analyze_photo with key, image and prompt',
+  test('photo call sends the PROFILE, never a caller-authored prompt',
       () async {
     final s = await serverSettings(profile: 'Cantonese home cooking');
     final requests = <http.Request>[];
@@ -75,9 +75,11 @@ void main() {
     expect(req.headers['X-API-Key'], 'upload-key');
     final body = jsonDecode(req.body) as Map<String, dynamic>;
     expect(base64Decode(body['image_b64'] as String), [1, 2, 3, 4]);
-    // The prompt travels with the request: otherwise the server would use
-    // its own copy WITHOUT the app's dietary profile.
-    expect(body['prompt'], contains('Cantonese home cooking'));
+    // Only the dietary PROFILE crosses the wire; the server composes the
+    // prompt from its own shared/ copy. A caller-authored prompt would be
+    // an instruction channel into a CLI whose image path enables Read.
+    expect(body['dietary_profile'], 'Cantonese home cooking');
+    expect(body.containsKey('prompt'), isFalse);
   });
 
   test('text intent hits /api/text_intent and unwraps result', () async {
@@ -168,7 +170,8 @@ void main() {
     expect(s.activeApiKey, isNull);
   });
 
-  test('validateKey pings /ping and maps the outcomes', () async {
+  test('validateKey uses /api/auth_check (never /ping) and maps outcomes',
+      () async {
     final s = await serverSettings();
     final seen = <http.BaseRequest>[];
     Future<String?> validate(int status) {
@@ -180,7 +183,11 @@ void main() {
     }
 
     expect(await validate(200), isNull);
-    expect(seen.single.url.path, '/ping');
+    // NOT /ping: that endpoint stamps the Termux watcher's heartbeat, so
+    // testing the connection would forge watcher liveness and mute the
+    // stale-watcher outage alert.
+    expect(seen.single.url.path, '/api/auth_check');
+    expect(seen.map((r) => r.url.path), isNot(contains('/ping')));
     expect(seen.single.headers['X-API-Key'], 'upload-key');
     expect(await validate(401), contains('rejected'));
     expect(await validate(500), contains('500'));
@@ -192,6 +199,17 @@ void main() {
       fail('must not call the network without an address');
     }));
     expect(await analyzer.validateKey('k'), contains('server address'));
+  });
+
+  test('server provider allows far longer than the 90s API deadline',
+      () async {
+    final s = await serverSettings();
+    final analyzer = ServerAnalyzer(s, client: MockClient((_) async =>
+        http.Response('{}', 200)));
+    // The server runs a Claude CLI analysis behind a synchronous handler;
+    // giving up at 90 s abandons work that is still running and the retry
+    // only meets the server's own single-flight lock.
+    expect(analyzer.deadline.inSeconds, greaterThanOrEqualTo(240));
   });
 
   test('MultiProviderAnalyzer routes to the server when selected', () async {

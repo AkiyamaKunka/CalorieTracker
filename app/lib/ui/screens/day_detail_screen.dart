@@ -39,7 +39,10 @@ class _DayDetailScreenState extends State<DayDetailScreen> {
 
   Future<void> _load() async {
     try {
-      final meals = await widget.dao.mealsBetween(widget.date, widget.date);
+      // Ordered by the meal's own clock: the DAO sorts by ingestion
+      // timestamp, which puts a hand-added or re-dated meal last.
+      final meals =
+          byMealClock(await widget.dao.mealsBetween(widget.date, widget.date));
       if (!mounted) return;
       setState(() {
         _meals = meals;

@@ -147,6 +147,8 @@ API_ANALYZE_MAX_BYTES = _env_int(
 # The app's text-intent prompt embeds the recent-meals list; 200 KB is far
 # above the real shape and still bounds what one request can spend.
 API_TEXT_MAX_CHARS = _env_int("API_TEXT_MAX_CHARS", 200_000, 1000, 2_000_000)
+# The dietary-profile appendix the app may contribute to the photo prompt.
+API_PROFILE_MAX_CHARS = _env_int("API_PROFILE_MAX_CHARS", 4000, 100, 40_000)
 # Admission control for photo-analysis fan-out: every analysis thread pins its
 # full image bytes for its whole life, and the threads convoy on the Claude
 # CLI lock — a 10-photo album on the 1GB host is an OOM. Slots are taken
@@ -4772,6 +4774,23 @@ def handle_photo_message(
     return True
 
 
+def build_photo_prompt_with_profile(profile: str) -> str:
+    """FOOD_DETECTION_PROMPT + the app's dietary-profile appendix, in the
+    exact shape config.py uses for the server's own profile file. The
+    appendix is DATA the model weighs, never an instruction channel: the
+    caller cannot replace the prompt body, and the composed prompt only
+    ever runs on the no-tools dispatch.
+    """
+    text = (profile or "").strip()
+    if not text:
+        return FOOD_DETECTION_PROMPT
+    return (
+        f"{FOOD_DETECTION_PROMPT}\n\nUser's Dietary Profile / Cultural "
+        f"Context:\n{text}\nPlease strongly consider these preferences "
+        f"when analyzing the photo.\n"
+    )
+
+
 # ─── Flask REST API ───────────────────────────────────────────────
 def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
     """Build the phone upload/heartbeat API app (module-level for testability)."""
@@ -4800,6 +4819,19 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         log.info(f"📡 Heartbeat ping received from Android Watcher (TZ: {tz or 'unchanged'})")
         return jsonify({"status": "ok"})
 
+    @app.route('/api/auth_check', methods=['POST'])
+    def api_auth_check():
+        """Pure key/reachability probe for the app's "Test connection".
+
+        Deliberately NOT /ping: that endpoint is the Termux watcher's
+        liveness channel, and stamping its heartbeat from the app would
+        forge watcher liveness and suppress the stale-watcher outage alert
+        (the exact alert that caught the 2026-07-23 outage).
+        """
+        if not _authorized_api_request():
+            return jsonify({"error": "Unauthorized"}), 401
+        return jsonify({"ok": True, "analyzer": claude_analyzer.status_label()})
+
     @app.route('/api/analyze_photo', methods=['POST'])
     def api_analyze_photo():
         """Analyze a photo with the Claude Code CLI and RETURN the analysis.
@@ -4814,9 +4846,12 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
             return jsonify({"error": "Unauthorized"}), 401
         prompt = None
         if request.is_json:
-            # The app's shape: {image_b64, prompt}. The prompt travels with
-            # the request so the phone's dietary-profile appendix applies —
-            # the server's own copy of the shared prompt lacks it.
+            # The app's shape: {image_b64, dietary_profile}. The caller may
+            # NOT supply a whole prompt: the analysis prompt is composed
+            # HERE from the server's own shared/ copy plus a bounded profile
+            # appendix. A caller-authored prompt would be an instruction
+            # channel into the CLI (see analyze_food_photo's
+            # allow_file_fallback note), which is not worth a settings knob.
             payload = request.get_json(silent=True) or {}
             raw = payload.get("image_b64")
             if not isinstance(raw, str) or not raw.strip():
@@ -4825,11 +4860,11 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
                 data = base64.b64decode(raw, validate=True)
             except (binascii.Error, ValueError):
                 return jsonify({"error": "bad_image_encoding"}), 400
-            candidate = payload.get("prompt")
-            if isinstance(candidate, str) and candidate.strip():
-                if len(candidate) > API_TEXT_MAX_CHARS:
-                    return jsonify({"error": "prompt_too_large"}), 413
-                prompt = candidate
+            profile = payload.get("dietary_profile")
+            if isinstance(profile, str) and profile.strip():
+                if len(profile) > API_PROFILE_MAX_CHARS:
+                    return jsonify({"error": "profile_too_large"}), 413
+                prompt = build_photo_prompt_with_profile(profile)
         elif 'photo' in request.files:
             data = request.files['photo'].read()
         else:
@@ -4841,7 +4876,10 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         if not claude_analyzer.is_configured():
             return jsonify({"error": "claude_unavailable",
                             "reason": "analyzer not configured"}), 503
-        analysis = claude_analyzer.analyze_food_photo(data, prompt)
+        # allow_file_fallback=False: never run a network-influenced prompt
+        # on the Read-tool path.
+        analysis = claude_analyzer.analyze_food_photo(
+            data, prompt, allow_file_fallback=False)
         if not analysis:
             # Busy CLI (another photo owns it), timeout, or a junk reply.
             # 503 tells the app "transient" so the photo stays eligible.

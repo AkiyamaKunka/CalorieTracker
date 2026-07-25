@@ -100,10 +100,22 @@ class MealItemDraft {
       };
 }
 
+/// Field text for a stored value. Numeric STRINGS must parse: the analyzer
+/// stores model output raw (no response schema), so "450" is a real stored
+/// shape — and loading it as blank made a no-op save persist 0 and wipe
+/// every number on the meal.
 String _numText(dynamic v) {
-  final n = safeNumberOr(v, null);
+  var n = safeNumberOr(v, null);
+  if (n == null && v is String) n = safeNumberOr(num.tryParse(v.trim()), null);
   if (n == null) return '';
   return n == n.roundToDouble() ? n.round().toString() : n.toString();
+}
+
+/// Item sums are user-facing numbers, not accumulator internals: 0.1+0.2
+/// must read 0.3, and calories are whole. Two decimals for grams.
+num _tidy(num v) {
+  if (v == v.roundToDouble()) return v.round();
+  return num.parse(v.toStringAsFixed(2));
 }
 
 /// The editable state of one meal (existing or new).
@@ -167,7 +179,12 @@ class MealDraft {
       cb += safeNumber(m['carbs_g']);
       f += safeNumber(m['fat_g']);
     }
-    return (calories: c, protein: p, carbs: cb, fat: f);
+    return (
+      calories: _tidy(c),
+      protein: _tidy(p),
+      carbs: _tidy(cb),
+      fat: _tidy(f)
+    );
   }
 
   /// Every problem the user must fix before saving, in field order.
@@ -191,12 +208,14 @@ class MealDraft {
       final p = parseNumberField(f.$1, label: f.$2, max: f.$3);
       if (!p.ok) errors.add(p.error!);
     }
-    final rows = items.where((i) => !i.isBlank).toList();
-    if (rows.length > maxItemsPerMeal) {
+    if (items.where((i) => !i.isBlank).length > maxItemsPerMeal) {
       errors.add('Too many items (max $maxItemsPerMeal).');
     }
-    for (var i = 0; i < rows.length; i++) {
-      final it = rows[i];
+    // Number by the row position on SCREEN (blank rows included) — numbering
+    // only the filled ones points the user at the wrong row.
+    for (var i = 0; i < items.length; i++) {
+      final it = items[i];
+      if (it.isBlank) continue;
       final n = i + 1;
       for (final f in [
         (it.calories, 'Item $n calories', maxMealCalories),

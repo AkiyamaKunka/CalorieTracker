@@ -52,6 +52,7 @@ class _MealEditorScreenState extends State<MealEditorScreen> {
       TextEditingController fat})> _itemCtrls = [];
   List<String> _errors = const [];
   bool _saving = false;
+  final ScrollController _scroll = ScrollController();
 
   @override
   void initState() {
@@ -88,6 +89,7 @@ class _MealEditorScreenState extends State<MealEditorScreen> {
 
   @override
   void dispose() {
+    _scroll.dispose();
     for (final c in [_desc, _cal, _pro, _carb, _fat]) {
       c.dispose();
     }
@@ -133,6 +135,18 @@ class _MealEditorScreenState extends State<MealEditorScreen> {
     final errors = _draft.validate();
     if (errors.isNotEmpty) {
       setState(() => _errors = errors);
+      // The error card is the FIRST list child while Save is a pinned FAB:
+      // on a scrolled form the rejection would be invisible and Save would
+      // look like a dead button. Say it where the finger is, then scroll.
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(errors.length == 1
+              ? errors.single
+              : '${errors.length} things need fixing — see the top.')));
+      if (_scroll.hasClients) {
+        await _scroll.animateTo(0,
+            duration: const Duration(milliseconds: 250),
+            curve: Curves.easeOut);
+      }
       return;
     }
     setState(() {
@@ -232,15 +246,43 @@ class _MealEditorScreenState extends State<MealEditorScreen> {
         2026, 1, 1, picked.hour, picked.minute)));
   }
 
+  /// Remove by IDENTITY, never by the index captured at build time: two
+  /// taps inside one frame otherwise delete the wrong row (or throw
+  /// RangeError on the second).
+  void _removeItem(MealItemDraft item) {
+    _harvest();
+    final i = _draft.items.indexOf(item);
+    if (i < 0) return; // already gone (double tap)
+    setState(() {
+      final row = _itemCtrls.removeAt(i);
+      row.name.dispose();
+      row.cal.dispose();
+      row.pro.dispose();
+      row.carb.dispose();
+      row.fat.dispose();
+      _draft.items.removeAt(i);
+    });
+  }
+
   void _useItemTotals() {
     _harvest();
     final t = _draft.itemTotals();
+    // Clamp to the same ceilings validate() enforces: writing 39,998 into a
+    // field that refuses to save above 20,000 is a trap, not a shortcut.
+    final capped = t.calories > maxMealCalories ||
+        t.protein > maxMacroGrams ||
+        t.carbs > maxMacroGrams ||
+        t.fat > maxMacroGrams;
     setState(() {
-      _cal.text = _plain(t.calories);
-      _pro.text = _plain(t.protein);
-      _carb.text = _plain(t.carbs);
-      _fat.text = _plain(t.fat);
+      _cal.text = _plain(t.calories.clamp(0, maxMealCalories));
+      _pro.text = _plain(t.protein.clamp(0, maxMacroGrams));
+      _carb.text = _plain(t.carbs.clamp(0, maxMacroGrams));
+      _fat.text = _plain(t.fat.clamp(0, maxMacroGrams));
     });
+    if (capped) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Item totals exceeded the maximum and were capped.')));
+    }
   }
 
   static String _plain(num v) =>
@@ -267,6 +309,7 @@ class _MealEditorScreenState extends State<MealEditorScreen> {
         ],
       ),
       body: ListView(
+        controller: _scroll,
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 96),
         children: [
           if (_errors.isNotEmpty)
@@ -376,20 +419,14 @@ class _MealEditorScreenState extends State<MealEditorScreen> {
           ),
           for (var i = 0; i < _draft.items.length; i++)
             _ItemRow(
+              // Identity key: element (and focus) state must travel WITH the
+              // item when a row above it is removed. Without it, removing a
+              // row left the keyboard bound to the next item's controller
+              // and silently typed into the wrong food.
+              key: ObjectKey(_draft.items[i]),
               index: i,
               ctrls: _itemCtrls[i],
-              onRemove: () {
-                _harvest();
-                setState(() {
-                  final row = _itemCtrls.removeAt(i);
-                  row.name.dispose();
-                  row.cal.dispose();
-                  row.pro.dispose();
-                  row.carb.dispose();
-                  row.fat.dispose();
-                  _draft.items.removeAt(i);
-                });
-              },
+              onRemove: () => _removeItem(_draft.items[i]),
             ),
           Align(
             alignment: Alignment.centerLeft,
@@ -451,6 +488,7 @@ class _NumberField extends StatelessWidget {
 
 class _ItemRow extends StatelessWidget {
   const _ItemRow({
+    super.key,
     required this.index,
     required this.ctrls,
     required this.onRemove,

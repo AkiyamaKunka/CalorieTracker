@@ -44,7 +44,8 @@ class TodayScreenState extends State<TodayScreen> {
     final now = DateTime.now();
     final today = isoDate(now);
     try {
-      final todayMeals = await widget.dao.mealsBetween(today, today);
+      final todayMeals =
+          byMealClock(await widget.dao.mealsBetween(today, today));
       // Typical-day window: prior 7 local days EXCLUDING today (spec §5.1).
       final prior = await widget.dao.mealsBetween(
         isoDate(now.subtract(const Duration(days: 7))),
