@@ -74,6 +74,23 @@ class SqfliteMealsDao implements MealsDao {
   }
 
   @override
+  Future<void> updateMealFields(int mealId,
+      {Map<String, dynamic>? analysis, String? date, String? time}) async {
+    final values = <String, Object?>{'corrected': 1};
+    if (analysis != null) values['analysis'] = jsonEncode(analysis);
+    if (date != null) values['date'] = date;
+    if (time != null) values['time'] = time;
+    // timestamp is NOT touched: it records when the row was ingested, while
+    // date/time are the user-facing meal moment (spec §2.2).
+    await _db.update(
+      'meals',
+      values,
+      where: 'id = ? AND chat_id = ?',
+      whereArgs: [mealId, localChatId],
+    );
+  }
+
+  @override
   Future<void> deleteMeal(int mealId) async {
     // Spec §2.4: delete the row; a non-empty image_hash tombstones the ledger
     // row to status='deleted', meal_id=NULL (database.py:578-597) — this is

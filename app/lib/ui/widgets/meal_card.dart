@@ -12,7 +12,12 @@ import '../format.dart';
 class MealCard extends StatelessWidget {
   final Meal meal;
   final bool showItems;
-  const MealCard({super.key, required this.meal, this.showItems = true});
+
+  /// Optional drill-in (Today taps through to the editor). Null keeps the
+  /// card inert, which is what the report/notification-style usages want.
+  final VoidCallback? onTap;
+  const MealCard(
+      {super.key, required this.meal, this.showItems = true, this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -21,8 +26,11 @@ class MealCard extends StatelessWidget {
     final items = safeFoodItems(a); // spec §3.5: never iterate the raw field
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -76,8 +84,9 @@ class MealCard extends StatelessWidget {
                     style: theme.textTheme.bodySmall,
                   ),
                 ),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     );

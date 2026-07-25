@@ -9,6 +9,7 @@ import '../../core/contracts.dart';
 import '../format.dart';
 import '../nl_presenter.dart';
 import '../widgets/meal_card.dart';
+import 'meal_editor_screen.dart';
 
 class TodayScreen extends StatefulWidget {
   final MealsDao dao;
@@ -63,6 +64,15 @@ class TodayScreenState extends State<TodayScreen> {
         _error = 'Could not load today\'s meals: $e';
       });
     }
+  }
+
+  /// Tap-through to the editor: correcting a number by hand is often faster
+  /// than typing a sentence, and it costs no model call.
+  Future<void> _editMeal(Meal meal) async {
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => MealEditorScreen(dao: widget.dao, meal: meal),
+    ));
+    if (mounted) await reload();
   }
 
   Future<void> _sendCorrection() async {
@@ -132,7 +142,8 @@ class TodayScreenState extends State<TodayScreen> {
               ),
             )
           else
-            for (final meal in foodMeals) MealCard(meal: meal),
+            for (final meal in foodMeals)
+              MealCard(meal: meal, onTap: () => _editMeal(meal)),
         ],
       ),
     );

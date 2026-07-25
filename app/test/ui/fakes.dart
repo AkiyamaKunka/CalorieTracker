@@ -11,6 +11,10 @@ import 'package:calorie_tracker/ui/services.dart';
 class FakeDao implements MealsDao {
   final List<Meal> meals = [];
   final Map<String, IngestionStatus> ledger = {};
+
+  /// Rows inserted via [saveMeal] only — lets a test tell an INSERT from an
+  /// in-place edit (an editor save must never do both).
+  final List<Meal> saved = [];
   int _nextId = 1;
   bool duplicatePhoto = false;
 
@@ -31,6 +35,7 @@ class FakeDao implements MealsDao {
   @override
   Future<int> saveMeal(Meal meal, {IngestionStatus? markStatus}) async {
     final id = _nextId++;
+    saved.add(meal);
     meals.add(Meal(
       id: id,
       date: meal.date,
@@ -49,8 +54,31 @@ class FakeDao implements MealsDao {
   }
 
   @override
-  Future<void> updateMealAnalysis(
-      int mealId, Map<String, dynamic> analysis) async {}
+  Future<void> updateMealAnalysis(int mealId, Map<String, dynamic> analysis) =>
+      updateMealFields(mealId, analysis: analysis);
+
+  /// Editor saves, in order: (id, analysis, date, time).
+  final List<(int, Map<String, dynamic>?, String?, String?)> fieldUpdates = [];
+
+  @override
+  Future<void> updateMealFields(int mealId,
+      {Map<String, dynamic>? analysis, String? date, String? time}) async {
+    fieldUpdates.add((mealId, analysis, date, time));
+    final i = meals.indexWhere((m) => m.id == mealId);
+    if (i < 0) return;
+    final m = meals[i];
+    meals[i] = Meal(
+      id: m.id,
+      date: date ?? m.date,
+      time: time ?? m.time,
+      timestamp: m.timestamp,
+      source: m.source,
+      imageHash: m.imageHash,
+      fileId: m.fileId,
+      analysis: analysis ?? m.analysis,
+      corrected: true,
+    );
+  }
 
   @override
   Future<void> deleteMeal(int mealId) async {

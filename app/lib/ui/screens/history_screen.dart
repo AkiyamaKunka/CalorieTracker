@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 
 import '../../core/contracts.dart';
 import '../format.dart';
+import '../widgets/macro_chart.dart';
+import 'day_detail_screen.dart';
 
 class HistoryScreen extends StatefulWidget {
   final MealsDao dao;
@@ -53,6 +55,16 @@ class HistoryScreenState extends State<HistoryScreen> {
     }
   }
 
+  /// Day drill-down. Always reloads on return: edits, adds and deletes all
+  /// change this list, and a local query is far cheaper than plumbing a
+  /// result back through a system back-gesture.
+  Future<void> _openDay(String date) async {
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => DayDetailScreen(dao: widget.dao, date: date),
+    ));
+    if (mounted) await reload();
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loading) return const Center(child: CircularProgressIndicator());
@@ -88,17 +100,39 @@ class HistoryScreenState extends State<HistoryScreen> {
         children: [
           Padding(
             padding: const EdgeInsets.all(16),
-            child: Text(
-              'Average: ~${formatKcal(avg)} kcal / day',
-              key: const Key('historyAverage'),
-              style: Theme.of(context).textTheme.titleMedium,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Average: ~${formatKcal(avg)} kcal / day',
+                  key: const Key('historyAverage'),
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                const SizedBox(height: 16),
+                // Bars in ascending date order with the average as a dashed
+                // reference; tapping a bar opens that day (same target as
+                // the rows below).
+                CalorieTrendChart(
+                  dayTotals: _perDay,
+                  onDayTap: (date) => _openDay(date),
+                ),
+              ],
             ),
           ),
           for (final date in dates)
             ListTile(
+              key: Key('historyDay$date'),
               dense: true,
               title: Text(friendlyHistoryDay(date)),
-              trailing: Text('~${formatKcal(_perDay[date]!)} kcal'),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('~${formatKcal(_perDay[date]!)} kcal'),
+                  const SizedBox(width: 4),
+                  const Icon(Icons.chevron_right, size: 18),
+                ],
+              ),
+              onTap: () => _openDay(date),
             ),
         ],
       ),

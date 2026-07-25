@@ -51,6 +51,14 @@ String displayMacro(Map<String, dynamic> analysis, String key) {
   return isFoodTruthy(v) ? '$v' : '0';
 }
 
+/// Numeric macro grams for CHARTS (the display helpers above return
+/// strings): coerced, negatives clamped to 0 so a hostile value can't
+/// invert a stacked segment.
+num safeMacro(Map<String, dynamic> analysis, String key) {
+  final v = safeNumber(analysis[key]);
+  return v < 0 ? 0 : v;
+}
+
 /// Item calories: safeNumber when numeric, raw string otherwise
 /// (spec §3.5 / §5.4 item display fallback).
 String displayItemCalories(dynamic v) {

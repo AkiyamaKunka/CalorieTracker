@@ -45,6 +45,14 @@ enum IngestionStatus { processing, saved, skipped, failed, deleted }
 abstract class MealsDao {
   Future<int> saveMeal(Meal meal, {IngestionStatus? markStatus});
   Future<void> updateMealAnalysis(int mealId, Map<String, dynamic> analysis);
+
+  /// Editor save (spec §9): rewrites the analysis AND optionally moves the
+  /// meal's local date/time — a mis-dated meal must be fixable in place
+  /// rather than by delete + re-add (which would burn the photo's ledger
+  /// row to 'deleted' and lose the original intake provenance). Sets
+  /// corrected=1 like [updateMealAnalysis].
+  Future<void> updateMealFields(int mealId,
+      {Map<String, dynamic>? analysis, String? date, String? time});
   Future<void> deleteMeal(int mealId); // tombstones the ledger row (spec §2)
   Future<List<Meal>> mealsBetween(String startDate, String endDate);
   Future<List<Meal>> recentMeals({int days = 7}); // food-only, oldest-first

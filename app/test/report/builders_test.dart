@@ -46,6 +46,10 @@ class FakeMealsDao implements MealsDao {
       int mealId, Map<String, dynamic> analysis) async {}
 
   @override
+  Future<void> updateMealFields(int mealId,
+      {Map<String, dynamic>? analysis, String? date, String? time}) async {}
+
+  @override
   Future<void> deleteMeal(int mealId) async {}
 
   @override

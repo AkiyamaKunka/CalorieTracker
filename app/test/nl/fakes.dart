@@ -63,6 +63,13 @@ class FakeDao implements MealsDao {
   }
 
   @override
+  Future<void> updateMealFields(int mealId,
+      {Map<String, dynamic>? analysis, String? date, String? time}) async {
+    // The NL path never moves date/time; editor coverage lives in ui tests.
+    if (analysis != null) await updateMealAnalysis(mealId, analysis);
+  }
+
+  @override
   Future<void> updateMealAnalysis(int mealId, Map<String, dynamic> analysis) async {
     if (throwOnUpdate) throw StateError('boom');
     updates.add((mealId, analysis));
