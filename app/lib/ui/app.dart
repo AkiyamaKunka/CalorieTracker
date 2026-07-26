@@ -10,6 +10,7 @@ import 'screens/add_flow.dart';
 import 'screens/history_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/today_screen.dart';
+import 'refresh_signal.dart';
 import 'services.dart';
 
 class CalorieTrackerApp extends StatelessWidget {
@@ -57,14 +58,24 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    mealsChangedSignal.addListener(_onMealsChanged);
     // Onboarding: with no API key yet, land on Settings first.
     _index = widget.services.settings.apiKey.trim().isEmpty ? 2 : 0;
   }
 
   @override
   void dispose() {
+    mealsChangedSignal.removeListener(_onMealsChanged);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  /// A meal was saved somewhere in the app (watcher, catch-up, coverage
+  /// screen). Re-query the data tabs so what's on screen matches the DB.
+  void _onMealsChanged() {
+    if (!mounted) return;
+    _todayKey.currentState?.reload();
+    _historyKey.currentState?.reload();
   }
 
   @override
@@ -136,6 +147,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         selectedIndex: _index,
         onDestinationSelected: (i) {
           setState(() => _index = i);
+          // BOTH data tabs reload on selection. They live in an IndexedStack,
+          // so their state survives tab switches — and a meal logged while
+          // the app was open (watcher, background job, or the launch/resume
+          // catch-up) is invisible on a screen built before it existed. That
+          // is exactly how a 07:40 latte, correctly analyzed and saved at
+          // 18:06, stayed missing from Today until a manual pull-to-refresh
+          // (real report, 2026-07-26).
+          if (i == 0) _todayKey.currentState?.reload();
           if (i == 1) _historyKey.currentState?.reload();
         },
         destinations: const [

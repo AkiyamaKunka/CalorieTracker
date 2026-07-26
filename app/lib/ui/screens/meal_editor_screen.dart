@@ -7,10 +7,14 @@
 /// source 'app_manual' and no image hash.
 library;
 
+import 'dart:typed_data';
+
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 
+import '../../core/coerce.dart' show normalizeImageHash;
 import '../../core/contracts.dart';
-import '../format.dart' show formatKcal;
+import '../format.dart' show formatKcal, isoDate;
 import '../meal_edit_logic.dart';
 import '../widgets/macro_chart.dart';
 
@@ -21,6 +25,8 @@ class MealEditorScreen extends StatefulWidget {
     this.meal,
     this.initialDate,
     this.now,
+    this.fromPhoto,
+    this.makeThumb,
   });
 
   final MealsDao dao;
@@ -33,6 +39,16 @@ class MealEditorScreen extends StatefulWidget {
 
   /// Injectable clock for tests.
   final DateTime Function()? now;
+
+  /// Creating a meal FROM a photo the analyzer refused (not-food verdict or
+  /// a permanent failure): the saved meal carries the photo's identity, so
+  /// the ledger is closed (no re-offer loop) and the row gets its picture.
+  /// The user supplies the numbers the model wouldn't.
+  final IntakePhoto? fromPhoto;
+
+  /// Thumbnail generator seam (production: makeMealThumb in a compute
+  /// isolate); null skips the thumb.
+  final Future<Uint8List?> Function(Uint8List original)? makeThumb;
 
   bool get isNew => meal == null;
 
@@ -59,10 +75,17 @@ class _MealEditorScreenState extends State<MealEditorScreen> {
     super.initState();
     final clock = widget.now ?? DateTime.now;
     final meal = widget.meal;
+    final photo = widget.fromPhoto;
     _draft = meal != null
         ? MealDraft.fromMeal(meal)
         : (MealDraft.blank(clock())
-          ..dateIso = widget.initialDate ?? MealDraft.blank(clock()).dateIso);
+          // A photo's own capture moment beats "now" for a manual log.
+          ..dateIso = photo?.capturedAt != null
+              ? isoDate(photo!.capturedAt!)
+              : (widget.initialDate ?? MealDraft.blank(clock()).dateIso)
+          ..time = photo?.capturedAt != null
+              ? formatClock(photo!.capturedAt!)
+              : MealDraft.blank(clock()).time);
     _desc = TextEditingController(text: _draft.description);
     _cal = TextEditingController(text: _draft.calories);
     _pro = TextEditingController(text: _draft.protein);
@@ -156,14 +179,34 @@ class _MealEditorScreenState extends State<MealEditorScreen> {
     try {
       final analysis = _draft.toAnalysis();
       if (widget.isNew) {
-        await widget.dao.saveMeal(Meal(
-          id: 0, // assigned on insert
-          date: _draft.dateIso.trim(),
-          time: _draft.time.trim(),
-          timestamp: (widget.now ?? DateTime.now)().toIso8601String(),
-          source: 'app_manual',
-          analysis: analysis,
-        ));
+        final photo = widget.fromPhoto;
+        // md5 of the ORIGINAL bytes: the same identity the watcher uses, so
+        // marking the ledger 'saved' stops this photo being re-offered
+        // forever (spec §6.2/§2.3).
+        final hash = photo == null
+            ? ''
+            : normalizeImageHash(md5.convert(photo.bytes).toString());
+        final id = await widget.dao.saveMeal(
+          Meal(
+            id: 0, // assigned on insert
+            date: _draft.dateIso.trim(),
+            time: _draft.time.trim(),
+            timestamp: (widget.now ?? DateTime.now)().toIso8601String(),
+            source: photo == null ? 'app_manual' : 'app_manual_photo',
+            imageHash: hash,
+            fileId: photo?.assetId ?? '',
+            analysis: analysis,
+          ),
+          markStatus: photo == null ? null : IngestionStatus.saved,
+        );
+        if (photo != null && widget.makeThumb != null) {
+          try {
+            final thumb = await widget.makeThumb!(photo.bytes);
+            if (thumb != null) await widget.dao.saveMealThumb(id, thumb);
+          } catch (_) {
+            // A missing thumb is cosmetic; the meal is already saved.
+          }
+        }
       } else {
         await widget.dao.updateMealFields(
           widget.meal!.id,

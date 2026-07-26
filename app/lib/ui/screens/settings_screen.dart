@@ -10,11 +10,15 @@ import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart' as launcher;
 
 import '../../core/contracts.dart';
+import 'package:flutter/foundation.dart' show compute;
+
+import '../../services/analyzer/normalize.dart' show makeMealThumb;
 import '../../services/photo/coverage.dart';
 import '../../services/photo/photo_library.dart';
 import '../photo_pipeline.dart';
 import '../services.dart';
 import 'coverage_screen.dart';
+import 'meal_editor_screen.dart';
 
 enum KeyValidationState { idle, validating, valid, invalid }
 
@@ -473,6 +477,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 requestPhotoPermission: widget.requestPhotoPermission,
                 initialLookbackDays: _lookbackDays,
                 library: widget.photoLibrary,
+                logManually: (photo) async =>
+                    await Navigator.of(context).push<bool>(MaterialPageRoute(
+                      builder: (_) => MealEditorScreen(
+                        dao: widget.dao,
+                        fromPhoto: photo,
+                        makeThumb: (b) => compute(makeMealThumb, b),
+                      ),
+                    )) ==
+                    true,
               ),
             )),
           ),

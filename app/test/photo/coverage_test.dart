@@ -60,7 +60,7 @@ void main() {
     final report = await auditor.audit(lookbackDays: 2);
     expect(report.scanned, 6);
     expect(report.logged.single.mealId, 42);
-    expect(report.skippedNonFood, 1);
+    expect(report.skippedNonFood, hasLength(1));
     expect(report.failed.single.assetId, 'a3');
     expect(report.deleted, 1);
     expect(report.inFlight, 1);
@@ -99,7 +99,7 @@ void main() {
     ];
     final report = await auditor.audit(lookbackDays: 2);
     expect(report.missing, isEmpty); // intake refuses them by design (§8)
-    expect(report.skippedNonFood, 0,
+    expect(report.skippedNonFood, isEmpty,
         reason: 'calling an unanalyzable photo "not food" was a lie');
     expect(report.tooLargeToAnalyze, 1);
     expect(report.fullyCovered, isFalse,

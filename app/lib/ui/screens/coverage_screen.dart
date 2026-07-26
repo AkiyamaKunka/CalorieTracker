@@ -23,6 +23,7 @@ class CoverageScreen extends StatefulWidget {
     required this.requestPhotoPermission,
     required this.initialLookbackDays,
     this.library,
+    this.logManually,
   });
 
   final CoverageAuditor auditor;
@@ -32,6 +33,10 @@ class CoverageScreen extends StatefulWidget {
 
   /// For missing-photo thumbnails; null degrades to icons.
   final PhotoLibrary? library;
+
+  /// Open the manual editor for a photo the model refused. Null hides the
+  /// action (tests / no editor context).
+  final Future<bool> Function(IntakePhoto photo)? logManually;
 
   @override
   State<CoverageScreen> createState() => _CoverageScreenState();
@@ -126,6 +131,22 @@ class _CoverageScreenState extends State<CoverageScreen> {
             : '$label done — $failures of ${items.length} could not be '
                 'processed (kept for retry).')));
     await _runAudit();
+  }
+
+  /// A "not food" tombstone is otherwise permanent: re-analysis repeats the
+  /// verdict, so the only real remedy is letting the user enter the meal.
+  Future<void> _logManually(CoverageItem item) async {
+    final open = widget.logManually;
+    if (open == null) return;
+    final photo = await widget.auditor.loadForProcessing(item);
+    if (!mounted) return;
+    if (photo == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('That photo is no longer readable.')));
+      return;
+    }
+    final saved = await open(photo);
+    if (saved && mounted) await _runAudit();
   }
 
   Future<Uint8List?> _thumbFor(CoverageItem item) =>
@@ -229,6 +250,31 @@ class _CoverageScreenState extends State<CoverageScreen> {
                       style: theme.textTheme.bodySmall),
                 ),
             ],
+            if (report.skippedNonFood.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              Text('Judged "not food" (${report.skippedNonFood.length})',
+                  style: theme.textTheme.titleSmall),
+              Text(
+                  'Drinks and unusual dishes land here. Tap one to log it '
+                  'yourself if the AI got it wrong.',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+              for (final item in report.skippedNonFood.take(_maxTiles))
+                _PhotoTile(
+                  item: item,
+                  thumb: _thumbFor(item),
+                  onTap: widget.logManually == null
+                      ? null
+                      : () => _logManually(item),
+                ),
+              if (report.skippedNonFood.length > _maxTiles)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Text(
+                      '…and ${report.skippedNonFood.length - _maxTiles} more.',
+                      style: theme.textTheme.bodySmall),
+                ),
+            ],
             if (report.failed.isNotEmpty) ...[
               const SizedBox(height: 16),
               Row(
@@ -305,7 +351,7 @@ class _SummaryCard extends StatelessWidget {
             Text(
               [
                 '${report.logged.length} logged as meals',
-                '${report.skippedNonFood} not food',
+                '${report.skippedNonFood.length} not food',
                 if (report.failed.isNotEmpty)
                     '${report.failed.length} failed',
                 if (report.deleted > 0) '${report.deleted} deleted by you',
@@ -346,14 +392,19 @@ class _SummaryCard extends StatelessWidget {
 }
 
 class _PhotoTile extends StatelessWidget {
-  const _PhotoTile({required this.item, required this.thumb});
+  const _PhotoTile({required this.item, required this.thumb, this.onTap});
   final CoverageItem item;
   final Future<Uint8List?> thumb;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return ListTile(
+      onTap: onTap,
+      trailing: onTap == null
+          ? null
+          : const Icon(Icons.edit_outlined, size: 18),
       contentPadding: EdgeInsets.zero,
       leading: FutureBuilder<Uint8List?>(
         future: thumb,

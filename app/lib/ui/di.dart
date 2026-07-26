@@ -27,6 +27,7 @@ import 'background_glue.dart';
 import 'format.dart' show isoDate;
 import 'meal_thumbs.dart';
 import 'photo_pipeline.dart';
+import 'refresh_signal.dart';
 import 'services.dart';
 
 /// Singleton wiring of the workflow-fixed factories, in the spec'd startup
@@ -86,8 +87,12 @@ class AppServices {
 
     // Photo pipeline glue (spec §2.3/§3/§6): intake streams → md5 → reserve
     // → analyze → save/skip/fail, notification-style snackbar on save.
-    final pipeline =
-        PhotoPipeline(dao: dao, analyzer: analyzer, notify: notify);
+    final pipeline = PhotoPipeline(
+        dao: dao,
+        analyzer: analyzer,
+        notify: notify,
+        // Open screens re-query instead of showing pre-save data.
+        onMealSaved: signalMealsChanged);
 
     final photoLibrary = PhotoManagerLibrary();
     final ui = UiServices(

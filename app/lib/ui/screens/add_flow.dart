@@ -3,11 +3,14 @@
 /// (NlExecutor → NlReply list incl. the delete-confirmation modal, spec §4).
 library;
 
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 
 import '../../core/contracts.dart';
 import '../nl_presenter.dart';
+import '../../services/analyzer/normalize.dart' show makeMealThumb;
 import '../photo_pipeline.dart';
+import 'meal_editor_screen.dart';
 import '../services.dart';
 
 /// Entry point wired to the FAB. [onChanged] refreshes the Today screen.
@@ -69,16 +72,28 @@ class _AddPhotoScreenState extends State<AddPhotoScreen> {
 
   Future<void> _analyze(IntakePhoto photo) async {
     setState(() => _analyzing = true);
-    final pipeline = PhotoPipeline(
-        dao: widget.services.dao, analyzer: widget.services.analyzer);
     // User-picked → deliberate: reclaims failed/skipped/deleted ledger rows
     // (spec §2.3 caller policies).
     final deliberate = IntakePhoto(photo.bytes, photo.assetId, photo.fileName,
         capturedAt: photo.capturedAt, deliberate: true);
-    final outcome = await pipeline.process(deliberate);
+    // Through the APP'S ONE pipeline (services.processPhoto → enqueue), not
+    // a private instance: a second analyzer call concurrent with the
+    // watcher self-inflicts rate limits and doubles resident photo bytes.
+    final process = widget.services.processPhoto;
+    final outcome = process != null
+        ? await process(deliberate)
+        : await PhotoPipeline(
+                dao: widget.services.dao, analyzer: widget.services.analyzer)
+            .process(deliberate);
     if (!mounted) return;
     setState(() => _analyzing = false);
-    await showDialog<void>(
+    // A refused photo must not be a dead end: the model saying "not food"
+    // (routine for drinks) or failing permanently would otherwise leave the
+    // user with no way to log that photo AT ALL — re-picking it just
+    // repeats the same verdict.
+    final canLogManually = outcome.kind == PhotoOutcomeKind.skipped ||
+        outcome.kind == PhotoOutcomeKind.failed;
+    final choice = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text(switch (outcome.kind) {
@@ -88,15 +103,38 @@ class _AddPhotoScreenState extends State<AddPhotoScreen> {
           PhotoOutcomeKind.alreadyTracked => 'Already logged',
           PhotoOutcomeKind.failed => 'Analysis failed',
         }),
-        content: Text(outcome.message),
+        content: Text(canLogManually
+            ? '${outcome.message}\n\nIf this IS food, log it yourself — '
+                'the photo stays attached to the meal.'
+            : outcome.message),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
+            onPressed: () => Navigator.of(ctx).pop('ok'),
             child: const Text('OK'),
           ),
+          if (canLogManually)
+            FilledButton(
+              key: const Key('logManuallyButton'),
+              onPressed: () => Navigator.of(ctx).pop('manual'),
+              child: const Text('Log manually'),
+            ),
         ],
       ),
     );
+    if (!mounted) return;
+    if (choice == 'manual') {
+      final saved = await Navigator.of(context).push<bool>(MaterialPageRoute(
+        builder: (_) => MealEditorScreen(
+          dao: widget.services.dao,
+          fromPhoto: deliberate,
+          makeThumb: (bytes) => compute(makeMealThumb, bytes),
+        ),
+      ));
+      if (saved == true && mounted) {
+        Navigator.of(context).pop();
+        return;
+      }
+    }
     if (outcome.kind == PhotoOutcomeKind.saved && mounted) {
       Navigator.of(context).pop();
     }

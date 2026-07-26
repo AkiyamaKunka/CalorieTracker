@@ -38,6 +38,11 @@ class PhotoPipeline {
   /// Notification-style surface (snackbar) for background saves.
   final void Function(String message)? notify;
 
+  /// Called after a meal row lands, so open screens can re-query. Separate
+  /// from [notify] on purpose: notify also fires for failures, and only a
+  /// SAVE changes what the lists should show.
+  final void Function()? onMealSaved;
+
   final List<StreamSubscription<IntakePhoto>> _subs = [];
 
   // FIFO tail: bound-stream photos process ONE at a time. A backfill batch
@@ -46,7 +51,11 @@ class PhotoPipeline {
   // process() never throws (contract), so the chain cannot break.
   Future<void> _tail = Future.value();
 
-  PhotoPipeline({required this.dao, required this.analyzer, this.notify});
+  PhotoPipeline(
+      {required this.dao,
+      required this.analyzer,
+      this.notify,
+      this.onMealSaved});
 
   /// Wire the watcher intake with BACKPRESSURE: the intake awaits each
   /// photo's turn through the same global FIFO the share stream uses, so
@@ -168,6 +177,7 @@ class PhotoPipeline {
       final summary =
           '${mealDescription(analysis)} — ~${displayTotalCalories(analysis)} kcal';
       notify?.call('Meal logged: $summary');
+      onMealSaved?.call();
       return PhotoOutcome(PhotoOutcomeKind.saved, 'Logged meal #$id: $summary',
           analysis: analysis);
     } catch (e) {

@@ -60,8 +60,11 @@ class CoverageReport {
   /// Hash ledgered as saved → a meal exists.
   final List<CoverageItem> logged;
 
-  /// Ledgered skipped (model said not food) — informational.
-  final int skippedNonFood;
+  /// Ledgered skipped: the model said "not food". LISTED, not just
+  /// counted — drinks and ambiguous dishes land here routinely, and a
+  /// tombstoned photo is otherwise unloggable forever (the automated path
+  /// never re-offers it and a re-analysis repeats the verdict).
+  final List<CoverageItem> skippedNonFood;
 
   /// Ledgered failed — eligible for a deliberate retry (spec §6.5).
   final List<CoverageItem> failed;
@@ -138,7 +141,8 @@ class CoverageAuditor {
     final logged = <CoverageItem>[];
     final failed = <CoverageItem>[];
     final missing = <CoverageItem>[];
-    var skipped = 0, deleted = 0, inFlight = 0, unreadable = 0, done = 0;
+    final skipped = <CoverageItem>[];
+    var deleted = 0, inFlight = 0, unreadable = 0, done = 0;
     var tooLarge = 0;
 
     for (final asset in assets) {
@@ -179,7 +183,7 @@ class CoverageAuditor {
             mealId: row.mealId,
           ));
         case IngestionStatus.skipped:
-          skipped++;
+          skipped.add(item);
         case IngestionStatus.failed:
           failed.add(item);
         case IngestionStatus.deleted:
