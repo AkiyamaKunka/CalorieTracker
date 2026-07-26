@@ -1,6 +1,8 @@
 /// Add flow (FAB): pick a recent photo (grid → analyzing spinner → meal
-/// card, spec §2.3/§3/§6 pipeline with deliberate=true) or paste text
-/// (NlExecutor → NlReply list incl. the delete-confirmation modal, spec §4).
+/// card, spec §2.3/§3/§6 pipeline with deliberate=true), or DESCRIBE a meal
+/// in free text (NlExecutor.describeMeal → estimate → the meal editor as a
+/// preview → insert). The describe path is new-meal ONLY; corrections and
+/// deletes stay on Today's chat box (handleText, spec §4).
 library;
 
 import 'package:flutter/foundation.dart' show compute;
@@ -199,8 +201,11 @@ class _AddPhotoScreenState extends State<AddPhotoScreen> {
   }
 }
 
-/// Paste-text meal entry feeding the NL executor (spec §4.6 new_meal path,
-/// but any intent works — replies render through the shared presenter).
+/// Describe-a-meal entry: free text (any language) → describeMeal's
+/// new-meal-only estimate → the meal editor as a PREVIEW → insert with
+/// source 'manual_text' (spec §4.6 parity). Nothing is written until the
+/// user saves from the editor, so a model guess about food it never saw
+/// cannot silently enter the day's totals.
 class AddTextScreen extends StatefulWidget {
   final NlExecutor executor;
   final MealsDao dao;
@@ -241,6 +246,11 @@ class _AddTextScreenState extends State<AddTextScreen> {
       setState(() => _error = outcome.error);
       return;
     }
+    final warning = outcome.warning;
+    if (warning != null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(warning)));
+    }
     final saved = await Navigator.of(context).push<bool>(MaterialPageRoute(
       builder: (_) => MealEditorScreen(
         dao: widget.dao,
@@ -256,7 +266,12 @@ class _AddTextScreenState extends State<AddTextScreen> {
     final theme = Theme.of(context);
     return Scaffold(
       appBar: AppBar(title: const Text('Describe a meal')),
-      body: Padding(
+      // SCROLLABLE: the field is autofocused (keyboard up on entry) and the
+      // inline messages can run several lines — the quota-pause refusal is
+      // four paragraphs. In a fixed Column that pushed the primary button
+      // off-screen, where it is not even hit-testable (measured at 390x844
+      // and smaller by the review probes).
+      body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,

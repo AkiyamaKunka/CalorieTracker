@@ -115,6 +115,27 @@ void main() {
     expect((await executor.describeMeal('eggs')).error, contains('Error'));
   });
 
+  test('multiple described meals: first previewed, the rest ANNOUNCED',
+      () async {
+    analyzer.next = {
+      'intent': 'multi',
+      'actions': [
+        {'intent': 'new_meal', 'analysis': foodAnalysis(cal: 400)},
+        {'intent': 'new_meal', 'analysis': foodAnalysis(cal: 250)},
+      ],
+    };
+    final out = await executor.describeMeal(
+        'eggs for breakfast, then a salad for lunch');
+    expect(out.analysis!['total_calories'], 400);
+    expect(out.warning, contains('2 meals'),
+        reason: 'dropping the rest silently under-counts the day');
+  });
+
+  test('a single meal carries no warning', () async {
+    analyzer.next = {'intent': 'new_meal', 'analysis': foodAnalysis()};
+    expect((await executor.describeMeal('eggs')).warning, isNull);
+  });
+
   test('a quota pause refuses BEFORE any model call', () async {
     final settings = await testSettings();
     await settings.setQuotaPauseUntil(

@@ -317,6 +317,10 @@ class DefaultNlExecutor implements NlExecutor {
     }
     // Reuse the hardened normalization: bare arrays, {actions:[...]},
     // single objects and junk all collapse to a list of actions (§4.1).
+    // A compound description ("eggs for breakfast, then a salad for lunch")
+    // legitimately yields SEVERAL new_meals — preview the first, but say so,
+    // because dropping the rest in silence under-counts the day invisibly.
+    final meals = <Map<String, dynamic>>[];
     for (final action in normalizeActions(result)) {
       if (action['intent'] != 'new_meal') continue;
       final dynamic analysis = action['analysis'];
@@ -327,10 +331,19 @@ class DefaultNlExecutor implements NlExecutor {
       if (sanitized.containsKey('food_items')) {
         sanitized['food_items'] = safeFoodItems(sanitized);
       }
-      return DescribeOutcome(analysis: sanitized);
+      meals.add(sanitized);
     }
-    return const DescribeOutcome(
-        error: "🚫 I couldn't detect food in that description.");
+    if (meals.isEmpty) {
+      return const DescribeOutcome(
+          error: "🚫 I couldn't detect food in that description.");
+    }
+    return DescribeOutcome(
+      analysis: meals.first,
+      warning: meals.length > 1
+          ? 'That described ${meals.length} meals — only the first is shown. '
+              'Describe the others one at a time.'
+          : null,
+    );
   }
 
   /// The full TEXT_HANDLER_PROMPT with the five placeholders (spec §1.2).

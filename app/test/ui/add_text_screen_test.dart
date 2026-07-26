@@ -82,6 +82,53 @@ void main() {
     expect(executor.describedTexts, isEmpty);
   });
 
+  testWidgets('the primary button stays reachable with the keyboard up AND a '
+      'long error (small phone)', (tester) async {
+    // The old fixed Column pushed the button off-screen, where Flutter does
+    // not even hit-test it: the user could neither retry nor read the error.
+    tester.view.physicalSize = const Size(375, 667);
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.viewInsets = const FakeViewPadding(bottom: 336); // keyboard
+    addTearDown(tester.view.reset);
+
+    executor.nextDescribe = const DescribeOutcome(
+        error: '⏸️ Gemini is paused right now.\n\n'
+            'Gemini daily free-tier quota is paused until 3:00 PM.\n\n'
+            'Text corrections and manual meal parsing need Gemini too, so I '
+            'did not send this request.');
+    await tester.pumpWidget(host());
+    await tester.enterText(find.byKey(const Key('addTextField')), 'eggs');
+    await tester.tap(find.byKey(const Key('addTextSend')));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull, reason: 'no RenderFlex overflow');
+    expect(find.byKey(const Key('addTextError')), findsOneWidget);
+    // Scroll the page (not the field's own scroller) and tap the button —
+    // proof it is reachable at all, which the fixed Column made impossible.
+    await tester.drag(
+        find.byType(SingleChildScrollView), const Offset(0, -300));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('addTextSend')));
+    await tester.pumpAndSettle();
+    expect(executor.describedTexts, hasLength(2));
+  });
+
+  testWidgets('a compound description warns that only the first meal is shown',
+      (tester) async {
+    executor.nextDescribe = const DescribeOutcome(
+      analysis: {'is_food': true, 'total_calories': 300},
+      warning: 'That described 2 meals — only the first is shown. '
+          'Describe the others one at a time.',
+    );
+    await tester.pumpWidget(host());
+    await tester.enterText(find.byKey(const Key('addTextField')),
+        'eggs for breakfast, then a salad for lunch');
+    await tester.tap(find.byKey(const Key('addTextSend')));
+    await tester.pump(const Duration(milliseconds: 300));
+    // Silence here would under-count the day with nothing to notice.
+    expect(find.textContaining('only the first is shown'), findsOneWidget);
+  });
+
   testWidgets('cancelling the editor leaves the log untouched', (tester) async {
     await tester.pumpWidget(host());
     await tester.enterText(find.byKey(const Key('addTextField')), 'eggs');

@@ -132,9 +132,14 @@ class NlReply {
 /// Result of describing a meal in free text: [analysis] on success (the
 /// coerced food analysis, NOT yet saved), else [error] for display.
 class DescribeOutcome {
-  const DescribeOutcome({this.analysis, this.error});
+  const DescribeOutcome({this.analysis, this.error, this.warning});
   final Map<String, dynamic>? analysis;
   final String? error;
+
+  /// Non-fatal honesty: set when the reply described MORE meals than the
+  /// single previewed one. Silently keeping the first would under-count the
+  /// user's day with no way to notice.
+  final String? warning;
   bool get ok => analysis != null;
 }
 
