@@ -7,7 +7,6 @@ import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 
 import '../../core/contracts.dart';
-import '../nl_presenter.dart';
 import '../../services/analyzer/normalize.dart' show makeMealThumb;
 import '../photo_pipeline.dart';
 import 'meal_editor_screen.dart';
@@ -31,7 +30,8 @@ Future<void> openAddFlow(BuildContext context, UiServices services,
           ListTile(
             key: const Key('addFromText'),
             leading: const Icon(Icons.edit_note),
-            title: const Text('Describe by text'),
+            title: const Text('Describe a meal'),
+            subtitle: const Text('Say what you ate, in any language'),
             onTap: () => Navigator.of(ctx).pop('text'),
           ),
         ],
@@ -44,7 +44,8 @@ Future<void> openAddFlow(BuildContext context, UiServices services,
         builder: (_) => AddPhotoScreen(services: services)));
   } else if (choice == 'text') {
     await Navigator.of(context).push(MaterialPageRoute<void>(
-        builder: (_) => AddTextScreen(executor: services.executor)));
+        builder: (_) => AddTextScreen(
+            executor: services.executor, dao: services.dao)));
   } else {
     return;
   }
@@ -202,7 +203,9 @@ class _AddPhotoScreenState extends State<AddPhotoScreen> {
 /// but any intent works — replies render through the shared presenter).
 class AddTextScreen extends StatefulWidget {
   final NlExecutor executor;
-  const AddTextScreen({super.key, required this.executor});
+  final MealsDao dao;
+  const AddTextScreen(
+      {super.key, required this.executor, required this.dao});
 
   @override
   State<AddTextScreen> createState() => _AddTextScreenState();
@@ -211,6 +214,7 @@ class AddTextScreen extends StatefulWidget {
 class _AddTextScreenState extends State<AddTextScreen> {
   final TextEditingController _controller = TextEditingController();
   bool _sending = false;
+  String? _error;
 
   @override
   void dispose() {
@@ -218,22 +222,38 @@ class _AddTextScreenState extends State<AddTextScreen> {
     super.dispose();
   }
 
-  Future<void> _send() async {
+  /// Describe → PREVIEW → save. The analysis opens in the meal editor
+  /// instead of being written straight to the log: a text estimate is the
+  /// model's guess about a meal it never saw, so the numbers deserve a look
+  /// before they enter the day's totals (and the editor already owns all the
+  /// validation).
+  Future<void> _describe() async {
     final text = _controller.text.trim();
     if (text.isEmpty || _sending) return;
-    setState(() => _sending = true);
-    try {
-      final replies = await widget.executor.handleText(text);
-      if (!mounted) return;
-      await presentNlReplies(context, widget.executor, replies);
-      if (mounted) Navigator.of(context).pop();
-    } finally {
-      if (mounted) setState(() => _sending = false);
+    setState(() {
+      _sending = true;
+      _error = null;
+    });
+    final outcome = await widget.executor.describeMeal(text);
+    if (!mounted) return;
+    setState(() => _sending = false);
+    if (!outcome.ok) {
+      setState(() => _error = outcome.error);
+      return;
     }
+    final saved = await Navigator.of(context).push<bool>(MaterialPageRoute(
+      builder: (_) => MealEditorScreen(
+        dao: widget.dao,
+        initialAnalysis: outcome.analysis,
+        newMealSource: 'manual_text', // spec §4.6 parity
+      ),
+    ));
+    if (saved == true && mounted) Navigator.of(context).pop();
   }
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return Scaffold(
       appBar: AppBar(title: const Text('Describe a meal')),
       body: Padding(
@@ -246,21 +266,38 @@ class _AddTextScreenState extends State<AddTextScreen> {
               controller: _controller,
               maxLines: 4,
               autofocus: true,
+              textInputAction: TextInputAction.newline,
               decoration: const InputDecoration(
-                hintText: 'e.g. "two eggs and toast with butter"',
+                labelText: 'What did you eat?',
+                hintText: 'e.g. "two eggs and toast with butter"\n'
+                    'or "一碗牛肉面加一个鸡蛋"',
                 border: OutlineInputBorder(),
               ),
             ),
+            const SizedBox(height: 8),
+            Text(
+              'Any language works. You will see the estimate and can fix it '
+              'before it is saved.',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+            if (_error != null) ...[
+              const SizedBox(height: 12),
+              Text(_error!,
+                  key: const Key('addTextError'),
+                  style: TextStyle(color: theme.colorScheme.error)),
+            ],
             const SizedBox(height: 12),
-            FilledButton(
+            FilledButton.icon(
               key: const Key('addTextSend'),
-              onPressed: _sending ? null : _send,
-              child: _sending
+              onPressed: _sending ? null : _describe,
+              icon: _sending
                   ? const SizedBox(
-                      width: 18,
-                      height: 18,
+                      width: 16,
+                      height: 16,
                       child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Text('Log it'),
+                  : const Icon(Icons.auto_awesome),
+              label: Text(_sending ? 'Estimating…' : 'Estimate this meal'),
             ),
           ],
         ),
@@ -268,3 +305,4 @@ class _AddTextScreenState extends State<AddTextScreen> {
     );
   }
 }
+

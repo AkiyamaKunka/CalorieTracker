@@ -209,6 +209,23 @@ class FakeExecutor implements NlExecutor {
     confirmedDeletes.add(mealIds);
     return confirmResult;
   }
+
+  /// Scripted describe result; default is a simple food analysis.
+  DescribeOutcome nextDescribe = const DescribeOutcome(analysis: {
+    'is_food': true,
+    'meal_description': 'Beef noodle soup',
+    'total_calories': 650,
+    'total_protein_g': 30,
+    'total_carbs_g': 80,
+    'total_fat_g': 18,
+  });
+  final List<String> describedTexts = [];
+
+  @override
+  Future<DescribeOutcome> describeMeal(String text) async {
+    describedTexts.add(text);
+    return nextDescribe;
+  }
 }
 
 class FakeSettings implements SettingsStore {

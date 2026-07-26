@@ -285,6 +285,54 @@ class DefaultNlExecutor implements NlExecutor {
     return executeParsed(result, userText, meals);
   }
 
+  /// Describe-only path (app-only, spec §9): analyze [text] as a brand-new
+  /// meal and hand the analysis back for preview. NOTHING is saved.
+  ///
+  /// The prompt is built with an EMPTY meals list on purpose — the shared
+  /// prompt's own rule ("If the user describes food but meals_list is empty,
+  /// it MUST be a new_meal") then makes the intent deterministic, so no new
+  /// prompt and no server divergence. Multi-action replies are normalized
+  /// the same way handleText does, and the first new_meal wins.
+  @override
+  Future<DescribeOutcome> describeMeal(String text) async {
+    final userText = text.trim();
+    if (userText.isEmpty) {
+      return const DescribeOutcome(error: 'Type what you ate first.');
+    }
+    if (settings.isQuotaPaused) {
+      return DescribeOutcome(
+          error: _quotaPauseMessage(settings.quotaPauseUntil!));
+    }
+    final prompt = buildPrompt(const [], userText, DateTime.now());
+    final Map<String, dynamic>? result;
+    try {
+      result = await analyzer.textIntent(prompt);
+    } catch (_) {
+      return const DescribeOutcome(
+          error: '❌ Error contacting AI. Please try again.');
+    }
+    if (result == null) {
+      return const DescribeOutcome(
+          error: '❌ Error contacting AI. Please try again.');
+    }
+    // Reuse the hardened normalization: bare arrays, {actions:[...]},
+    // single objects and junk all collapse to a list of actions (§4.1).
+    for (final action in normalizeActions(result)) {
+      if (action['intent'] != 'new_meal') continue;
+      final dynamic analysis = action['analysis'];
+      if (analysis is! Map || !isTruthy(analysis['is_food'])) continue;
+      final sanitized = <String, dynamic>{
+        for (final e in analysis.entries) '${e.key}': e.value,
+      };
+      if (sanitized.containsKey('food_items')) {
+        sanitized['food_items'] = safeFoodItems(sanitized);
+      }
+      return DescribeOutcome(analysis: sanitized);
+    }
+    return const DescribeOutcome(
+        error: "🚫 I couldn't detect food in that description.");
+  }
+
   /// The full TEXT_HANDLER_PROMPT with the five placeholders (spec §1.2).
   /// Note the dietary profile is deliberately NOT appended here — spec §1.3
   /// pins it to the photo prompt only.

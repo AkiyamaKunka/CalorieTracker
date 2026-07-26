@@ -27,6 +27,8 @@ class MealEditorScreen extends StatefulWidget {
     this.now,
     this.fromPhoto,
     this.makeThumb,
+    this.initialAnalysis,
+    this.newMealSource = 'app_manual',
   });
 
   final MealsDao dao;
@@ -39,6 +41,16 @@ class MealEditorScreen extends StatefulWidget {
 
   /// Injectable clock for tests.
   final DateTime Function()? now;
+
+  /// Pre-fill for a NEW meal (describe-by-text preview): the model's
+  /// analysis lands in the form so the user can check and correct the
+  /// numbers BEFORE anything is written. [meal] stays null, so this is
+  /// still an insert, not an in-place edit.
+  final Map<String, dynamic>? initialAnalysis;
+
+  /// source column for the inserted row — 'manual_text' for describe-by-text
+  /// (server parity, spec §4.6), 'app_manual' for a hand-typed meal.
+  final String newMealSource;
 
   /// Creating a meal FROM a photo the analyzer refused (not-food verdict or
   /// a permanent failure): the saved meal carries the photo's identity, so
@@ -76,16 +88,33 @@ class _MealEditorScreenState extends State<MealEditorScreen> {
     final clock = widget.now ?? DateTime.now;
     final meal = widget.meal;
     final photo = widget.fromPhoto;
+    final prefill = widget.initialAnalysis;
     _draft = meal != null
         ? MealDraft.fromMeal(meal)
-        : (MealDraft.blank(clock())
-          // A photo's own capture moment beats "now" for a manual log.
-          ..dateIso = photo?.capturedAt != null
-              ? isoDate(photo!.capturedAt!)
-              : (widget.initialDate ?? MealDraft.blank(clock()).dateIso)
-          ..time = photo?.capturedAt != null
-              ? formatClock(photo!.capturedAt!)
-              : MealDraft.blank(clock()).time);
+        : (prefill != null
+            // Describe-by-text preview: load the model's estimate into the
+            // form. The synthetic row exists only to reuse the draft loader;
+            // widget.meal stays null, so saving INSERTS.
+            ? MealDraft.fromMeal(Meal(
+                id: 0,
+                date: photo?.capturedAt != null
+                    ? isoDate(photo!.capturedAt!)
+                    : (widget.initialDate ?? isoDate(clock())),
+                time: photo?.capturedAt != null
+                    ? formatClock(photo!.capturedAt!)
+                    : formatClock(clock()),
+                timestamp: clock().toIso8601String(),
+                source: widget.newMealSource,
+                analysis: prefill,
+              ))
+            : (MealDraft.blank(clock())
+              // A photo's own capture moment beats "now" for a manual log.
+              ..dateIso = photo?.capturedAt != null
+                  ? isoDate(photo!.capturedAt!)
+                  : (widget.initialDate ?? MealDraft.blank(clock()).dateIso)
+              ..time = photo?.capturedAt != null
+                  ? formatClock(photo!.capturedAt!)
+                  : MealDraft.blank(clock()).time));
     _desc = TextEditingController(text: _draft.description);
     _cal = TextEditingController(text: _draft.calories);
     _pro = TextEditingController(text: _draft.protein);
@@ -192,7 +221,10 @@ class _MealEditorScreenState extends State<MealEditorScreen> {
             date: _draft.dateIso.trim(),
             time: _draft.time.trim(),
             timestamp: (widget.now ?? DateTime.now)().toIso8601String(),
-            source: photo == null ? 'app_manual' : 'app_manual_photo',
+            // Photo-backed manual logs keep their own source; otherwise the
+            // caller decides ('manual_text' for describe-by-text, server
+            // parity spec §4.6; 'app_manual' for a hand-typed meal).
+            source: photo == null ? widget.newMealSource : 'app_manual_photo',
             imageHash: hash,
             fileId: photo?.assetId ?? '',
             analysis: analysis,

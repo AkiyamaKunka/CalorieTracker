@@ -129,6 +129,15 @@ class NlReply {
       this.pendingDeleteLabels = const []});
 }
 
+/// Result of describing a meal in free text: [analysis] on success (the
+/// coerced food analysis, NOT yet saved), else [error] for display.
+class DescribeOutcome {
+  const DescribeOutcome({this.analysis, this.error});
+  final Map<String, dynamic>? analysis;
+  final String? error;
+  bool get ok => analysis != null;
+}
+
 /// The hardened NL executor (spec §4): builds the prompt from the meals
 /// snapshot, normalizes single/multi/bare-array responses, caps at 5
 /// actions, merges duplicate deletes, contains per-action failures, and
@@ -136,6 +145,15 @@ class NlReply {
 abstract class NlExecutor {
   Future<List<NlReply>> handleText(String userText);
   Future<String> confirmPendingDelete(List<int> mealIds);
+
+  /// Analyze free text as a NEW meal ONLY — never a correction or delete —
+  /// and return it for PREVIEW without saving. Works in any language (the
+  /// shared prompt is multilingual). The dedicated entry exists because
+  /// handleText is intent-routed: "a latte and two eggs" against a
+  /// non-empty recent-meals list can legitimately parse as a correction of
+  /// an existing meal, which is not what someone typing into a "describe a
+  /// meal" box means.
+  Future<DescribeOutcome> describeMeal(String text);
 }
 
 /// Photo intake events (spec §6). Implementations: Android background watch
