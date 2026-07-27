@@ -477,7 +477,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 processPhoto: widget.processPhoto!,
                 requestPhotoPermission: widget.requestPhotoPermission,
                 initialLookbackDays: _lookbackDays,
-                canAnalyze: widget.settings.canAnalyze,
+                // A closure, not a snapshot: the quota latch can arm while
+                // the coverage screen's bulk run is mid-batch.
+                canAnalyze: () => widget.settings.canAnalyze,
                 library: widget.photoLibrary,
                 logManually: (photo) async =>
                     await Navigator.of(context).push<bool>(MaterialPageRoute(

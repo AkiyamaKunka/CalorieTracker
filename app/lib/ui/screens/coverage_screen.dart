@@ -15,6 +15,8 @@ import '../../services/photo/coverage.dart';
 import '../../services/photo/photo_library.dart';
 import '../photo_pipeline.dart';
 
+bool _alwaysCan() => true;
+
 class CoverageScreen extends StatefulWidget {
   const CoverageScreen({
     super.key,
@@ -22,7 +24,7 @@ class CoverageScreen extends StatefulWidget {
     required this.processPhoto,
     required this.requestPhotoPermission,
     required this.initialLookbackDays,
-    this.canAnalyze = true,
+    this.canAnalyze = _alwaysCan,
     this.library,
     this.logManually,
   });
@@ -32,9 +34,12 @@ class CoverageScreen extends StatefulWidget {
   final Future<bool> Function() requestPhotoPermission;
   final int initialLookbackDays;
 
-  /// AppSettings.canAnalyze: a key for the ACTIVE provider and no quota
-  /// latch. When false the bulk actions are refused — see [_confirmBulk].
-  final bool canAnalyze;
+  /// Live read of AppSettings.canAnalyze: a key for the ACTIVE provider and
+  /// no quota latch. A FUNCTION, not a bool — the latch can arm MID-BATCH
+  /// (photo 1's daily-quota 429 sets the pause), and a value captured at
+  /// construction would wave photos 2..N into the reserve-then-release
+  /// shredder that [_processAll] exists to avoid.
+  final bool Function() canAnalyze;
 
   /// For missing-photo thumbnails; null degrades to icons.
   final PhotoLibrary? library;
@@ -117,7 +122,7 @@ class _CoverageScreenState extends State<CoverageScreen> {
     // that mark "the model already saw this and said no" would all
     // disappear, without a single model call, and the next full-window
     // catch-up would re-analyze every one of them.
-    if (!widget.canAnalyze) {
+    if (!widget.canAnalyze()) {
       if (!mounted) return false;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
           content: Text('No analysis is possible right now — add a key for '
@@ -159,13 +164,36 @@ class _CoverageScreenState extends State<CoverageScreen> {
       _progressTotal = items.length;
     });
     var failures = 0;
+    var attempted = 0;
+    var stopped = false;
     for (final item in items) {
+      // Re-checked EVERY iteration, not once up front: photo 1's daily-quota
+      // 429 arms the pause latch mid-batch, and every photo pushed after
+      // that is reserved (reclaiming its skipped/failed tombstone), makes
+      // zero model calls, then released — and releasing a just-reclaimed row
+      // DELETES it. Stopping here is what keeps rows 2..N in the ledger.
+      if (!widget.canAnalyze()) {
+        stopped = true;
+        break;
+      }
       final photo = await widget.auditor.loadForProcessing(item);
+      attempted++;
       if (photo == null) {
         failures++;
       } else {
         final outcome = await widget.processPhoto(photo);
-        if (outcome.kind == PhotoOutcomeKind.failed) failures++;
+        if (outcome.kind == PhotoOutcomeKind.failed) {
+          failures++;
+          // A retryable failure (rate limit, network, quota, missing key)
+          // means the NEXT photo cannot succeed either — and its reservation
+          // was released, not burned, so this photo's tombstone is already
+          // gone. Cap the damage at one row.
+          if (outcome.retryable) {
+            stopped = true;
+            if (mounted) setState(() => _progressDone = attempted);
+            break;
+          }
+        }
       }
       // Keep going even if the user left: the confirmation promised the work
       // continues, and abandoning photos 4..21 mid-run would leave their
@@ -178,11 +206,17 @@ class _CoverageScreenState extends State<CoverageScreen> {
       });
     }
     if (!mounted) return;
+    final remaining = items.length - attempted;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(failures == 0
-            ? '$label done (${items.length} photos).'
-            : '$label done — $failures of ${items.length} could not be '
-                'processed (kept for retry).')));
+        content: Text(stopped
+            ? '$label stopped after $attempted of ${items.length}: analysis '
+                'is unavailable right now (quota pause or missing key). The '
+                'remaining $remaining photo${remaining == 1 ? '' : 's'} were '
+                'not touched — run this again later.'
+            : failures == 0
+                ? '$label done (${items.length} photos).'
+                : '$label done — $failures of ${items.length} could not be '
+                    'processed (kept in the Failed list for retry).')));
     await _runAudit();
   }
 
