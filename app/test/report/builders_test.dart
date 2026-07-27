@@ -8,7 +8,6 @@
 library;
 
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:calorie_tracker/core/contracts.dart';
 import 'package:calorie_tracker/data/meals_logic.dart'
@@ -16,25 +15,15 @@ import 'package:calorie_tracker/data/meals_logic.dart'
 import 'package:calorie_tracker/services/report/builders.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-class FakeMealsDao implements MealsDao {
-  final List<Meal> meals = [];
+import '../support/fake_meals_dao.dart';
+
+/// The report suite's DAO: [BaseFakeDao] plus the export envelope carrying
+/// the weight/activity tables these tests populate directly.
+class FakeMealsDao extends BaseFakeDao {
   final List<Map<String, dynamic>> activities = [];
   final List<Map<String, dynamic>> weights = [];
 
   @override
-  Future<List<Meal>> mealsBetween(String startDate, String endDate) async =>
-      meals
-          .where((m) =>
-              m.date.compareTo(startDate) >= 0 && m.date.compareTo(endDate) <= 0)
-          .toList();
-
-  @override
-  Future<List<Meal>> recentMeals({int days = 7}) async => meals;
-
-  @override
-  /// The REAL envelope shape (meals_logic.buildExportEnvelope): tables live
-  /// under 'tables'. The old flat fake made the reader's top-level lookup
-  /// look correct while production returned nothing.
   Future<String> exportJson() async => jsonEncode({
         'format': 'calorie_tracker_export',
         'version': 1,
@@ -45,58 +34,6 @@ class FakeMealsDao implements MealsDao {
           'activities': activities,
         },
       });
-
-  @override
-  Future<int> saveMeal(Meal meal, {IngestionStatus? markStatus}) async {
-    meals.add(meal);
-    return meals.length;
-  }
-
-  @override
-  Future<void> updateMealAnalysis(
-      int mealId, Map<String, dynamic> analysis) async {}
-
-  @override
-  Future<void> updateMealFields(int mealId,
-      {Map<String, dynamic>? analysis, String? date, String? time}) async {}
-
-  @override
-  Future<void> deleteMeal(int mealId) async {}
-
-  @override
-  Future<bool> isDuplicatePhoto(String imageHash) async => false;
-
-  @override
-  Future<bool> reservePhotoHash(String imageHash,
-          {required String source, bool reclaimDeliberate = false}) async =>
-      true;
-
-  @override
-  Future<void> markPhotoHash(String imageHash, IngestionStatus status,
-      {int? mealId}) async {}
-
-  @override
-  Future<void> releasePhotoHash(String imageHash) async {}
-
-  @override
-  Future<void> reclaimStaleProcessing() async {}
-
-  @override
-  Future<({IngestionStatus status, int? mealId})?> photoStatus(
-      String imageHash) async => null;
-
-  @override
-  Future<void> saveMealThumb(int mealId, Uint8List jpeg) async {}
-
-  @override
-  Future<Uint8List?> mealThumb(int mealId) async => null;
-
-  @override
-  Future<void> saveBodyWeight(String date, double kg) async {}
-
-  @override
-  Future<void> saveActivity(String date,
-      {num? activeCalories, int? steps, double? distanceKm}) async {}
 }
 
 int _nextId = 1;
