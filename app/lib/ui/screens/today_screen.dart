@@ -18,8 +18,19 @@ class TodayScreen extends StatefulWidget {
 
   /// Photo thumbnails for the cards; null (tests) renders placeholders.
   final MealThumbResolver? thumbs;
+
+  /// Opens the add flow (+ button). The button is rendered HERE, inside the
+  /// body above the chat box, not as a Scaffold FAB: a bottom-right Scaffold
+  /// FAB floats over the body's last rows — which on this screen is the
+  /// correction box, so the + sat exactly on top of the send button (user
+  /// report 2026-07-27). Null (tests / other hosts) hides the button.
+  final VoidCallback? onAdd;
   const TodayScreen(
-      {super.key, required this.dao, required this.executor, this.thumbs});
+      {super.key,
+      required this.dao,
+      required this.executor,
+      this.thumbs,
+      this.onAdd});
 
   @override
   State<TodayScreen> createState() => TodayScreenState();
@@ -107,9 +118,29 @@ class TodayScreenState extends State<TodayScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final onAdd = widget.onAdd;
     return Column(
       children: [
-        Expanded(child: _body(context)),
+        Expanded(
+          child: Stack(
+            children: [
+              _body(context),
+              // Anchored 16px above the chat box (the Column's next child),
+              // so the two can never overlap — at any text scale, and when
+              // the keyboard pushes the chat box up.
+              if (onAdd != null)
+                Positioned(
+                  right: 16,
+                  bottom: 16,
+                  child: FloatingActionButton(
+                    key: const Key('addMealFab'),
+                    onPressed: onAdd,
+                    child: const Icon(Icons.add),
+                  ),
+                ),
+            ],
+          ),
+        ),
         _correctionBox(context),
       ],
     );

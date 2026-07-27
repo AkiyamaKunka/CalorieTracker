@@ -120,7 +120,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
               key: _todayKey,
               dao: s.dao,
               executor: s.executor,
-              thumbs: s.thumbs),
+              thumbs: s.thumbs,
+              // The + button lives INSIDE TodayScreen (above its chat box),
+              // not as a Scaffold FAB — a Scaffold FAB floats exactly over
+              // the chat box's send button.
+              onAdd: () => openAddFlow(context, s,
+                  onChanged: () async => _todayKey.currentState?.reload())),
           HistoryScreen(key: _historyKey, dao: s.dao, thumbs: s.thumbs),
           SettingsScreen(
             settings: s.settings,
@@ -136,14 +141,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           ),
         ],
       ),
-      floatingActionButton: _index == 0
-          ? FloatingActionButton(
-              key: const Key('addMealFab'),
-              onPressed: () => openAddFlow(context, s,
-                  onChanged: () async => _todayKey.currentState?.reload()),
-              child: const Icon(Icons.add),
-            )
-          : null,
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
         onDestinationSelected: (i) {
