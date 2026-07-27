@@ -224,7 +224,9 @@ class _MealEditorScreenState extends State<MealEditorScreen> {
             // Photo-backed manual logs keep their own source; otherwise the
             // caller decides ('manual_text' for describe-by-text, server
             // parity spec §4.6; 'app_manual' for a hand-typed meal).
-            source: photo == null ? widget.newMealSource : 'app_manual_photo',
+            source: photo == null
+                ? widget.newMealSource
+                : MealSource.appManualPhoto,
             imageHash: hash,
             fileId: photo?.assetId ?? '',
             analysis: analysis,

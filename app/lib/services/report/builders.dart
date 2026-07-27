@@ -271,7 +271,16 @@ class ReportBuilderImpl implements ReportBuilder {
   Future<Map<String, dynamic>> _exportTables() async {
     try {
       final decoded = jsonDecode(await _dao.exportJson());
-      if (decoded is Map) return decoded.cast<String, dynamic>();
+      if (decoded is! Map) return const {};
+      // The real export is an ENVELOPE: {format, version, exported_at,
+      // tables:{...}} (meals_logic.buildExportEnvelope). Reading the
+      // top level found the table keys only in the test fake, so the
+      // weight and activity sections were always empty in production
+      // while the suite stayed green. Accept both shapes: envelope first,
+      // then a flat map, so an older export file still renders.
+      final inner = decoded['tables'];
+      if (inner is Map) return inner.cast<String, dynamic>();
+      return decoded.cast<String, dynamic>();
     } catch (_) {
       // Fall through: reports render without fitness sections.
     }

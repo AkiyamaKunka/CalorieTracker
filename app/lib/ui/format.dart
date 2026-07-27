@@ -9,6 +9,7 @@ library;
 import 'package:intl/intl.dart';
 
 import '../core/coerce.dart';
+import '../data/meals_logic.dart' as logic;
 import '../core/contracts.dart';
 import 'meal_edit_logic.dart' show parseClock;
 
@@ -129,7 +130,13 @@ int? typicalDayKcal(Map<String, num> perDay) {
   return median.truncate(); // int(median) truncation, spec §5.1
 }
 
-String isoDate(DateTime d) => DateFormat('yyyy-MM-dd').format(d);
+/// Re-exported from the data layer on purpose: this value is WRITTEN to
+/// meals.date and compared with string ranges in SQL, so it must be
+/// Gregorian with ASCII digits regardless of the device locale.
+/// `DateFormat('yyyy-MM-dd')` is locale-sensitive (Buddhist-era years,
+/// Eastern-Arabic digits), which on the photo/editor write paths would
+/// persist dates that no query could match.
+String isoDate(DateTime d) => logic.isoDate(d);
 
 /// History day label: 'Today' for today, else `%A, %b %d` e.g.
 /// 'Tuesday, Jul 15' (spec §5.3).

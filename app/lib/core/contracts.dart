@@ -32,6 +32,11 @@ abstract final class MealSource {
   /// photo involved. Distinct from [manualText] on purpose: it records that
   /// NO model produced these values.
   static const String appManual = 'app_manual';
+
+  /// Hand-entered numbers for a photo the model REFUSED (the coverage
+  /// screen's "log it yourself" path): a photo exists and its md5 is
+  /// ledgered, but every number came from the user.
+  static const String appManualPhoto = 'app_manual_photo';
 }
 
 /// A logged meal row (spec §2: meals table).

@@ -11,6 +11,8 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:calorie_tracker/core/contracts.dart';
+import 'package:calorie_tracker/data/meals_logic.dart'
+    show buildExportEnvelope;
 import 'package:calorie_tracker/services/report/builders.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -30,10 +32,18 @@ class FakeMealsDao implements MealsDao {
   Future<List<Meal>> recentMeals({int days = 7}) async => meals;
 
   @override
+  /// The REAL envelope shape (meals_logic.buildExportEnvelope): tables live
+  /// under 'tables'. The old flat fake made the reader's top-level lookup
+  /// look correct while production returned nothing.
   Future<String> exportJson() async => jsonEncode({
-        'meals': <Object>[],
-        'body_weight': weights,
-        'activities': activities,
+        'format': 'calorie_tracker_export',
+        'version': 1,
+        'exported_at': '2026-07-17T20:00:00.000',
+        'tables': {
+          'meals': <Object>[],
+          'body_weight': weights,
+          'activities': activities,
+        },
       });
 
   @override
@@ -121,6 +131,31 @@ Map<String, dynamic> food(num? cal,
     };
 
 void main() {
+  // Reader↔writer agreement, using the REAL envelope builder. The report
+  // used to read table keys at the TOP level while the DAO nests them under
+  // 'tables', so the weight/activity sections were always empty in
+  // production — and the suite stayed green because the fake produced the
+  // reader's preferred shape. Build the payload with the production writer
+  // so the two can never drift apart again.
+  test('weight section renders from the REAL export envelope', () async {
+    final dao = _EnvelopeDao(buildExportEnvelope({
+      'meals': const [],
+      'body_weight': const [
+        {'date': '2026-07-17', 'weight_kg': 71.5, 'source': 'manual'},
+        {'date': '2026-07-10', 'weight_kg': 72.5, 'source': 'manual'},
+      ],
+      'activities': const [
+        {'date': '2026-07-17', 'active_calories': 480, 'distance_km': 5.2},
+      ],
+    }, DateTime(2026, 7, 17, 20)));
+    final builder =
+        ReportBuilderImpl(dao, clock: () => DateTime(2026, 7, 17, 20));
+    final report = await builder.dailyReport('2026-07-17');
+    // Weight: proves table rows now reach the reader through the envelope.
+    expect(report, contains('71.5'), reason: 'weight row must reach the text');
+    expect(report, contains('7-day trend'));
+  });
+
   // Fixed clock: Friday 2026-07-17, 20:00 local.
   final clock = DateTime(2026, 7, 17, 20, 0);
   late FakeMealsDao dao;
@@ -617,4 +652,13 @@ Sources
     final ReportBuilder b = createReportBuilder(dao);
     expect(await b.todaySummary(), contains('Summary'));
   });
+}
+
+
+/// DAO whose exportJson returns a caller-supplied envelope verbatim.
+class _EnvelopeDao extends FakeMealsDao {
+  _EnvelopeDao(this.envelope);
+  final Map<String, dynamic> envelope;
+  @override
+  Future<String> exportJson() async => jsonEncode(envelope);
 }

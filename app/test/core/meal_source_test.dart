@@ -13,14 +13,16 @@ void main() {
     expect(MealSource.appWatch, 'app_watch');
     expect(MealSource.manualText, 'manual_text');
     expect(MealSource.appManual, 'app_manual');
+    expect(MealSource.appManualPhoto, 'app_manual_photo');
   });
 
-  test('all four are distinct — app_manual vs manual_text is deliberate', () {
+  test('all five are distinct — each records a different provenance', () {
     const all = [
       MealSource.appPhoto,
       MealSource.appWatch,
       MealSource.manualText,
       MealSource.appManual,
+      MealSource.appManualPhoto,
     ];
     expect(all.toSet(), hasLength(all.length),
         reason: 'manual_text = parsed from a description; app_manual = '
