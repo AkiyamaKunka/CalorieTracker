@@ -36,6 +36,7 @@ VECTOR_FILES = [
     "captured_at.json",
     "mismatch.json",
     "report_formulas.json",
+    "weight.json",
 ]
 
 
@@ -163,3 +164,18 @@ def test_vector_files_are_freshly_generated(name):
         f"shared/vectors/{name} is stale — regenerate with "
         "scripts/generate_shared_vectors.py and review the diff"
     )
+
+
+# ─── weight.json ───────────────────────────────────────────────────
+
+@pytest.mark.parametrize("payload,case", _cases("weight.json"))
+def test_weight_vectors(payload, case):
+    """parse_weight_kg is hand-ported to Dart; these vectors are the only
+    thing standing between the two implementations and a silent divergence
+    in the user's weigh-in history (one was found and fixed 2026-07-27:
+    Python round-half-to-even vs Dart round-half-away)."""
+    import nutrition
+
+    assert case["fn"] == "parse_weight_kg"
+    actual = nutrition.parse_weight_kg(gen.decode_value(case["input"]))
+    assert actual == gen.decode_value(case["expected"])

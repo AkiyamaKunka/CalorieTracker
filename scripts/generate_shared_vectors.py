@@ -38,6 +38,7 @@ sys.path.insert(0, str(ROOT / "android"))
 
 import telegram_bot  # noqa: E402
 import upload_photo  # noqa: E402
+import nutrition
 import utils  # noqa: E402
 
 VECTORS_DIR = ROOT / "shared" / "vectors"
@@ -695,12 +696,61 @@ def build_report_formulas():
 
 # ─── entry point ───────────────────────────────────────────────────
 
+def build_weight():
+    """parse_weight_kg — two hand-ported implementations with a rounding
+    trap: Python's round(kg, 1) is half-to-EVEN on the exact binary value,
+    Dart's .round() is half-away-from-zero, and multiplying by 10 first
+    MANUFACTURES ties. Measured divergence before pinning: 72.25kg stored as
+    72.2 by the server and 72.3 by the app; 29.95kg refused by one and
+    accepted by the other. One weigh-in, two numbers, depending on client."""
+    cases = []
+
+    def case(case_id, text):
+        cases.append({
+            "id": f"parse_weight_{case_id}",
+            "fn": "parse_weight_kg",
+            "input": encode_value(text),
+            "expected": encode_value(nutrition.parse_weight_kg(text)),
+        })
+
+    # Exact binary ties (.25/.5/.75) — half-to-even territory.
+    case("tie_quarter_down", "72.25kg")
+    case("tie_three_quarter_up", "72.75kg")
+    case("tie_half_exact", "72.5kg")
+    # Decimal .x5 values that are NOT binary ties.
+    for v in ["72.35", "72.45", "72.55", "68.65", "65.15", "71.05"]:
+        case(f"near_tie_{v.replace('.', '_')}", f"{v}kg")
+    # Range boundaries, incl. values that round ACROSS them.
+    case("below_floor", "29.95kg")
+    case("at_floor", "30.0kg")
+    case("above_ceiling", "300.05kg")
+    case("at_ceiling", "300.04kg")
+    # Units and conversion.
+    case("pounds_int", "159 lb")
+    case("pounds_decimal", "160.5 lb")
+    case("pounds_word", "161.3 pounds")
+    case("kg_spaced", "72.4 kg")
+    case("integer_kg", "80kg")
+    # Keyword path (bare number, no unit).
+    case("keyword_bare", "I weigh 72.25")
+    case("keyword_weight", "weight 68.65")
+    # Rejections.
+    case("no_number", "I feel heavy today")
+    case("comma_decimal", "72,5kg")
+    case("not_a_string", 72.5)
+    case("empty", "")
+    case("absurd_high", "900kg")
+    case("absurd_low", "3kg")
+    return {"cases": cases}
+
+
 BUILDERS = {
     "coerce.json": build_coerce,
     "nl_normalize.json": build_nl_normalize,
     "captured_at.json": build_captured_at,
     "mismatch.json": build_mismatch,
     "report_formulas.json": build_report_formulas,
+    "weight.json": build_weight,
 }
 
 

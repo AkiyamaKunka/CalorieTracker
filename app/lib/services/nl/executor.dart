@@ -697,7 +697,35 @@ String _time12(DateTime t) {
 }
 
 /// Python round(x, 1) equivalent for weight display/storage.
-double _round1(num v) => (v * 10).round() / 10;
+/// Python's `round(x, 1)`, not Dart's `.round()`.
+///
+/// The server stores weights with `round(kg, 1)`, which is round-half-to-
+/// EVEN on the exact binary value; Dart's `.round()` is half-away-from-zero.
+/// Measured divergence before this fix, for the same sentence typed into
+/// Telegram vs the app: 72.25kg → 72.2 vs 72.3, 72.35kg → 72.3 vs 72.4, and
+/// 29.95kg → rejected (29.9 is below the 30 kg floor) vs accepted as 30.0.
+/// One body-weight log, two different numbers, depending on which client the
+/// user happened to use. Pinned by shared/vectors/weight.json.
+double _round1(num v) {
+  final d = v.toDouble();
+  // A TRUE tie exists only when the double is an exact multiple of 0.25
+  // (i.e. .25/.5/.75 are binary-exact); then Python rounds half to EVEN.
+  // Everything else — .05/.15/.35/.95 and friends — is stored slightly off
+  // the tie, and Python simply rounds the exact value. Multiplying by 10
+  // first would MANUFACTURE ties: 72.35 is stored as 72.34999…, but
+  // 72.34999… * 10 rounds to exactly 723.5, which is how the naive version
+  // answered 72.4 where the server says 72.3.
+  final quarters = d * 4;
+  final scaled = d * 10;
+  if (quarters == quarters.truncateToDouble() &&
+      scaled == scaled.truncateToDouble() + 0.5) {
+    final floor = scaled.floorToDouble();
+    return (floor % 2 == 0 ? floor : floor + 1) / 10;
+  }
+  // Correct rounding of the exact binary value, matching Python's decimal
+  // rounding for every non-tie case.
+  return double.parse(d.toStringAsFixed(1));
+}
 
 num _clamp(num v, num lo, num hi) => v < lo ? lo : (v > hi ? hi : v);
 

@@ -204,6 +204,28 @@ void main() {
     }
   });
 
+  // The weigh-in path: two hand-ported implementations, and a REAL
+  // divergence found on 2026-07-27 (Python round-half-to-even vs Dart
+  // round-half-away, plus a range boundary that one side accepted and the
+  // other refused). These vectors are generated from the Python function,
+  // so a future edit to either side fails here.
+  group('weight.json', () {
+    final doc = loadVectors('weight');
+    for (final raw in (doc['cases'] as List).cast<Map>()) {
+      final c = raw.cast<String, dynamic>();
+      test('${c['id']}', () {
+        expect(c['fn'], 'parse_weight_kg');
+        final actual = parseWeightKg(decodeSpecials(c['input']));
+        final expected = c['expected'];
+        if (expected == null) {
+          expect(actual, isNull);
+        } else {
+          expect(actual, closeTo((expected as num).toDouble(), 1e-9));
+        }
+      });
+    }
+  });
+
   group('report_formulas.json', () {
     final doc = loadVectors('report_formulas');
     List<Map<String, dynamic>> rows(dynamic input) =>

@@ -1,0 +1,160 @@
+{
+  "cases": [
+    {
+      "id": "parse_weight_tie_quarter_down",
+      "fn": "parse_weight_kg",
+      "input": "72.25kg",
+      "expected": 72.2
+    },
+    {
+      "id": "parse_weight_tie_three_quarter_up",
+      "fn": "parse_weight_kg",
+      "input": "72.75kg",
+      "expected": 72.8
+    },
+    {
+      "id": "parse_weight_tie_half_exact",
+      "fn": "parse_weight_kg",
+      "input": "72.5kg",
+      "expected": 72.5
+    },
+    {
+      "id": "parse_weight_near_tie_72_35",
+      "fn": "parse_weight_kg",
+      "input": "72.35kg",
+      "expected": 72.3
+    },
+    {
+      "id": "parse_weight_near_tie_72_45",
+      "fn": "parse_weight_kg",
+      "input": "72.45kg",
+      "expected": 72.5
+    },
+    {
+      "id": "parse_weight_near_tie_72_55",
+      "fn": "parse_weight_kg",
+      "input": "72.55kg",
+      "expected": 72.5
+    },
+    {
+      "id": "parse_weight_near_tie_68_65",
+      "fn": "parse_weight_kg",
+      "input": "68.65kg",
+      "expected": 68.7
+    },
+    {
+      "id": "parse_weight_near_tie_65_15",
+      "fn": "parse_weight_kg",
+      "input": "65.15kg",
+      "expected": 65.2
+    },
+    {
+      "id": "parse_weight_near_tie_71_05",
+      "fn": "parse_weight_kg",
+      "input": "71.05kg",
+      "expected": 71.0
+    },
+    {
+      "id": "parse_weight_below_floor",
+      "fn": "parse_weight_kg",
+      "input": "29.95kg",
+      "expected": null
+    },
+    {
+      "id": "parse_weight_at_floor",
+      "fn": "parse_weight_kg",
+      "input": "30.0kg",
+      "expected": 30.0
+    },
+    {
+      "id": "parse_weight_above_ceiling",
+      "fn": "parse_weight_kg",
+      "input": "300.05kg",
+      "expected": null
+    },
+    {
+      "id": "parse_weight_at_ceiling",
+      "fn": "parse_weight_kg",
+      "input": "300.04kg",
+      "expected": 300.0
+    },
+    {
+      "id": "parse_weight_pounds_int",
+      "fn": "parse_weight_kg",
+      "input": "159 lb",
+      "expected": 72.1
+    },
+    {
+      "id": "parse_weight_pounds_decimal",
+      "fn": "parse_weight_kg",
+      "input": "160.5 lb",
+      "expected": 72.8
+    },
+    {
+      "id": "parse_weight_pounds_word",
+      "fn": "parse_weight_kg",
+      "input": "161.3 pounds",
+      "expected": 73.2
+    },
+    {
+      "id": "parse_weight_kg_spaced",
+      "fn": "parse_weight_kg",
+      "input": "72.4 kg",
+      "expected": 72.4
+    },
+    {
+      "id": "parse_weight_integer_kg",
+      "fn": "parse_weight_kg",
+      "input": "80kg",
+      "expected": 80.0
+    },
+    {
+      "id": "parse_weight_keyword_bare",
+      "fn": "parse_weight_kg",
+      "input": "I weigh 72.25",
+      "expected": 72.2
+    },
+    {
+      "id": "parse_weight_keyword_weight",
+      "fn": "parse_weight_kg",
+      "input": "weight 68.65",
+      "expected": 68.7
+    },
+    {
+      "id": "parse_weight_no_number",
+      "fn": "parse_weight_kg",
+      "input": "I feel heavy today",
+      "expected": null
+    },
+    {
+      "id": "parse_weight_comma_decimal",
+      "fn": "parse_weight_kg",
+      "input": "72,5kg",
+      "expected": null
+    },
+    {
+      "id": "parse_weight_not_a_string",
+      "fn": "parse_weight_kg",
+      "input": 72.5,
+      "expected": null
+    },
+    {
+      "id": "parse_weight_empty",
+      "fn": "parse_weight_kg",
+      "input": "",
+      "expected": null
+    },
+    {
+      "id": "parse_weight_absurd_high",
+      "fn": "parse_weight_kg",
+      "input": "900kg",
+      "expected": null
+    },
+    {
+      "id": "parse_weight_absurd_low",
+      "fn": "parse_weight_kg",
+      "input": "3kg",
+      "expected": null
+    }
+  ]
+}
