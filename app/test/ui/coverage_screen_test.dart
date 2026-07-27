@@ -62,6 +62,8 @@ void main() {
 
     await tester.tap(find.byKey(const Key('logAllMissing')));
     await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('confirmBulkAction')));
+    await tester.pumpAndSettle();
 
     expect(processed, hasLength(1));
     expect(processed.single.assetId, 'a2');
@@ -69,6 +71,22 @@ void main() {
     // Re-audit after acting: now fully covered.
     expect(find.textContaining('accounted for'), findsOneWidget);
     expect(find.byKey(const Key('logAllMissing')), findsNothing);
+  });
+
+  testWidgets('cancelling the bulk confirmation spends nothing', (tester) async {
+    library.assets = [
+      FakeAsset('a2', 'IMG_2.jpg', DateTime(2026, 7, 26, 9), bytesOf(2)),
+    ];
+    await tester.pumpWidget(host());
+    await tester.tap(find.byKey(const Key('runCoverageCheck')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('logAllMissing')));
+    await tester.pumpAndSettle();
+    // 20 photos ≈ 8 minutes of model calls: the user must be able to escape.
+    expect(find.textContaining('model call'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(processed, isEmpty);
   });
 
   testWidgets('denied permission shows the error and never scans',
@@ -122,6 +140,8 @@ void main() {
 
     await tester.tap(find.byKey(const Key('reanalyzeAllSkipped')));
     await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('confirmBulkAction')));
+    await tester.pumpAndSettle();
     expect(processed.single.assetId, 'a9');
     expect(processed.single.deliberate, isTrue,
         reason: 'only a deliberate re-add reclaims a skipped ledger row');
@@ -139,6 +159,8 @@ void main() {
     expect(find.byKey(const Key('retryAllFailed')), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('retryAllFailed')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('confirmBulkAction')));
     await tester.pumpAndSettle();
     expect(processed.single.assetId, 'a3');
     expect(find.textContaining('accounted for'), findsOneWidget);

@@ -100,6 +100,36 @@ class _CoverageScreenState extends State<CoverageScreen> {
     }
   }
 
+  /// Bulk actions are SLOW and spend the user's model budget: each photo is
+  /// a full analysis (~20-25 s through the own-server/Claude provider), run
+  /// one at a time behind the shared FIFO. Twenty photos is eight minutes.
+  /// Ask first, with the real numbers, and let them back out.
+  Future<bool> _confirmBulk(List<CoverageItem> items, String verb) async {
+    final minutes = (items.length * 22 / 60).ceil();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('$verb ${items.length} photo'
+            '${items.length == 1 ? '' : 's'}?'),
+        content: Text(
+            'Each photo is analyzed separately, one after another — expect '
+            'roughly $minutes minute${minutes == 1 ? '' : 's'} and '
+            '${items.length} model call${items.length == 1 ? '' : 's'}. '
+            'You can leave this screen; the work continues.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel')),
+          FilledButton(
+              key: const Key('confirmBulkAction'),
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: Text(verb)),
+        ],
+      ),
+    );
+    return ok ?? false;
+  }
+
   /// Push [items] through the pipeline one at a time, with progress. The
   /// screen re-audits afterwards so the summary reflects reality, not hope.
   Future<void> _processAll(List<CoverageItem> items, String label) async {
@@ -234,7 +264,11 @@ class _CoverageScreenState extends State<CoverageScreen> {
                     key: const Key('logAllMissing'),
                     onPressed: busy
                         ? null
-                        : () => _processAll(report.missing, 'Logging'),
+                        : () async {
+                            if (await _confirmBulk(report.missing, 'Log')) {
+                              await _processAll(report.missing, 'Logging');
+                            }
+                          },
                     child: const Text('Log all'),
                   ),
                 ],
@@ -268,8 +302,13 @@ class _CoverageScreenState extends State<CoverageScreen> {
                     key: const Key('reanalyzeAllSkipped'),
                     onPressed: busy
                         ? null
-                        : () => _processAll(
-                            report.skippedNonFood, 'Re-analyzing'),
+                        : () async {
+                            if (await _confirmBulk(
+                                report.skippedNonFood, 'Analyze again')) {
+                              await _processAll(
+                                  report.skippedNonFood, 'Re-analyzing');
+                            }
+                          },
                     child: const Text('Analyze again'),
                   ),
                 ],
@@ -308,7 +347,11 @@ class _CoverageScreenState extends State<CoverageScreen> {
                     key: const Key('retryAllFailed'),
                     onPressed: busy
                         ? null
-                        : () => _processAll(report.failed, 'Retrying'),
+                        : () async {
+                            if (await _confirmBulk(report.failed, 'Retry')) {
+                              await _processAll(report.failed, 'Retrying');
+                            }
+                          },
                     child: const Text('Retry all'),
                   ),
                 ],
