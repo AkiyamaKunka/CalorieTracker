@@ -1044,7 +1044,7 @@ one SQLite file). Each is pinned by tests named alongside.
 
 ### §9.1 `source` vocabulary (app)
 
-Four wire values, defined once in `core/contracts.dart` as `MealSource` and
+FIVE wire values, defined once in `core/contracts.dart` as `MealSource` and
 never spelled as literals at call sites — the reclaim sweep MATCHES on
 `app_watch` in SQL, so a drifting literal silently changes intake policy
 instead of failing.

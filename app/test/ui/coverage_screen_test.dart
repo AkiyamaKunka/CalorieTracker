@@ -73,6 +73,40 @@ void main() {
     expect(find.byKey(const Key('logAllMissing')), findsNothing);
   });
 
+  testWidgets('a quota-paused bulk action is REFUSED, tombstones survive',
+      (tester) async {
+    // Without the gate this ran to "completion" in seconds with zero model
+    // calls and DELETED every 'skipped' row (reserve reclaims → release
+    // deletes), turning 21 known-not-food photos into "never scanned".
+    library.assets = [
+      FakeAsset('a9', 'Screenshot.jpg', DateTime(2026, 7, 26, 8), bytesOf(9)),
+    ];
+    dao.ledger['h9'] = IngestionStatus.skipped;
+    await tester.pumpWidget(MaterialApp(
+      home: CoverageScreen(
+        auditor: auditor,
+        processPhoto: (photo) async {
+          processed.add(photo);
+          return const PhotoOutcome(PhotoOutcomeKind.saved, 'ok');
+        },
+        requestPhotoPermission: () async => true,
+        initialLookbackDays: 2,
+        canAnalyze: false, // quota latch armed / no key
+        library: library,
+      ),
+    ));
+    await tester.tap(find.byKey(const Key('runCoverageCheck')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('reanalyzeAllSkipped')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('confirmBulkAction')), findsNothing);
+    expect(find.textContaining('No analysis is possible'), findsOneWidget);
+    expect(processed, isEmpty);
+    expect(dao.ledger['h9'], IngestionStatus.skipped,
+        reason: 'the tombstone must survive a refused run');
+  });
+
   testWidgets('cancelling the bulk confirmation spends nothing', (tester) async {
     library.assets = [
       FakeAsset('a2', 'IMG_2.jpg', DateTime(2026, 7, 26, 9), bytesOf(2)),

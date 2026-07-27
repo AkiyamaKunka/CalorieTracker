@@ -22,6 +22,7 @@ class CoverageScreen extends StatefulWidget {
     required this.processPhoto,
     required this.requestPhotoPermission,
     required this.initialLookbackDays,
+    this.canAnalyze = true,
     this.library,
     this.logManually,
   });
@@ -30,6 +31,10 @@ class CoverageScreen extends StatefulWidget {
   final Future<PhotoOutcome> Function(IntakePhoto photo) processPhoto;
   final Future<bool> Function() requestPhotoPermission;
   final int initialLookbackDays;
+
+  /// AppSettings.canAnalyze: a key for the ACTIVE provider and no quota
+  /// latch. When false the bulk actions are refused — see [_confirmBulk].
+  final bool canAnalyze;
 
   /// For missing-photo thumbnails; null degrades to icons.
   final PhotoLibrary? library;
@@ -105,6 +110,20 @@ class _CoverageScreenState extends State<CoverageScreen> {
   /// one at a time behind the shared FIFO. Twenty photos is eight minutes.
   /// Ask first, with the real numbers, and let them back out.
   Future<bool> _confirmBulk(List<CoverageItem> items, String verb) async {
+    // Refuse when no analysis can succeed. This is not politeness: a paused
+    // or key-less run still RESERVES each photo (a deliberate re-add
+    // reclaims 'skipped'), then releases it — and releasing a row that
+    // reserve had just flipped to 'processing' DELETES it. The tombstones
+    // that mark "the model already saw this and said no" would all
+    // disappear, without a single model call, and the next full-window
+    // catch-up would re-analyze every one of them.
+    if (!widget.canAnalyze) {
+      if (!mounted) return false;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('No analysis is possible right now — add a key for '
+              'the selected provider, or wait for the quota pause to end.')));
+      return false;
+    }
     final minutes = (items.length * 22 / 60).ceil();
     final ok = await showDialog<bool>(
       context: context,
@@ -148,7 +167,11 @@ class _CoverageScreenState extends State<CoverageScreen> {
         final outcome = await widget.processPhoto(photo);
         if (outcome.kind == PhotoOutcomeKind.failed) failures++;
       }
-      if (!mounted) return;
+      // Keep going even if the user left: the confirmation promised the work
+      // continues, and abandoning photos 4..21 mid-run would leave their
+      // ledger rows churned for nothing. Only the UI updates need a mounted
+      // screen. (Photos already enqueued are the pipeline's business anyway.)
+      if (!mounted) continue;
       setState(() {
         _actedOn++;
         _progressDone = _actedOn;

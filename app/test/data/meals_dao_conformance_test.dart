@@ -68,10 +68,34 @@ void main() {
     });
 
     test('excludes non-food rows (Python truthiness, not == true)', () async {
-      await insert(date: '2026-07-17', isFood: true, cal: 1);
-      await insert(date: '2026-07-17', isFood: false, cal: 2);
-      final rows = await dao.recentMeals();
-      expect(rows.map((m) => m.analysis['total_calories']), [1]);
+      // The NL new_meal path persists the model's RAW analysis, so is_food
+      // can legitimately be 1 / "yes" / a non-empty list. With `== true`
+      // those meals vanish from THIS list — the numbered snapshot the model
+      // sees — while Today still shows them, so the indices shift and
+      // "correct meal 2" edits a different meal. Bool-only inputs cannot
+      // tell isFoodTruthy from `== true`: the mutant survived them.
+      Future<void> raw(dynamic isFood, num cal) => dao.saveMeal(Meal(
+            id: 0,
+            date: '2026-07-17',
+            time: '12:00 PM',
+            timestamp: '2026-07-17T12:00:00.000',
+            source: MealSource.manualText,
+            analysis: {'is_food': isFood, 'total_calories': cal},
+          ));
+      await raw(true, 1);
+      await raw(1, 2); // truthy int
+      await raw('yes', 3); // truthy string
+      await raw(const [1], 4); // truthy list
+      await raw(false, 90);
+      await raw(0, 91);
+      await raw('', 92);
+      await raw(const <int>[], 93);
+      await raw(null, 94);
+
+      final cals = (await dao.recentMeals())
+          .map((m) => m.analysis['total_calories'])
+          .toList();
+      expect(cals, [1, 2, 3, 4]);
     });
 
     test('orders by timestamp ASC, not by insertion id', () async {
@@ -115,6 +139,33 @@ void main() {
   });
 
   group('updateMealFields', () {
+    test('touches ONLY the target row — siblings are untouched', () async {
+      // Without this, dropping `id = ?` from the WHERE clause passes every
+      // other test: one Save in the editor would rewrite EVERY meal in the
+      // log and mark them all corrected. Verified by mutation.
+      final a = await insert(date: '2026-07-17', time: '08:00 AM', cal: 111);
+      final b = await insert(date: '2026-07-17', time: '01:00 PM', cal: 222);
+      final c = await insert(date: '2026-07-16', time: '07:00 PM', cal: 333);
+
+      await dao.updateMealFields(b,
+          analysis: {'is_food': true, 'total_calories': 999},
+          date: '2026-07-15',
+          time: '09:15 AM');
+
+      final all = await dao.mealsBetween('2026-07-01', '2026-07-31');
+      final byId = {for (final m in all) m.id: m};
+      expect(byId[a]!.analysis['total_calories'], 111);
+      expect(byId[a]!.date, '2026-07-17');
+      expect(byId[a]!.time, '08:00 AM');
+      expect(byId[a]!.corrected, isFalse, reason: 'sibling must not be dirty');
+      expect(byId[c]!.analysis['total_calories'], 333);
+      expect(byId[c]!.corrected, isFalse);
+      // ...and the target did change.
+      expect(byId[b]!.analysis['total_calories'], 999);
+      expect(byId[b]!.date, '2026-07-15');
+      expect(byId[b]!.corrected, isTrue);
+    });
+
     test('analysis-only edit sets corrected and leaves date/time/timestamp',
         () async {
       final id = await insert(date: '2026-07-17', time: '01:00 PM');
@@ -145,6 +196,21 @@ void main() {
   });
 
   group('deleteMeal — the anti-resurrection rule', () {
+    test('deletes ONLY the target row', () async {
+      // Same trap as above: without the id predicate, deleting one meal
+      // empties the whole table and every other test still passes.
+      final keep1 = await insert(date: '2026-07-17', cal: 1);
+      final victim = await insert(date: '2026-07-17', cal: 2);
+      final keep2 = await insert(date: '2026-07-16', cal: 3);
+
+      await dao.deleteMeal(victim);
+
+      final left = (await dao.mealsBetween('2026-07-01', '2026-07-31'))
+          .map((m) => m.id)
+          .toSet();
+      expect(left, {keep1, keep2});
+    });
+
     test('removes the row, TOMBSTONES the ledger, and drops the thumb',
         () async {
       const hash = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6';
