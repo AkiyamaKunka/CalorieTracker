@@ -19,8 +19,9 @@ abstract class SettingsStore {
   /// write the provider selected by [provider].
   String get apiKey;
 
-  /// Active AI provider: 'gemini' | 'openai' | 'anthropic'. String-typed so
-  /// the UI seam stays free of module imports (di adapts the enum).
+  /// Active AI provider: 'gemini' | 'openai' | 'anthropic' | 'server'
+  /// (own server on the Claude subscription). String-typed so the UI seam
+  /// stays free of module imports (di adapts the enum).
   String get provider;
 
   /// Spec §3.3 quota-pause latch: while true, analyses cannot succeed —

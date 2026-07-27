@@ -2,14 +2,24 @@
 
 **Status**: authoritative implementation spec for the on-device Flutter (iOS + Android) port.
 **Extracted from**: the production Python stack at commit `4f9020a` (main). Every rule cites `file:line`.
-**Architecture delta**: the app runs everything on one device — local SQLite, direct Gemini REST calls
-with the user's own API key, on-device photo detection. There is no server, no Telegram, no watcher
-process. Where the Python stack defends against multi-process races, this spec states the honest
-single-process simplification. The Python stack stays in production unchanged.
+**Architecture delta**: the app keeps its DATA on one device — local SQLite, on-device photo
+detection, no Telegram and no Termux watcher process. Where the Python stack defends against
+multi-process races, this spec states the honest single-process simplification (with one exception:
+the app runs a second isolate for background scans — see §9). The Python stack stays in production
+unchanged.
 
-Also note: the server optionally routes photos through a Claude CLI first
-(`telegram_bot.py:1307-1314`, `claude_analyzer.py`). The app does **not** port this; Gemini is the
-only analysis engine. The `analyzed_by` provenance key (`telegram_bot.py:1312`) may be written as
+**ANALYSIS ENGINES (updated 2026-07-26 — this section used to say "Gemini only")**: the app now
+ships FOUR interchangeable implementations of the §3 analyzer seam, chosen by a Settings dropdown:
+Gemini REST (default), OpenAI, Anthropic, and *the user's own server* — which forwards to
+`/api/analyze_photo` on the Python stack and runs the Claude Code CLI under the owner's
+subscription, i.e. the very `claude_analyzer.py` path the original delta said would not be ported.
+Everything downstream of the model reply (coercion, retry/quota rules, persistence) is shared, and
+the golden vectors pin it. Rules below written as "Gemini …" apply to whichever provider is active
+unless they name an HTTP shape.
+
+Historical note: the server optionally routes photos through a Claude CLI first
+(`telegram_bot.py:1307-1314`, `claude_analyzer.py`). The `analyzed_by` provenance key
+(`telegram_bot.py:1312`) may be written as
 `"gemini"` for future auditability but nothing reads it.
 
 ---
@@ -1020,6 +1030,18 @@ one SQLite file). Each is pinned by tests named alongside.
 | Share intake files | n/a | plugin container copies deleted after consumption | receive_sharing_intent contract; unbounded growth otherwise | `share_intake_test` cleanup |
 | Decode ceiling | none (server CLI) | 50 MP header-probe cap before full decode | 108 MP JPEG ≈ 432 MB RGBA in a background isolate | normalize cap (visual) |
 
+### §9.0 divergences added 2026-07-25..27 (the table above was frozen at 07-24)
+
+| Divergence | Server behavior | App behavior | Why | Pinned by |
+|---|---|---|---|---|
+| Editable history | corrections only via NL | full editor: description, date/time move, per-item rows, delete | a mis-typed number should not need a sentence to the model | `meal_edit_logic_test`, `meal_editor_screen_test` |
+| Meal thumbnails | none (Telegram holds the photo) | 160 px JPEG per photo meal in `meal_thumbs`, lazily backfilled from the library | the numbers are only checkable against the picture; gallery originals get deleted | `meal_thumbs_test`, DAO cascade test |
+| Photo-coverage audit | n/a | manual md5 sweep vs the ledger + one-tap log/retry/re-analyze | the watcher can be frozen by the OS for a whole day; the user needs a way to ask "did you get everything?" | `coverage_test`, `coverage_screen_test` |
+| Describe-a-meal | any NL intent in one channel | dedicated screen forcing new-meal semantics (empty meals list) with an editor PREVIEW before insert | a model guess about food it never saw must not enter totals unreviewed | `describe_meal_test`, `add_text_screen_test` |
+| Analysis provider | Claude CLI → Gemini fallback | four selectable providers incl. own-server → Claude subscription | zero API cost via the subscription; provider choice is the user's | `provider_analyzers` suites, `server_analyzer_test` |
+| Textual meal evidence | photo content only | order screenshots / receipts / nutrition labels count as meals; menus, ads, recipes, feeds, cancelled orders do not | a tracker should log what was EATEN, and a phantom meal is worse than a missing one | `test_shared_sync.py` (both rule sets) |
+| In-app refresh signal | n/a (Telegram pushes) | `mealsChangedSignal` — any save re-queries open screens | a meal saved while a screen was open stayed invisible (live report 07-26) | `tab_refresh_test` |
+
 ### §9.1 `source` vocabulary (app)
 
 Four wire values, defined once in `core/contracts.dart` as `MealSource` and
@@ -1033,5 +1055,6 @@ instead of failing.
 | `app_watch` | watcher, background job, catch-up scans | strict — never reclaims; the ONLY value the launch sweep releases |
 | `manual_text` | describe-a-meal screen, NL `new_meal` | n/a (no photo); server parity, `telegram_bot` writes the same string |
 | `app_manual` | meal editor, numbers typed by hand | n/a; distinct from `manual_text` to record that NO model produced the values |
+| `app_manual_photo` | meal editor reached from the coverage screen's "log it yourself" | a photo EXISTS and its md5 is ledgered, but every number came from the user |
 
 Pinned by `test/core/meal_source_test.dart` (frozen strings + distinctness).

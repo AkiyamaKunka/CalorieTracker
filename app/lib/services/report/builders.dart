@@ -243,6 +243,13 @@ DateTime? _parseIsoDay(String s) {
 
 // ─── The builder ───────────────────────────────────────────────────
 
+/// NOTE ON REACH: only [dailyReport] is wired in the shipping app (di.dart
+/// feeds it to the daily notification). [todaySummary], [history] and
+/// [stats] are the ported server formatters kept deliberately: they are the
+/// parity surface for spec §5 and are pinned by builders_test, so the day a
+/// Reports screen or a /stats-style command appears they are already correct
+/// rather than re-derived. Do not delete them as "unused" — but do not
+/// assume a UI change is visible through them either.
 class ReportBuilderImpl implements ReportBuilder {
   ReportBuilderImpl(this._dao, {DateTime Function()? clock})
       : _clock = clock ?? DateTime.now;

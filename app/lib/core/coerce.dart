@@ -2,8 +2,10 @@
 ///
 /// Direct ports of utils.safe_number / safe_food_items / parse_boolish /
 /// parse_ai_json from the Python codebase (see docs/APP_PORT_SPEC.md §3.5).
-/// Gemini's JSON mode guarantees syntax, not schema: every field read from a
-/// model response goes through these, never trusted raw.
+/// A model's JSON mode guarantees syntax, not schema — and these now sit
+/// behind Gemini, OpenAI, Anthropic and a Claude-CLI round-trip, any of
+/// which can answer with the wrong shape. Every field read from a model
+/// response goes through here, never trusted raw.
 library;
 
 import 'dart:convert';

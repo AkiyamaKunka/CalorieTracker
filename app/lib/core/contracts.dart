@@ -138,10 +138,12 @@ class AnalysisOutcome {
       required this.wall});
 }
 
-/// Gemini-backed analyzer (spec §3): callers hand ORIGINAL bytes; the
-/// implementation normalizes (1568px q85 JPEG), calls generateContent with
-/// response_mime_type application/json, applies retry/quota-pause rules, and
-/// returns coerced output. Never throws for model/network trouble.
+/// The analysis seam (spec §3). FOUR implementations satisfy it — Gemini
+/// REST, OpenAI, Anthropic, and the user's own server running Claude Code —
+/// so the contract is deliberately transport-agnostic: callers hand ORIGINAL
+/// bytes; the implementation normalizes (1568px q85 JPEG), asks its provider
+/// for JSON, applies the §3.3 retry/quota-pause rules, and returns COERCED
+/// output. Never throws for model/network trouble.
 abstract class AnalyzerService {
   Future<AnalysisOutcome> analyzePhoto(Uint8List originalBytes);
   Future<Map<String, dynamic>?> textIntent(String prompt); // raw JSON or null

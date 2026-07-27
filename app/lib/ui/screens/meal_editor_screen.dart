@@ -3,8 +3,11 @@
 /// Every rule lives in ui/meal_edit_logic.dart (parsing, bounds, the
 /// analysis merge) — this file is the form around it. Saving an EXISTING
 /// meal goes through updateMealFields (keeps the row id, the photo's ledger
-/// provenance, and marks corrected=1); saving a NEW meal inserts with
-/// source 'app_manual' and no image hash.
+/// provenance, and marks corrected=1). A NEW meal's provenance depends on
+/// how it arrived: MealSource.appManual (typed numbers, no photo, no hash),
+/// MealSource.manualText (describe-a-meal preview, no hash), or
+/// MealSource.appManualPhoto WITH the photo's md5 when the user hand-enters
+/// a photo the model refused.
 library;
 
 import 'dart:typed_data';

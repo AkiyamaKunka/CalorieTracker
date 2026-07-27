@@ -311,7 +311,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        Text('Gemini', style: theme.textTheme.titleMedium),
+        // Not 'Gemini': this section configures whichever of the four
+        // providers is selected.
+        Text('AI analysis', style: theme.textTheme.titleMedium),
         const SizedBox(height: 8),
         DropdownButtonFormField<String>(
           key: const Key('providerDropdown'),

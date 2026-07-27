@@ -186,5 +186,7 @@ Future<Database>? _singleton;
 /// double-open when two callers race the first access.
 Future<Database> appDatabase() => _singleton ??= openAppDatabase();
 
-/// Test/reset hook: forget the singleton (does not close the handle).
-void resetAppDatabaseSingletonForTesting() => _singleton = null;
+// (No reset hook: tests open temp/in-memory databases through
+// openAppDatabase(path:) instead of touching the singleton. A hook whose
+// name promises a test contract but has no caller invites someone to
+// build on it.)

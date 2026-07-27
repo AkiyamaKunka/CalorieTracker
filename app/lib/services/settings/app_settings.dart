@@ -1,7 +1,9 @@
 /// User-editable settings + persistence (spec §8 knobs).
 ///
-/// Non-secret values live in shared_preferences; the Gemini API key lives in
-/// flutter_secure_storage (spec §8: "user-supplied, stored in secure storage").
+/// Non-secret values live in shared_preferences; EVERY provider credential
+/// (Gemini, OpenAI, Anthropic, and the own-server upload key) lives in
+/// flutter_secure_storage (spec §8: "user-supplied, stored in secure
+/// storage").
 /// The analyzer's daily-quota pause latch (spec §3.3) is persisted here too so
 /// it survives restarts. A simple [ChangeNotifier] so UI can listen.
 library;
