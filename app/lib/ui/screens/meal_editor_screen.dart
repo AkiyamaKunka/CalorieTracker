@@ -28,7 +28,7 @@ class MealEditorScreen extends StatefulWidget {
     this.fromPhoto,
     this.makeThumb,
     this.initialAnalysis,
-    this.newMealSource = 'app_manual',
+    this.newMealSource = MealSource.appManual,
   });
 
   final MealsDao dao;

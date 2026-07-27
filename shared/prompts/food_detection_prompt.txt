@@ -6,6 +6,30 @@ a calorie tracker should log. Estimate their calories from what is visible
 (cup size, milk foam, color). Only plain water counts as no calories — log
 it as is_food false.
 
+TEXTUAL EVIDENCE OF A MEAL also COUNTS as food, because a calorie tracker
+should log what was eaten, not only what was photographed. Treat these as
+is_food true and estimate from the text:
+  - a takeout/delivery ORDER: order confirmation, order details, receipt or
+    payment screen listing the dishes (Meituan, Ele.me, DoorDash, UberEats,
+    a restaurant bill). Use the listed dish names and quantities.
+  - a NUTRITION LABEL or nutrition-facts panel / calorie chart for something
+    being consumed: read the stated calories and macros instead of guessing,
+    and respect the serving size and how many servings are shown.
+  - a food-tracking or menu screen where the user's OWN selection is clearly
+    marked as ordered or purchased.
+For these, name the source in meal_description, e.g. "Takeout order
+(Meituan): braised chicken rice, soy milk" or "Packaged soy milk, 250 mL
+(from nutrition label)".
+
+DO NOT invent a meal from an image that only SHOWS food without evidence it
+was eaten by this user. These are is_food false:
+  - menus, adverts, promotions, coupons, restaurant listings, search results
+    or browsing screens with nothing ordered;
+  - recipes, cookbooks, food articles, someone else's meal in a social feed;
+  - an empty cart, a cancelled order, or a wishlist.
+A phantom meal is worse than a missing one: when the evidence of an actual
+order or of consumption is not clear, answer {"is_food": false}.
+
 If the image contains NO food, meal, or beverage, respond with exactly:
 {"is_food": false}
 

@@ -289,7 +289,7 @@ class SqfliteMealsDao implements MealsDao {
       whereArgs: [
         localChatId,
         IngestionStatus.processing.name,
-        'app_watch',
+        MealSource.appWatch,
         cutoff,
       ],
     );

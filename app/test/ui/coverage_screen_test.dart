@@ -105,6 +105,28 @@ void main() {
     expect(find.byKey(const Key('retryAllFailed')), findsNothing);
   });
 
+  testWidgets('skipped photos can be RE-ANALYZED (improved rules revisit them)',
+      (tester) async {
+    // A 'skipped' tombstone is permanent for the automated path, so after the
+    // prompt learned to accept takeout order screenshots (2026-07-27) the
+    // only way to revisit them is a deliberate re-add.
+    library.assets = [
+      FakeAsset('a9', 'Screenshot_order.jpg', DateTime(2026, 7, 26, 8),
+          bytesOf(9)),
+    ];
+    dao.ledger['h9'] = IngestionStatus.skipped;
+    await tester.pumpWidget(host());
+    await tester.tap(find.byKey(const Key('runCoverageCheck')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('reanalyzeAllSkipped')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('reanalyzeAllSkipped')));
+    await tester.pumpAndSettle();
+    expect(processed.single.assetId, 'a9');
+    expect(processed.single.deliberate, isTrue,
+        reason: 'only a deliberate re-add reclaims a skipped ledger row');
+  });
+
   testWidgets('failed photos get a Retry all that goes through the pipeline',
       (tester) async {
     library.assets = [

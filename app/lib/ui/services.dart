@@ -26,6 +26,11 @@ abstract class SettingsStore {
   /// Spec §3.3 quota-pause latch: while true, analyses cannot succeed —
   /// backfill triggers skip the byte-reads entirely.
   bool get isQuotaPaused;
+
+  /// See AppSettings.canAnalyze — key present for the ACTIVE provider and no
+  /// quota latch. Screens gate byte-reading sweeps on this single predicate
+  /// rather than re-deriving it.
+  bool get canAnalyze;
   String get model; // ACTIVE provider's model string
   int get lookbackDays; // backfill window, clamp 1–30 (spec §6.4/§8)
   String get reportTime; // 'HH:mm' local, daily-report notification time

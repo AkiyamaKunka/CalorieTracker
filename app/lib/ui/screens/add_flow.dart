@@ -255,7 +255,7 @@ class _AddTextScreenState extends State<AddTextScreen> {
       builder: (_) => MealEditorScreen(
         dao: widget.dao,
         initialAnalysis: outcome.analysis,
-        newMealSource: 'manual_text', // spec §4.6 parity
+        newMealSource: MealSource.manualText, // spec §4.6 parity
       ),
     ));
     if (saved == true && mounted) Navigator.of(context).pop();

@@ -589,7 +589,7 @@ class DefaultNlExecutor implements NlExecutor {
       date: _isoDate(now),
       time: _time12(now),
       timestamp: now.toIso8601String(),
-      source: 'manual_text', // spec §4.6
+      source: MealSource.manualText, // spec §4.6
       imageHash: '',
       fileId: '',
       analysis: sanitized,

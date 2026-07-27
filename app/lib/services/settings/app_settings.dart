@@ -349,6 +349,15 @@ class AppSettings extends ChangeNotifier {
 
   /// Paused only when the latch is live AND belongs to the CURRENT
   /// provider — another provider's quota never gates this one.
+  /// "An analysis attempted right now could actually succeed": the ACTIVE
+  /// provider has a key and the §3.3 quota latch is not armed. Every
+  /// byte-reading trigger (launch/resume catch-up, watcher toggle, headless
+  /// run) gates on this. Spelled out per call site it drifted once already —
+  /// the check read the Gemini-only key, so server-provider users silently
+  /// lost their catch-up scans.
+  bool get canAnalyze =>
+      (activeApiKey ?? '').trim().isNotEmpty && !isQuotaPaused;
+
   bool get isQuotaPaused {
     if (_quotaPauseUntil == null ||
         !DateTime.now().isBefore(_quotaPauseUntil!)) {

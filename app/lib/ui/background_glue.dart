@@ -109,8 +109,7 @@ Future<bool> headlessBackfillWith({
   // No key yet / quota latch armed: analyses cannot succeed, so don't even
   // read photo bytes. The watermark stays put — those photos are scanned
   // once the blocker clears (release-not-burn keeps them eligible).
-  if ((settings.activeApiKey ?? '').isEmpty) return true;
-  if (settings.isQuotaPaused) return true;
+  if (!settings.canAnalyze) return true;
 
   final scanStart = clock();
   final since =

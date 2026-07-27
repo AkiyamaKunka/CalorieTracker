@@ -252,11 +252,32 @@ class _CoverageScreenState extends State<CoverageScreen> {
             ],
             if (report.skippedNonFood.isNotEmpty) ...[
               const SizedBox(height: 16),
-              Text('Judged "not food" (${report.skippedNonFood.length})',
-                  style: theme.textTheme.titleSmall),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                        'Judged "not food" (${report.skippedNonFood.length})',
+                        style: theme.textTheme.titleSmall),
+                  ),
+                  // A 'skipped' tombstone is permanent for the automated
+                  // path, so improved rules (e.g. now admitting takeout
+                  // order screenshots) would never revisit these on their
+                  // own. A DELIBERATE re-add reclaims skipped rows
+                  // (spec §2.3) — which is exactly what this does.
+                  FilledButton.tonal(
+                    key: const Key('reanalyzeAllSkipped'),
+                    onPressed: busy
+                        ? null
+                        : () => _processAll(
+                            report.skippedNonFood, 'Re-analyzing'),
+                    child: const Text('Analyze again'),
+                  ),
+                ],
+              ),
               Text(
-                  'Drinks and unusual dishes land here. Tap one to log it '
-                  'yourself if the AI got it wrong.',
+                  'Drinks, order screenshots and unusual dishes land here. '
+                  '"Analyze again" re-asks the AI (useful after the rules '
+                  'improve); tap a row to enter it yourself.',
                   style: theme.textTheme.bodySmall
                       ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
               for (final item in report.skippedNonFood.take(_maxTiles))

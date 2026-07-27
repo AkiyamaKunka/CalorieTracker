@@ -30,3 +30,25 @@ def test_config_prompts_come_from_shared():
     if marker in base:
         base = base.split(marker)[0]
     assert base == shared_generated.FOOD_DETECTION_PROMPT_RAW
+
+
+def test_prompt_admits_order_screenshots_and_nutrition_labels():
+    """A calorie tracker logs what was EATEN, not only what was photographed:
+    takeout order screenshots and nutrition labels are evidence of a meal
+    (user request 2026-07-27). Both sides read this from shared/, so pinning
+    it here pins the app too."""
+    import config
+    p = config.FOOD_DETECTION_PROMPT
+    for phrase in ["TEXTUAL EVIDENCE", "order confirmation", "NUTRITION LABEL",
+                   "meal_description"]:
+        assert phrase in p, phrase
+
+
+def test_prompt_refuses_meals_without_evidence_of_eating():
+    """The counterweight: a phantom meal corrupts the log worse than a
+    missing one, so menus/ads/recipes/social feeds must stay is_food false."""
+    import config
+    p = config.FOOD_DETECTION_PROMPT
+    for phrase in ["menus", "adverts", "recipes", "social feed",
+                   "cancelled order", "phantom meal"]:
+        assert phrase in p, phrase

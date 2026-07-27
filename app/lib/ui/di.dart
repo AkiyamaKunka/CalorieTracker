@@ -128,8 +128,7 @@ class AppServices {
       // minutes after backgrounding — photos taken since are picked up here.
       // Fire-and-forget: startup must not block on Gemini analyses. Key
       // guard: without a key nothing can succeed, so don't read photo bytes.
-      if ((settings.activeApiKey ?? '').isNotEmpty &&
-          !settings.isQuotaPaused) {
+      if (settings.canAnalyze) {
         unawaited(photoIntake.backfillScan().then((_) {},
             onError: (Object e) {
           // Truncation must not vanish silently: >2000 window images means
@@ -163,6 +162,8 @@ class _AppSettingsStore implements SettingsStore {
 
   @override
   String get apiKey => _s.activeApiKey ?? '';
+  @override
+  bool get canAnalyze => _s.canAnalyze;
   @override
   String get provider => _s.provider.name;
   @override

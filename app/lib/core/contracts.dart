@@ -8,6 +8,32 @@ library;
 
 import 'dart:typed_data';
 
+/// The `source` column's vocabulary. These strings are WIRE VALUES: they
+/// are persisted in `meals.source` / `photo_ingestions.source`, exported by
+/// exportJson, and MATCHED IN SQL — the reclaim sweep releases only
+/// [appWatch] rows (spec §9). A literal typo in any one call site silently
+/// changes intake policy rather than failing loudly, which is why they live
+/// here instead of being spelled out at each use.
+abstract final class MealSource {
+  /// Deliberate photo add: in-app picker or the share sheet. Reclaims
+  /// failed/skipped/deleted ledger rows (spec §2.3 deliberate re-send).
+  static const String appPhoto = 'app_photo';
+
+  /// Automated camera-roll intake (watcher, background job, catch-up scans).
+  /// The strict reservation path — never reclaims.
+  static const String appWatch = 'app_watch';
+
+  /// A meal parsed from a TEXT description — the describe-a-meal screen and
+  /// the NL new_meal intent. Server parity: telegram_bot uses this string
+  /// for the same case (spec §4.6).
+  static const String manualText = 'manual_text';
+
+  /// Numbers typed by hand in the meal editor, no description parsed and no
+  /// photo involved. Distinct from [manualText] on purpose: it records that
+  /// NO model produced these values.
+  static const String appManual = 'app_manual';
+}
+
 /// A logged meal row (spec §2: meals table).
 class Meal {
   final int id;
@@ -15,7 +41,7 @@ class Meal {
   final String date; // user-local YYYY-MM-DD
   final String time; // user-local hh:mm AM/PM (server format parity)
   final String timestamp; // device clock ISO-8601
-  final String source; // 'app_photo' | 'app_watch' | 'manual_text' | ...
+  final String source; // one of MealSource.* (plus imported/legacy values)
   final String imageHash; // md5 of ORIGINAL bytes, '' for text meals
   final String fileId; // local photo asset id / path hint, '' for text
   final Map<String, dynamic> analysis; // non-dict stored JSON coerced to {}

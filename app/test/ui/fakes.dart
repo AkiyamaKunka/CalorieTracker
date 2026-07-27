@@ -241,6 +241,8 @@ class FakeSettings implements SettingsStore {
   @override
   bool isQuotaPaused = false;
   @override
+  bool get canAnalyze => apiKey.trim().isNotEmpty && !isQuotaPaused;
+  @override
   String model;
   @override
   int lookbackDays;

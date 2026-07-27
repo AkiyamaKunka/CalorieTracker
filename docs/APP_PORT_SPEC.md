@@ -1019,3 +1019,19 @@ one SQLite file). Each is pinned by tests named alongside.
 | Key validation | n/a (server key assumed valid) | quota-class HTTP responses count as ACCEPTED | a 429 proves auth; refusing to save locked onboarding for hours | `gemini_analyzer_test` validateKey 429 |
 | Share intake files | n/a | plugin container copies deleted after consumption | receive_sharing_intent contract; unbounded growth otherwise | `share_intake_test` cleanup |
 | Decode ceiling | none (server CLI) | 50 MP header-probe cap before full decode | 108 MP JPEG ≈ 432 MB RGBA in a background isolate | normalize cap (visual) |
+
+### §9.1 `source` vocabulary (app)
+
+Four wire values, defined once in `core/contracts.dart` as `MealSource` and
+never spelled as literals at call sites — the reclaim sweep MATCHES on
+`app_watch` in SQL, so a drifting literal silently changes intake policy
+instead of failing.
+
+| Value | Written by | Reservation policy |
+|---|---|---|
+| `app_photo` | in-app picker, share sheet | deliberate — reclaims failed/skipped/deleted |
+| `app_watch` | watcher, background job, catch-up scans | strict — never reclaims; the ONLY value the launch sweep releases |
+| `manual_text` | describe-a-meal screen, NL `new_meal` | n/a (no photo); server parity, `telegram_bot` writes the same string |
+| `app_manual` | meal editor, numbers typed by hand | n/a; distinct from `manual_text` to record that NO model produced the values |
+
+Pinned by `test/core/meal_source_test.dart` (frozen strings + distinctness).

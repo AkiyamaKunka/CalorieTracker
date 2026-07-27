@@ -87,8 +87,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _todayKey.currentState?.reload();
     if (_index == 1) _historyKey.currentState?.reload();
     if (!s.settings.watcherEnabled) return;
-    if (s.settings.apiKey.trim().isEmpty) return; // nothing can succeed yet
-    if (s.settings.isQuotaPaused) return; // don't read bytes for nothing
+    // One predicate for "an analysis could succeed" (key + no quota latch):
+    // don't read photo bytes for nothing.
+    if (!s.settings.canAnalyze) return;
     // Resume catch-up (full lookback window): the change-notify watcher is
     // frozen with the process on EMUI-class OSes, so photos taken while the
     // app was backgrounded surface here. The md5 ledger + in-session seen

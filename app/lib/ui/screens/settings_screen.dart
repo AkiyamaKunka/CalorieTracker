@@ -145,8 +145,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       // instead of waiting for the next change event / background run.
       // Only when analyses can actually succeed (key present, no quota
       // pause) — otherwise the sweep reads bytes for nothing.
-      if (widget.settings.apiKey.trim().isNotEmpty &&
-          !widget.settings.isQuotaPaused) {
+      if (widget.settings.canAnalyze) {
         unawaited(widget.photoIntake
             ?.backfillScan()
             .then((_) {}, onError: (Object _) {}));
