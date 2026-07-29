@@ -204,6 +204,9 @@ class _AppSettingsStore implements SettingsStore {
         AiProvider.openai => _s.setOpenaiApiKey(apiKey),
         AiProvider.anthropic => _s.setAnthropicApiKey(apiKey),
         AiProvider.server => _s.setServerApiKey(apiKey),
+        AiProvider.qwen => _s.setQwenApiKey(apiKey),
+        AiProvider.doubao => _s.setDoubaoApiKey(apiKey),
+        AiProvider.glm => _s.setGlmApiKey(apiKey),
       };
     }
     if (model != null) {
@@ -213,6 +216,9 @@ class _AppSettingsStore implements SettingsStore {
         AiProvider.anthropic => _s.setAnthropicModel(model),
         // The server chooses its own model; the field is hidden in the UI.
         AiProvider.server => Future<void>.value(),
+        AiProvider.qwen => _s.setQwenModel(model),
+        AiProvider.doubao => _s.setDoubaoModel(model),
+        AiProvider.glm => _s.setGlmModel(model),
       };
     }
     if (lookbackDays != null) {

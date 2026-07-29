@@ -192,6 +192,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         'openai' => 'OpenAI',
         'anthropic' => 'Anthropic',
         'server' => 'Server',
+        'qwen' => 'Qwen (DashScope)',
+        'doubao' => 'Doubao (Volcengine)',
+        'glm' => 'GLM (Zhipu)',
         _ => 'Gemini',
       };
 
@@ -278,6 +281,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String _modelHelperText() => switch (widget.settings.provider) {
         'openai' => 'Default: gpt-4o-mini',
         'anthropic' => 'Default: claude-sonnet-5',
+        'qwen' => 'Default: qwen3-vl-flash. Doubles as the cheap tier — '
+            'qwen3-vl-plus is the stronger paid model.',
+        'doubao' => 'Default: doubao-seed-2-0-mini-260428. Doubao needs the '
+            'EXACT versioned ID from the Ark model list — undated names '
+            'are rejected.',
+        'glm' => 'Default: glm-4.6v-flash (free tier). glm-4.6v is the '
+            'stronger paid model.',
         _ => 'Default: gemini-2.5-flash',
       };
 
@@ -311,7 +321,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        // Not 'Gemini': this section configures whichever of the four
+        // Not 'Gemini': this section configures whichever of the seven
         // providers is selected.
         Text('AI analysis', style: theme.textTheme.titleMedium),
         const SizedBox(height: 8),
@@ -323,6 +333,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             helperText: 'Key and model below belong to the selected '
                 'provider. "My server" analyses run on your own server '
                 'under your Claude subscription — no API charges.',
+            // Without this, multi-line helpers silently truncate to ONE
+            // ellipsized line (Flutter's default) — measured on-device
+            // 2026-07-29; the provider guidance was unreadable.
+            helperMaxLines: 5,
             border: OutlineInputBorder(),
           ),
           items: const [
@@ -333,6 +347,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
             DropdownMenuItem(
                 value: 'server',
                 child: Text('My server (Claude subscription)')),
+            // Mainland-China providers: the four above need a VPN there.
+            DropdownMenuItem(
+                value: 'qwen', child: Text('Alibaba Qwen 通义千问')),
+            DropdownMenuItem(
+                value: 'doubao', child: Text('ByteDance Doubao 豆包')),
+            DropdownMenuItem(value: 'glm', child: Text('Zhipu GLM 智谱')),
           ],
           onChanged: (v) async {
             if (v == null) return;
@@ -386,10 +406,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
             labelText: _isServerProvider
                 ? 'Server upload key'
                 : '${_providerLabel()} API key',
-            helperText: _isServerProvider
-                ? 'The X-API-Key your server expects. Stored securely on '
-                    'this device only.'
-                : 'Stored securely on this device only.',
+            helperText: switch (widget.settings.provider) {
+              'server' => 'The X-API-Key your server expects. Stored '
+                  'securely on this device only.',
+              // Where to get a key, because for these three the user's
+              // journey starts on a Chinese cloud console. Free quotas
+              // as of 2026-07: Qwen ~1M tokens/model (90 days), Doubao
+              // 500k tokens/model, GLM's flash vision models are free.
+              'qwen' => 'From bailian.console.aliyun.com (Alibaba Cloud '
+                  '百炼 → API-KEY). New accounts get ~1M free tokens per '
+                  'model. Stored securely on this device only.',
+              'doubao' => 'From console.volcengine.com/ark (API Key + '
+                  '开通管理 to activate models). 500k free tokens per '
+                  'model. Stored securely on this device only.',
+              'glm' => 'From open.bigmodel.cn (real-name verification '
+                  'required). The default flash model is free. Stored '
+                  'securely on this device only.',
+              _ => 'Stored securely on this device only.',
+            },
+            helperMaxLines: 5, // multi-line guidance must not ellipsize
             border: const OutlineInputBorder(),
             suffixIcon: _keyStatusIcon(),
           ),
@@ -457,6 +492,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             decoration: InputDecoration(
               labelText: 'Model',
               helperText: _modelHelperText(),
+              helperMaxLines: 4, // the Doubao versioned-ID warning wraps
               border: const OutlineInputBorder(),
             ),
           ),

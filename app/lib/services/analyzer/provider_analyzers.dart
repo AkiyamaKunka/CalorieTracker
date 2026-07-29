@@ -64,6 +64,12 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
   String? get apiKey;
   String get model;
   String get providerLabel;
+
+  /// Verbatim message for an HTTP 404, or null for the generic bucket.
+  /// The compat providers override this: a 404 there almost always means
+  /// a wrong / retired / not-yet-activated MODEL id, not a bad key — and
+  /// the generic message left users regenerating a key that worked.
+  String? get notFoundMessage => null;
   http.Request buildRequest(String key,
       {required String prompt, Uint8List? jpegBytes, required int maxTokens});
   String extractText(Map<String, dynamic> body);
@@ -100,24 +106,44 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
       throw _ProviderException('connection error: $e', transient: true);
     }
     final resp = await http.Response.fromStream(streamed);
-    if (resp.statusCode == 401 || resp.statusCode == 403) {
-      throw const _ProviderException('key rejected',
-          transient: false, auth: true);
-    }
     if (resp.statusCode != 200) {
-      // OpenAI overloads 429 for BOTH transient rate limits and exhausted
-      // billing (insufficient_quota) — the latter needs the user, not a
-      // retry message.
-      final billingDead = resp.statusCode == 429 &&
-          resp.body.contains('insufficient_quota');
-      throw _ProviderException(
-          billingDead
-              ? 'Provider credits exhausted — check your '
-                  '$providerLabel billing.'
-              : 'HTTP ${resp.statusCode}',
+      // Exhausted-billing signatures, checked BEFORE the auth
+      // classification because the providers disagree on the status code:
+      //   OpenAI    429 insufficient_quota
+      //   Zhipu GLM 429 code "1113" (余额不足 — also NOT a rate limit)
+      //   Ark/Doubao 403 AccountOverdueError — a 403 that is NOT auth;
+      //     treating it as "key rejected" burned the photo non-retryably
+      //     and told the user to fix a key that works (review 2026-07-29)
+      //   DashScope 400 Arrearage — a 400 that is NOT a client bug
+      // All mean "the key authenticated but the account needs money":
+      // transient (the photo stays eligible; a recharge fixes it) and
+      // quota-classed (validateKey accepts — the key itself is proven).
+      final body = resp.body;
+      final billingDead = (resp.statusCode == 429 &&
+              (body.contains('insufficient_quota') ||
+                  body.contains('"1113"'))) ||
+          (resp.statusCode == 403 && body.contains('AccountOverdue')) ||
+          (resp.statusCode == 400 && body.contains('Arrearage'));
+      if (billingDead) {
+        throw _ProviderException(
+            'Provider balance or credits exhausted — check your '
+            '$providerLabel billing.',
+            transient: true,
+            quotaClass: true,
+            verbatimMessage: true);
+      }
+      if (resp.statusCode == 401 || resp.statusCode == 403) {
+        throw const _ProviderException('key rejected',
+            transient: false, auth: true);
+      }
+      final notFound = notFoundMessage;
+      if (resp.statusCode == 404 && notFound != null) {
+        throw _ProviderException(notFound,
+            transient: false, verbatimMessage: true);
+      }
+      throw _ProviderException('HTTP ${resp.statusCode}',
           transient: _isTransientStatus(resp.statusCode),
-          quotaClass: resp.statusCode == 429,
-          verbatimMessage: billingDead);
+          quotaClass: resp.statusCode == 429);
     }
     if (!extract) return '';
     try {
@@ -301,6 +327,97 @@ class OpenAiAnalyzer extends _HttpVisionAnalyzer {
         'max_completion_tokens': maxTokens,
       });
     return req;
+  }
+
+  @override
+  String extractText(Map<String, dynamic> body) =>
+      ((body['choices'] as List).first as Map)['message']['content'] as String;
+}
+
+/// Any OpenAI-compatible chat-completions vision backend, parameterized by
+/// endpoint. This is how the mainland-China providers (Alibaba Qwen,
+/// ByteDance Doubao, Zhipu GLM — all of which expose OpenAI-compatible
+/// APIs) ride the exact request/retry/coercion contract OpenAI already
+/// gets, without three copies of the class.
+///
+/// Differences from [OpenAiAnalyzer] kept deliberately:
+/// - `max_tokens`, not `max_completion_tokens`: the compat layers accept
+///   the classic field; several reject the newer one with 400.
+/// - `response_format` json_object only when [supportsJsonMode] — Zhipu's
+///   API reference marks the field TEXT-models-only ("仅文本模型支持此字段"),
+///   so vision calls there must rely on the prompt + fence-stripping parse.
+/// - [extraBody] for provider extension fields — Doubao and GLM vision
+///   models THINK by default; `thinking: {type: disabled}` cuts the cost
+///   and latency of a fixed-schema extraction task (researched 2026-07-29).
+class OpenAiCompatAnalyzer extends _HttpVisionAnalyzer {
+  OpenAiCompatAnalyzer(
+    super.settings, {
+    required this.endpoint,
+    required this.label,
+    required this.keyOf,
+    required this.modelOf,
+    this.supportsJsonMode = true,
+    this.extraBody = const {},
+    this.notFoundHint,
+    super.client,
+    super.sleep,
+    super.normalizer,
+  });
+
+  final Uri endpoint;
+  final String label;
+  final String? Function(AppSettings) keyOf;
+  final String Function(AppSettings) modelOf;
+  final bool supportsJsonMode;
+  final Map<String, Object?> extraBody;
+
+  /// Per-provider HTTP-404 explanation (see [notFoundMessage]).
+  final String? notFoundHint;
+
+  @override
+  String? get apiKey => keyOf(settings);
+  @override
+  String get model => modelOf(settings);
+  @override
+  String get providerLabel => label;
+  @override
+  String? get notFoundMessage => notFoundHint;
+
+  @override
+  http.Request buildRequest(String key,
+      {required String prompt, Uint8List? jpegBytes, required int maxTokens}) {
+    final content = <Map<String, Object?>>[
+      {'type': 'text', 'text': prompt},
+      if (jpegBytes != null)
+        {
+          'type': 'image_url',
+          'image_url': {
+            'url': 'data:image/jpeg;base64,${base64Encode(jpegBytes)}'
+          }
+        },
+    ];
+    // The model field is free text: a user-typed *thinking* model id
+    // (doubao-seed-*-thinking-*, glm-4.1v-thinking-*) REQUIRES thinking,
+    // and sending {type: disabled} to one is a hard 400 on every call.
+    final extras = Map<String, Object?>.of(extraBody);
+    if (model.contains('thinking')) extras.remove('thinking');
+    return http.Request('POST', endpoint)
+      ..headers['Authorization'] = 'Bearer $key'
+      ..headers['Content-Type'] = 'application/json'
+      // extras spread FIRST: on a key collision the computed core fields
+      // must win, or a config entry could silently clobber model/messages
+      // or validateKey's 1-token cap (jsonEncode keeps the LAST value —
+      // no error would ever surface).
+      ..body = jsonEncode({
+        ...extras,
+        'model': model,
+        'messages': [
+          {'role': 'user', 'content': content}
+        ],
+        if (supportsJsonMode && jpegBytes != null)
+          'response_format': {'type': 'json_object'},
+        'max_tokens': maxTokens,
+      });
   }
 
   @override
@@ -528,24 +645,96 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
   }
 }
 
+/// The mainland-China providers, as [OpenAiCompatAnalyzer] configurations.
+/// Endpoints are the providers' OpenAI-compatible chat-completions URLs —
+/// mainland regions, reachable there without a VPN. Facts verified against
+/// current provider docs 2026-07-29 (see the workflow research notes).
+OpenAiCompatAnalyzer createQwenAnalyzer(AppSettings settings,
+        {http.Client? client}) =>
+    OpenAiCompatAnalyzer(settings,
+        // The MAINLAND (Beijing) platform. dashscope-intl (Singapore) is a
+        // separate platform with separate keys — a mainland key gets 401
+        // there. This app targets mainland users; intl users have the
+        // other four providers.
+        endpoint: Uri.parse(
+            'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions'),
+        label: 'Qwen',
+        keyOf: (s) => s.qwenApiKey,
+        modelOf: (s) => s.qwenModel,
+        // json_object works on the stable qwen3-vl/qwen-vl IDs and needs
+        // the word "json" in a message — both shared prompts say JSON.
+        // qwen3-vl defaults to thinking OFF in compat mode: send nothing.
+        notFoundHint: 'Qwen model not found — check the model name in '
+            'Settings (stable IDs like qwen3-vl-flash; -latest snapshots '
+            'lack JSON mode).',
+        client: client);
+
+OpenAiCompatAnalyzer createDoubaoAnalyzer(AppSettings settings,
+        {http.Client? client}) =>
+    OpenAiCompatAnalyzer(settings,
+        endpoint: Uri.parse(
+            'https://ark.cn-beijing.volces.com/api/v3/chat/completions'),
+        label: 'Doubao',
+        keyOf: (s) => s.doubaoApiKey,
+        modelOf: (s) => s.doubaoModel,
+        // Seed models deep-think by default and bill the reasoning as
+        // output tokens — pointless for a fixed-schema extraction.
+        extraBody: const {
+          'thinking': {'type': 'disabled'}
+        },
+        // Ark 404s both wrong ids AND not-yet-activated models; the
+        // versioned-ID rule makes this the most common Doubao failure.
+        notFoundHint: 'Doubao model not found — Ark needs the EXACT '
+            'versioned ID from its model list, and the model must be '
+            'activated (开通管理) in the Volcengine console.',
+        client: client);
+
+OpenAiCompatAnalyzer createGlmAnalyzer(AppSettings settings,
+        {http.Client? client}) =>
+    OpenAiCompatAnalyzer(settings,
+        endpoint: Uri.parse(
+            'https://open.bigmodel.cn/api/paas/v4/chat/completions'),
+        label: 'GLM',
+        keyOf: (s) => s.glmApiKey,
+        modelOf: (s) => s.glmModel,
+        // Zhipu's reference marks response_format TEXT-models-only; a
+        // vision call must not send it (prompt + fence-stripping parse
+        // carry the JSON contract, same as Anthropic).
+        supportsJsonMode: false,
+        extraBody: const {
+          'thinking': {'type': 'disabled'}
+        },
+        notFoundHint: 'GLM model not found — check the model name in '
+            'Settings (glm-4.6v family; older glm-4v IDs are retired).',
+        client: client);
+
 class MultiProviderAnalyzer implements AnalyzerService {
   MultiProviderAnalyzer(this._settings, {http.Client? client})
       : _gemini = createAnalyzer(_settings, client: client),
         _openai = OpenAiAnalyzer(_settings, client: client),
         _anthropic = AnthropicAnalyzer(_settings, client: client),
-        _server = ServerAnalyzer(_settings, client: client);
+        _server = ServerAnalyzer(_settings, client: client),
+        _qwen = createQwenAnalyzer(_settings, client: client),
+        _doubao = createDoubaoAnalyzer(_settings, client: client),
+        _glm = createGlmAnalyzer(_settings, client: client);
 
   final AppSettings _settings;
   final AnalyzerService _gemini;
   final OpenAiAnalyzer _openai;
   final AnthropicAnalyzer _anthropic;
   final ServerAnalyzer _server;
+  final OpenAiCompatAnalyzer _qwen;
+  final OpenAiCompatAnalyzer _doubao;
+  final OpenAiCompatAnalyzer _glm;
 
   AnalyzerService get _active => switch (_settings.provider) {
         AiProvider.gemini => _gemini,
         AiProvider.openai => _openai,
         AiProvider.anthropic => _anthropic,
         AiProvider.server => _server,
+        AiProvider.qwen => _qwen,
+        AiProvider.doubao => _doubao,
+        AiProvider.glm => _glm,
       };
 
   @override
