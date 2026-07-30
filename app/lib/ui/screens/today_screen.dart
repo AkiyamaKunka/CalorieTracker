@@ -177,11 +177,27 @@ class TodayScreenState extends State<TodayScreen> {
         children: [
           _totalsHeader(context, foodMeals),
           if (foodMeals.isEmpty)
-            const Padding(
-              padding: EdgeInsets.all(32),
+            Padding(
+              padding: const EdgeInsets.all(32),
               child: Center(
-                // Empty copy per spec §5.1.
-                child: Text('No meals logged yet today.'),
+                child: Column(
+                  children: [
+                    // Empty copy per spec §5.1; the hint below is app-only
+                    // (§9) — the bare sentence was a dead-ish end for a
+                    // user who just finished setup.
+                    const Text('No meals logged yet today.'),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Tap "Add meal" below to log one from a photo or a '
+                      'description — or turn on "Watch camera roll" in '
+                      'Settings and new food photos log themselves.',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color:
+                              Theme.of(context).colorScheme.onSurfaceVariant),
+                    ),
+                  ],
+                ),
               ),
             )
           else

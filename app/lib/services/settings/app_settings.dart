@@ -256,6 +256,18 @@ class AppSettings extends ChangeNotifier {
           _serverBaseUrl.isEmpty ? null : _serverApiKey,
       };
 
+  /// Human-readable name of the active provider — for user-facing
+  /// messages ("No Qwen key yet…"), NOT for wire values.
+  String get providerDisplayName => switch (_provider) {
+        AiProvider.gemini => 'Gemini',
+        AiProvider.openai => 'OpenAI',
+        AiProvider.anthropic => 'Anthropic',
+        AiProvider.server => 'your server',
+        AiProvider.qwen => 'Qwen',
+        AiProvider.doubao => 'Doubao',
+        AiProvider.glm => 'GLM',
+      };
+
   /// The ACTIVE provider's model string.
   String get activeModel => switch (_provider) {
         AiProvider.gemini => _model,

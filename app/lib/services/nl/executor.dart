@@ -259,12 +259,28 @@ class DefaultNlExecutor implements NlExecutor {
     }
   }
 
+  /// Non-null when no analysis can succeed for lack of configuration. The
+  /// analyzer seam folds its precise missing-key exception into null, which
+  /// used to surface as "Error contacting AI. Please try again." — advice
+  /// that can never work for a missing key (review 2026-07-31).
+  String? _missingKeyMessage() {
+    if ((settings.activeApiKey ?? '').trim().isNotEmpty) return null;
+    if (settings.provider == AiProvider.server) {
+      return '❌ No server is configured — set your server address and '
+          'upload key in Settings first.';
+    }
+    return '❌ No ${settings.providerDisplayName} API key yet — add one in '
+        'Settings to use text logging.';
+  }
+
   Future<List<NlReply>> _handleTextInner(String userText) async {
     // Spec §4 step 2 (telegram_bot.py:4253-4261): during a daily-quota pause,
     // refuse with the pause summary and make NO model call.
     if (settings.isQuotaPaused) {
       return [NlReply(_quotaPauseMessage(settings.quotaPauseUntil!))];
     }
+    final missingKey = _missingKeyMessage();
+    if (missingKey != null) return [NlReply(missingKey)];
 
     // Snapshot: last TEXT_EDIT_WINDOW_DAYS of food meals, oldest first
     // (spec §1.2). Every index in every action resolves against THIS list.
@@ -303,6 +319,8 @@ class DefaultNlExecutor implements NlExecutor {
       return DescribeOutcome(
           error: _quotaPauseMessage(settings.quotaPauseUntil!));
     }
+    final missingKey = _missingKeyMessage();
+    if (missingKey != null) return DescribeOutcome(error: missingKey);
     final prompt = buildPrompt(const [], userText, DateTime.now());
     final Map<String, dynamic>? result;
     try {

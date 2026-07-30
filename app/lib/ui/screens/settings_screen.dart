@@ -35,6 +35,10 @@ class SettingsScreen extends StatefulWidget {
   final Future<String?> Function(String code)? completeClaudeAuth;
   final Future<bool> Function(Uri url)? openUrl;
 
+  /// Opens the OS app-settings page — the only remedy once the system
+  /// stops re-showing the photo-permission dialog. Null hides the action.
+  final Future<void> Function()? openSystemSettings;
+
   /// Coverage-audit pieces; all three null in tests → the tile is hidden.
   final CoverageAuditor? coverage;
   final Future<PhotoOutcome> Function(IntakePhoto photo)? processPhoto;
@@ -53,6 +57,7 @@ class SettingsScreen extends StatefulWidget {
     this.startClaudeAuth,
     this.completeClaudeAuth,
     this.openUrl,
+    this.openSystemSettings,
   });
 
   @override
@@ -135,10 +140,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final granted = await widget.requestPhotoPermission();
       if (!granted) {
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text(
-                'Photo library permission is required for automatic intake.')));
+        final open = widget.openSystemSettings;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: const Text(
+                'Photo library permission is required for automatic intake.'),
+            // Once the OS stops re-prompting, the in-app request above is
+            // a silent no-op — without this action the toggle is a
+            // forever dead end.
+            action: open == null
+                ? null
+                : SnackBarAction(
+                    label: 'Open settings', onPressed: () => open())));
         return; // leave the switch off
+      }
+      if (!mounted) return;
+      // The watcher arms fine without a usable key — it just never logs
+      // anything. Flipping a switch that silently does nothing needs a
+      // sentence, not silence.
+      if (!widget.settings.canAnalyze) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(widget.settings.isQuotaPaused
+                ? 'Watching is on, but analyses are paused by the daily '
+                    'quota — new photos will wait.'
+                : "Watching is on, but photos won't be analyzed until a "
+                    'working API key is set above.')));
       }
       await widget.photoIntake?.start();
       // Instant feedback on enable: sweep the lookback window right away
@@ -321,10 +346,65 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
+        // First-run: the shell deliberately lands a key-less install here
+        // (app.dart onboarding), but the screen used to open cold on a bare
+        // form — and everything a mainland user needs to know (which
+        // providers work without a VPN, which are free) lived in code
+        // comments. Gone once a key is saved.
+        if (widget.settings.apiKey.trim().isEmpty) ...[
+          Card(
+            key: const Key('firstRunCard'),
+            color: theme.colorScheme.secondaryContainer,
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Welcome — one step to start logging',
+                      style: theme.textTheme.titleSmall),
+                  const SizedBox(height: 6),
+                  Text(
+                    '1) Pick an AI provider below.  2) Paste that '
+                    "provider's API key.  3) Tap Validate key.\n"
+                    'Then turn on "Watch camera roll" and new food photos '
+                    'log themselves.\n'
+                    'In mainland China choose Qwen 通义千问, Doubao 豆包 or '
+                    'GLM 智谱 (GLM’s default model is free) — the '
+                    'other providers need a VPN. 中国大陆用户请选择国内提供商。',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
         // Not 'Gemini': this section configures whichever of the seven
         // providers is selected.
         Text('AI analysis', style: theme.textTheme.titleMedium),
         const SizedBox(height: 8),
+        if (widget.settings.isQuotaPaused) ...[
+          // The §3.3 latch silently gates EVERY automatic path (watcher,
+          // catch-up, coverage) — without this banner the only trace was
+          // a chat refusal if the user happened to type.
+          Card(
+            key: const Key('quotaPauseBanner'),
+            color: theme.colorScheme.errorContainer,
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Text(
+                'Analyses are paused — the daily quota was hit'
+                '${widget.settings.quotaPauseUntil != null ? ' (until '
+                    '${TimeOfDay.fromDateTime(widget.settings.quotaPauseUntil!.toLocal()).format(context)})' : ''}. '
+                'New photos are kept and retried automatically; changing '
+                'the key or provider resumes now.',
+                style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onErrorContainer),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
         DropdownButtonFormField<String>(
           key: const Key('providerDropdown'),
           initialValue: widget.settings.provider,
@@ -340,20 +420,41 @@ class _SettingsScreenState extends State<SettingsScreen> {
             helperMaxLines: 5,
             border: OutlineInputBorder(),
           ),
+          // Group headers + free-tier notes: seven bare names forced a
+          // mainland user to discover by trial that the top four need a
+          // VPN. selectedItemBuilder keeps the CLOSED field short so the
+          // annotated items never overflow a phone-width field.
+          selectedItemBuilder: (context) => const [
+            Text('Google Gemini'),
+            Text('OpenAI'),
+            Text('Anthropic Claude'),
+            Text('My server (subscription)'),
+            Text('Alibaba Qwen 通义千问'),
+            Text('ByteDance Doubao 豆包'),
+            Text('Zhipu GLM 智谱'),
+          ],
           items: const [
-            DropdownMenuItem(value: 'gemini', child: Text('Google Gemini')),
-            DropdownMenuItem(value: 'openai', child: Text('OpenAI')),
             DropdownMenuItem(
-                value: 'anthropic', child: Text('Anthropic Claude')),
+                value: 'gemini',
+                child: Text('Google Gemini (free tier) — VPN in China '
+                    '中国需VPN')),
+            DropdownMenuItem(
+                value: 'openai', child: Text('OpenAI — VPN in China')),
+            DropdownMenuItem(
+                value: 'anthropic',
+                child: Text('Anthropic Claude — VPN in China')),
             DropdownMenuItem(
                 value: 'server',
                 child: Text('My server (subscription)')),
-            // Mainland-China providers: the four above need a VPN there.
             DropdownMenuItem(
-                value: 'qwen', child: Text('Alibaba Qwen 通义千问')),
+                value: 'qwen',
+                child: Text('Alibaba Qwen 通义千问 — 中国直连')),
             DropdownMenuItem(
-                value: 'doubao', child: Text('ByteDance Doubao 豆包')),
-            DropdownMenuItem(value: 'glm', child: Text('Zhipu GLM 智谱')),
+                value: 'doubao',
+                child: Text('ByteDance Doubao 豆包 — 中国直连')),
+            DropdownMenuItem(
+                value: 'glm',
+                child: Text('Zhipu GLM 智谱 (free 免费) — 中国直连')),
           ],
           onChanged: (v) async {
             if (v == null) return;
@@ -433,6 +534,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
               });
             }
           },
+          // Persist like the model/server-URL fields: the key used to be
+          // stored ONLY by a successful Validate, so paste-key → switch
+          // tab (or validation failing while offline) silently configured
+          // NOTHING while the field still showed the key. Validate stays
+          // the health check; typing is the commit.
+          onSubmitted: (v) => widget.settings.update(apiKey: v.trim()),
+          onTapOutside: (_) =>
+              widget.settings.update(apiKey: _keyController.text.trim()),
           decoration: InputDecoration(
             labelText: _isServerProvider
                 ? 'Server upload key'
@@ -488,7 +597,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 child: Text(
                     _isServerProvider ? 'Test connection' : 'Validate key'),
               ),
+              // Claude OAuth is meaningless when the server's payer is a
+              // GLM/Doubao plan — and the sign-in it launches needs a VPN
+              // for the mainland audience that picks those backends.
               if (_isServerProvider &&
+                  widget.settings.serverBackend == 'claude' &&
                   widget.startClaudeAuth != null) ...[
                 const SizedBox(width: 8),
                 OutlinedButton.icon(

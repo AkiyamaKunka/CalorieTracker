@@ -118,6 +118,9 @@ class AppServices {
       photoLibrary: photoLibrary,
       startClaudeAuth: serverAnalyzer.startClaudeAuth,
       completeClaudeAuth: serverAnalyzer.completeClaudeAuth,
+      openSystemSettings: () async {
+        await openAppSettings(); // permission_handler
+      },
     );
     pipeline.bind(photoIntake); // automated watch (deliberate=false)
     pipeline.bindStream(shareIntake.photos()); // share sheet (deliberate)
@@ -168,6 +171,8 @@ class _AppSettingsStore implements SettingsStore {
   String get provider => _s.provider.name;
   @override
   bool get isQuotaPaused => _s.isQuotaPaused;
+  @override
+  DateTime? get quotaPauseUntil => _s.quotaPauseUntil;
   @override
   String get model => _s.activeModel;
   @override

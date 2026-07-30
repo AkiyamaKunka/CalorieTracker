@@ -138,6 +138,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             photoLibrary: s.photoLibrary,
             startClaudeAuth: s.startClaudeAuth,
             completeClaudeAuth: s.completeClaudeAuth,
+            openSystemSettings: s.openSystemSettings,
           ),
         ],
       ),

@@ -179,7 +179,10 @@ class PhotoPipeline {
           '${mealDescription(analysis)} — ~${displayTotalCalories(analysis)} kcal';
       notify?.call('Meal logged: $summary');
       onMealSaved?.call();
-      return PhotoOutcome(PhotoOutcomeKind.saved, 'Logged meal #$id: $summary',
+      // No row id in the copy: the chat flow numbers meals by LIST position
+      // ("meal 2 was roast duck"), so surfacing the SQLite id taught users
+      // a number that is guaranteed to miss.
+      return PhotoOutcome(PhotoOutcomeKind.saved, 'Meal logged: $summary',
           analysis: analysis);
     } catch (e) {
       // Containment: never rethrow (spec §6). Mark failed ONLY if we hold

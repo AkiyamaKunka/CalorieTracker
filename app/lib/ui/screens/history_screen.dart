@@ -93,7 +93,28 @@ class HistoryScreenState extends State<HistoryScreen> {
         child: Text('No meals logged in the past ${widget.days} days.'),
       );
     }
-    final dates = _perDay.keys.toList()..sort((a, b) => b.compareTo(a));
+    // Interior GAP days are rendered too (dimmed, "no meals logged"):
+    // a day the watcher missed used to simply vanish, and spotting it
+    // required mentally diffing dates across rows. Leading/trailing empty
+    // spans stay collapsed so a new user never sees 29 empty rows. The
+    // newest edge extends to TODAY: "nothing logged yet today/yesterday"
+    // is exactly the gap worth noticing.
+    final logged = _perDay.keys.toList()..sort();
+    final today = DateTime.now();
+    var end = DateTime(today.year, today.month, today.day);
+    final newest = DateTime.parse(logged.last);
+    if (newest.isAfter(end)) end = newest; // hand-edited future dates
+    final dates = <String>[];
+    final start = DateTime.parse(logged.first);
+    // Day+1 through the CONSTRUCTOR, not Duration(days: 1): a 24h add
+    // drifts across DST in locales that have it and could duplicate or
+    // skip an isoDate.
+    for (var d = start;
+        !d.isAfter(end);
+        d = DateTime(d.year, d.month, d.day + 1)) {
+      dates.add(isoDate(d));
+    }
+    dates.sort((a, b) => b.compareTo(a));
     // Average over days that have data, int truncation (spec §5.3).
     final sum = _perDay.values.fold<num>(0, (a, b) => a + b);
     final avg = (sum / _perDay.length).truncate();
@@ -127,15 +148,30 @@ class HistoryScreenState extends State<HistoryScreen> {
             ListTile(
               key: Key('historyDay$date'),
               dense: true,
-              title: Text(friendlyHistoryDay(date)),
+              title: Text(friendlyHistoryDay(date),
+                  style: _perDay.containsKey(date)
+                      ? null
+                      : TextStyle(
+                          color:
+                              Theme.of(context).colorScheme.onSurfaceVariant)),
               trailing: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text('~${formatKcal(_perDay[date]!)} kcal'),
+                  _perDay.containsKey(date)
+                      ? Text('~${formatKcal(_perDay[date]!)} kcal')
+                      : Text('no meals logged',
+                          style: Theme.of(context)
+                              .textTheme
+                              .bodySmall
+                              ?.copyWith(
+                                  color: Theme.of(context)
+                                      .colorScheme
+                                      .onSurfaceVariant)),
                   const SizedBox(width: 4),
                   const Icon(Icons.chevron_right, size: 18),
                 ],
               ),
+              // Gap rows open the day too — its + FAB is the remedy.
               onTap: () => _openDay(date),
             ),
         ],

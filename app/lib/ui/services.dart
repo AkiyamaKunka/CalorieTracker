@@ -29,6 +29,10 @@ abstract class SettingsStore {
   /// backfill triggers skip the byte-reads entirely.
   bool get isQuotaPaused;
 
+  /// When the §3.3 latch lifts, or null when not paused — the Settings
+  /// banner shows the user WHY nothing is analyzing and until when.
+  DateTime? get quotaPauseUntil;
+
   /// See AppSettings.canAnalyze — key present for the ACTIVE provider and no
   /// quota latch. Screens gate byte-reading sweeps on this single predicate
   /// rather than re-deriving it.
@@ -98,6 +102,11 @@ class UiServices {
   final Future<({String? url, String? error})> Function()? startClaudeAuth;
   final Future<String?> Function(String code)? completeClaudeAuth;
 
+  /// Opens the OS app-settings page (permission remediation: once the OS
+  /// stops re-showing the photo dialog, in-app re-requests are no-ops and
+  /// this is the ONLY way back). Null in tests hides the buttons.
+  final Future<void> Function()? openSystemSettings;
+
   const UiServices({
     required this.dao,
     required this.analyzer,
@@ -113,5 +122,6 @@ class UiServices {
     this.photoLibrary,
     this.startClaudeAuth,
     this.completeClaudeAuth,
+    this.openSystemSettings,
   });
 }

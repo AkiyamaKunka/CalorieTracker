@@ -36,6 +36,16 @@ Future<void> openAddFlow(BuildContext context, UiServices services,
             subtitle: const Text('Say what you ate, in any language'),
             onTap: () => Navigator.of(ctx).pop('text'),
           ),
+          // The zero-dependency path: the other two options need a working
+          // AI key and spend a model call — with no key (first run), a
+          // quota pause, or offline, the + button was a dead end.
+          ListTile(
+            key: const Key('addManually'),
+            leading: const Icon(Icons.keyboard_alt_outlined),
+            title: const Text('Enter manually'),
+            subtitle: const Text('Type the numbers yourself — no AI'),
+            onTap: () => Navigator.of(ctx).pop('manual'),
+          ),
         ],
       ),
     ),
@@ -48,6 +58,10 @@ Future<void> openAddFlow(BuildContext context, UiServices services,
     await Navigator.of(context).push(MaterialPageRoute<void>(
         builder: (_) => AddTextScreen(
             executor: services.executor, dao: services.dao)));
+  } else if (choice == 'manual') {
+    // Defaults to today/now inside the editor (MealDraft.blank).
+    await Navigator.of(context).push(MaterialPageRoute<void>(
+        builder: (_) => MealEditorScreen(dao: services.dao)));
   } else {
     return;
   }
@@ -66,11 +80,26 @@ class AddPhotoScreen extends StatefulWidget {
 class _AddPhotoScreenState extends State<AddPhotoScreen> {
   late Future<List<IntakePhoto>> _photos;
   bool _analyzing = false;
+  bool _permissionDenied = false;
 
   @override
   void initState() {
     super.initState();
-    _photos = widget.services.picker.recentPhotos();
+    _photos = _load();
+  }
+
+  /// Ask for permission FIRST: pickFromRecent returns [] on denial, which
+  /// rendered as 'No recent photos found.' — indistinguishable from an
+  /// empty camera roll and, once the OS stops re-prompting, a permanent
+  /// dead end in the app's headline flow.
+  Future<List<IntakePhoto>> _load() async {
+    final granted = await widget.services.requestPhotoPermission();
+    if (!mounted) return const [];
+    if (!granted) {
+      setState(() => _permissionDenied = true);
+      return const [];
+    }
+    return widget.services.picker.recentPhotos();
   }
 
   Future<void> _analyze(IntakePhoto photo) async {
@@ -163,6 +192,33 @@ class _AddPhotoScreenState extends State<AddPhotoScreen> {
                 ));
               }
               final photos = snap.data ?? const [];
+              if (_permissionDenied) {
+                final open = widget.services.openSystemSettings;
+                return Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Text(
+                          "CalorieTracker isn't allowed to see your "
+                          'photos.',
+                          key: Key('photoPermissionDenied'),
+                          textAlign: TextAlign.center,
+                        ),
+                        if (open != null) ...[
+                          const SizedBox(height: 12),
+                          FilledButton.tonal(
+                            key: const Key('openSystemSettings'),
+                            onPressed: () => open(),
+                            child: const Text('Open system settings'),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                );
+              }
               if (photos.isEmpty) {
                 return const Center(child: Text('No recent photos found.'));
               }

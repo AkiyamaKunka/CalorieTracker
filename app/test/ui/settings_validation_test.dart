@@ -64,8 +64,12 @@ void main() {
 
     expect(find.byKey(const Key('keyInvalid')), findsOneWidget);
     expect(find.text('API key not valid (403)'), findsOneWidget);
-    // A rejected key is NOT persisted.
-    expect(settings.apiKey, '');
+    // The key IS persisted even though validation failed: typing commits,
+    // Validate is only the health check. The old refuse-to-store behavior
+    // silently lost a CORRECT key whenever validation failed transiently
+    // (offline, provider hiccup) — the field still showed it, configured
+    // nothing (review 2026-07-31).
+    expect(settings.apiKey, 'bad-key');
   });
 
   testWidgets('empty key never calls the analyzer', (tester) async {
@@ -87,6 +91,9 @@ void main() {
 
   testWidgets('server backend selector shows for the server provider and '
       'persists the choice', (tester) async {
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
     final settings = FakeSettings(apiKey: 'k')..provider = 'server';
     await tester.pumpWidget(_wrap(SettingsScreen(
       settings: settings,
@@ -164,7 +171,10 @@ Widget _serverWrap({
 void connectClaudeTests() {
   testWidgets('connect: opens the OFFICIAL url, collects code, completes',
       (tester) async {
-    final settings = FakeSettings()..provider = 'server';
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final settings = FakeSettings(apiKey: 'k')..provider = 'server';
     final opened = <Uri>[];
     final completed = <String>[];
     await tester.pumpWidget(_serverWrap(
@@ -201,7 +211,10 @@ void connectClaudeTests() {
 
   testWidgets('connect: start failure surfaces the reason, no dialog',
       (tester) async {
-    final settings = FakeSettings()..provider = 'server';
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final settings = FakeSettings(apiKey: 'k')..provider = 'server';
     await tester.pumpWidget(_serverWrap(
       settings: settings,
       start: () async => (url: null, error: 'the CLI did not produce a URL'),
@@ -216,7 +229,10 @@ void connectClaudeTests() {
 
   testWidgets('connect: cancelling the dialog completes nothing',
       (tester) async {
-    final settings = FakeSettings()..provider = 'server';
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final settings = FakeSettings(apiKey: 'k')..provider = 'server';
     var completions = 0;
     await tester.pumpWidget(_serverWrap(
       settings: settings,
