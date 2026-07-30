@@ -85,6 +85,40 @@ void main() {
     expect(find.byKey(const Key('keyInvalid')), findsOneWidget);
   });
 
+  testWidgets('server backend selector shows for the server provider and '
+      'persists the choice', (tester) async {
+    final settings = FakeSettings(apiKey: 'k')..provider = 'server';
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: settings,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      requestPhotoPermission: () async => true,
+    )));
+    expect(find.byKey(const Key('serverBackendSelector')), findsOneWidget);
+    expect(settings.serverBackend, 'claude');
+
+    await tester.tap(find.text('GLM'));
+    await tester.pumpAndSettle();
+    expect(settings.serverBackend, 'glm',
+        reason: 'the tap must reach SettingsStore.update(serverBackend:)');
+
+    await tester.tap(find.text('Doubao'));
+    await tester.pumpAndSettle();
+    expect(settings.serverBackend, 'doubao');
+  });
+
+  testWidgets('no backend selector away from the server provider',
+      (tester) async {
+    final settings = FakeSettings(apiKey: 'k'); // gemini default
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: settings,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      requestPhotoPermission: () async => true,
+    )));
+    expect(find.byKey(const Key('serverBackendSelector')), findsNothing);
+  });
+
   testWidgets('watcher toggle stays off when permission is denied',
       (tester) async {
     final settings = FakeSettings(watcherEnabled: false);

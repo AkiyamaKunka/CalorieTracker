@@ -77,6 +77,7 @@ class AppSettings extends ChangeNotifier {
   static const String _kOpenaiModel = 'settings.openai_model';
   static const String _kAnthropicModel = 'settings.anthropic_model';
   static const String _kServerBaseUrl = 'settings.server_base_url';
+  static const String _kServerBackend = 'settings.server_backend';
   static const String _kQwenModel = 'settings.qwen_model';
   static const String _kDoubaoModel = 'settings.doubao_model';
   static const String _kGlmModel = 'settings.glm_model';
@@ -115,6 +116,7 @@ class AppSettings extends ChangeNotifier {
   String? _doubaoApiKey;
   String? _glmApiKey;
   String _serverBaseUrl = '';
+  String _serverBackend = 'claude';
   AiProvider _provider = AiProvider.gemini;
   String _openaiModel = defaultOpenaiModel;
   String _anthropicModel = defaultAnthropicModel;
@@ -148,6 +150,9 @@ class AppSettings extends ChangeNotifier {
     final glKey = (await k.read(_kGlmKey))?.trim();
     s._glmApiKey = (glKey == null || glKey.isEmpty) ? null : glKey;
     s._serverBaseUrl = (p.getString(_kServerBaseUrl) ?? '').trim();
+    final backend = (p.getString(_kServerBackend) ?? '').trim();
+    s._serverBackend =
+        serverBackends.contains(backend) ? backend : 'claude';
     s._provider = AiProvider.values.firstWhere(
         (v) => v.name == (p.getString(_kProvider) ?? ''),
         orElse: () => AiProvider.gemini);
@@ -303,6 +308,22 @@ class AppSettings extends ChangeNotifier {
     }
     _serverBaseUrl = v;
     await _prefs.setString(_kServerBaseUrl, v);
+    notifyListeners();
+  }
+
+  /// Wire values of /api/analyze_photo's `backend` field — whose
+  /// subscription pays on the SERVER: the Claude plan (default), Zhipu's
+  /// GLM Coding Plan, or Volcengine's Doubao Agent Plan. The plan keys are
+  /// server-side .env entries (GLM_PLAN_KEY / DOUBAO_PLAN_KEY); the phone
+  /// stores only which one to ask for.
+  static const List<String> serverBackends = ['claude', 'glm', 'doubao'];
+
+  String get serverBackend => _serverBackend;
+
+  Future<void> setServerBackend(String value) async {
+    final v = serverBackends.contains(value) ? value : 'claude';
+    _serverBackend = v;
+    await _prefs.setString(_kServerBackend, v);
     notifyListeners();
   }
 

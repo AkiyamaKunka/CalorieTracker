@@ -110,6 +110,8 @@ class FakeSettings implements SettingsStore {
   String dietaryProfile;
   @override
   String serverBaseUrl = '';
+  @override
+  String serverBackend = 'claude';
   int updateCalls = 0;
 
   FakeSettings({
@@ -131,6 +133,7 @@ class FakeSettings implements SettingsStore {
     bool? watcherEnabled,
     String? dietaryProfile,
     String? serverBaseUrl,
+    String? serverBackend,
   }) async {
     updateCalls++;
     if (apiKey != null) this.apiKey = apiKey;
@@ -141,6 +144,7 @@ class FakeSettings implements SettingsStore {
     if (watcherEnabled != null) this.watcherEnabled = watcherEnabled;
     if (dietaryProfile != null) this.dietaryProfile = dietaryProfile;
     if (serverBaseUrl != null) this.serverBaseUrl = serverBaseUrl;
+    if (serverBackend != null) this.serverBackend = serverBackend;
   }
 }
 

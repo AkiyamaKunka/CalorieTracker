@@ -25,11 +25,34 @@ Dispatch modes (CLAUDE_ANALYZER_DISPATCH):
 Configuration (env / .env):
   CLAUDE_ANALYZER_ENABLED           truthy to enable (default: off)
   CLAUDE_ANALYZER_BIN               CLI binary (default: "claude")
-  CLAUDE_ANALYZER_MODEL             optional --model override
+  CLAUDE_ANALYZER_MODEL             optional --model override (claude backend)
   CLAUDE_ANALYZER_TIMEOUT_SECONDS   per-analysis wall clock (default: 120)
   CLAUDE_ANALYZER_EXTRA_FLAGS       optional extra CLI flags (shlex-split)
   CLAUDE_ANALYZER_DISPATCH          'stream' (default) or 'file' (see above)
   CLAUDE_CODE_OAUTH_TOKEN           subscription token (read by the CLI itself)
+  GLM_PLAN_KEY                      Zhipu GLM Coding Plan key → 'glm' backend
+  DOUBAO_PLAN_KEY                   Volcengine Agent Plan key → 'doubao' backend
+
+Subscription backends (the [backend] parameter):
+  The SAME Claude Code CLI can run against two other vendors' subscription
+  plans — both officially document Claude Code as a supported tool, so this
+  is their sanctioned use, not impersonation (facts verified 2026-07-30):
+    glm     Zhipu GLM Coding Plan: ANTHROPIC_BASE_URL=
+            https://open.bigmodel.cn/api/anthropic + plan key as the auth
+            token. That endpoint is TEXT-ONLY, so photos go through Zhipu's
+            OFFICIAL vision MCP server (@z_ai/mcp-server, GLM-4.6V) reading
+            a local temp file — needs npx on this machine.
+    doubao  Volcengine Ark Agent Plan: ANTHROPIC_BASE_URL=
+            https://ark.cn-beijing.volces.com/api/plan + plan key. Direct
+            API calls with a plan key are a documented ban risk — the plan
+            is valid ONLY through whitelisted tools, and running the real
+            Claude Code CLI is exactly that. Image input over this endpoint
+            is undocumented: the stream dispatch sends the photo as a
+            base64 block and a rejection surfaces as an ordinary failed run
+            (→ None → the caller's fallback), never a crash.
+  Both backends scrub CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY from the
+  child env so a vendor run can never accidentally spend the Anthropic
+  subscription or an API key.
 """
 
 import base64
@@ -101,6 +124,69 @@ def _dispatch_mode() -> str:
     return "file" if raw == "file" else "stream"
 
 
+# ─── Subscription backends ────────────────────────────────────────────
+SUBSCRIPTION_BACKENDS = ("claude", "glm", "doubao")
+
+_BACKEND_BASE_URLS = {
+    "glm": "https://open.bigmodel.cn/api/anthropic",
+    "doubao": "https://ark.cn-beijing.volces.com/api/plan",
+}
+_BACKEND_KEY_ENVS = {"glm": "GLM_PLAN_KEY", "doubao": "DOUBAO_PLAN_KEY"}
+_BACKEND_LABELS = {
+    "claude": "Claude (subscription)",
+    "glm": "GLM (coding plan)",
+    "doubao": "Doubao (agent plan)",
+}
+
+
+def _backend_key(backend: str) -> Optional[str]:
+    env_name = _BACKEND_KEY_ENVS.get(backend)
+    if not env_name:
+        return None
+    key = (os.environ.get(env_name) or "").strip()
+    return key or None
+
+
+def _npx_path() -> Optional[str]:
+    return shutil.which("npx")
+
+
+def backend_available(backend: str, for_photo: bool = False) -> bool:
+    """Can [backend] serve a request right now? 'claude' rides the existing
+    knobs; the vendor plans need their key — and, for GLM photos only, npx
+    (the official vision MCP server is an npm package)."""
+    if not is_configured():
+        return False
+    if backend == "claude":
+        return True
+    if backend not in _BACKEND_KEY_ENVS:
+        return False
+    if _backend_key(backend) is None:
+        return False
+    if backend == "glm" and for_photo and _npx_path() is None:
+        return False
+    return True
+
+
+def backend_status() -> Dict[str, str]:
+    """Per-backend one-phrase state for /api/auth_check — the phone's
+    'Test connection' shows these so a missing server-side plan key is
+    diagnosed from the couch, not from ssh."""
+    status: Dict[str, str] = {"claude": status_label()}
+    for backend in ("glm", "doubao"):
+        if not is_enabled():
+            status[backend] = "off"
+        elif _cli_path() is None:
+            status[backend] = "enabled, CLI missing"
+        elif _backend_key(backend) is None:
+            status[backend] = f"no key ({_BACKEND_KEY_ENVS[backend]})"
+        elif backend == "glm" and _npx_path() is None:
+            status[backend] = "key set, npx missing (vision MCP needs node)"
+        else:
+            status[backend] = "ready"
+    return status
+
+
 def _build_prompt(image_path: str, prompt: Optional[str] = None) -> str:
     return (
         f"Read the image file at {image_path} and analyze it.\n\n"
@@ -124,20 +210,38 @@ def _extra_flags() -> list:
         return []
 
 
-def _append_model_and_extra_flags(cmd: list) -> None:
-    """Shared argv tail: optional --model override, then extra flags last."""
-    model = (os.environ.get("CLAUDE_ANALYZER_MODEL") or "").strip()
-    if model:
-        cmd += ["--model", model]
+def _append_model_and_extra_flags(cmd: list, backend: str = "claude") -> None:
+    """Shared argv tail: optional --model override, then extra flags last.
+
+    The --model override is CLAUDE-ONLY: the vendor plans map Anthropic
+    model names to their own models server-side (GLM: sonnet→glm-5.2;
+    Doubao: per plan tier), and an Anthropic model id pushed at them is at
+    best ignored and at worst a 400 on every photo.
+    """
+    if backend == "claude":
+        model = (os.environ.get("CLAUDE_ANALYZER_MODEL") or "").strip()
+        if model:
+            cmd += ["--model", model]
     cmd += _extra_flags()
 
 
-def _cli_env() -> Dict[str, str]:
+def _cli_env(backend: str = "claude") -> Dict[str, str]:
     # The CLI phones home for updates/telemetry on every run; both knobs
     # shave that off (and are harmless no-ops on CLIs that predate them).
     env = dict(os.environ)
     env["DISABLE_AUTOUPDATER"] = "1"
     env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+    if backend in _BACKEND_BASE_URLS:
+        env["ANTHROPIC_BASE_URL"] = _BACKEND_BASE_URLS[backend]
+        env["ANTHROPIC_AUTH_TOKEN"] = _backend_key(backend) or ""
+        # Scrub the Anthropic credentials: a vendor-plan run must never be
+        # able to fall through to (and spend) the Claude subscription or an
+        # API key — and the CLI prefers some of these over AUTH_TOKEN.
+        env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+        env.pop("ANTHROPIC_API_KEY", None)
+        # Zhipu's own Claude Code setup doc prescribes a long API timeout;
+        # harmless for Ark. Never override an operator's explicit value.
+        env.setdefault("API_TIMEOUT_MS", "3000000")
     return env
 
 
@@ -199,15 +303,27 @@ def _result_text(envelope) -> Optional[str]:
 
 
 def _log_cli_exit(proc) -> None:
-    snippet = (proc.stderr or proc.stdout or "").strip()[:300]
+    text = (proc.stderr or proc.stdout or "").strip()
+    # Redact BEFORE truncating: a CLI that echoes a bad argument back into
+    # stderr (e.g. "MCP config file not found: {...Z_AI_API_KEY...}") must
+    # not put a plan key into the server log — and truncating first could
+    # leave a recognizable key fragment straddling the cut.
+    for backend in _BACKEND_KEY_ENVS:
+        key = _backend_key(backend)
+        if key:
+            text = text.replace(key, "[redacted-plan-key]")
+    snippet = text[:300]
     if "limit" in snippet.lower():
         log.warning(f"Claude CLI usage window likely exhausted: {snippet}")
     else:
         log.warning(f"Claude CLI exited {proc.returncode}: {snippet}")
 
 
-def _finish_analysis(envelope: Dict, result_text: str, start: float) -> Optional[Dict]:
-    """is_food-contract validation + success instrumentation, shared by both
+def _finish_analysis(
+    envelope: Dict, result_text: str, start: float,
+    backend: str = "claude",
+) -> Optional[Dict]:
+    """is_food-contract validation + success instrumentation, shared by all
     dispatch paths. None here means the MODEL answered junk — callers must
     treat it as terminal and never retry-spend on a model that answered."""
     try:
@@ -230,8 +346,9 @@ def _finish_analysis(envelope: Dict, result_text: str, start: float) -> Optional
     # proves which dispatch actually answered (1 = single-turn stream) —
     # the evidence trail for tuning without touching the model choice.
     wall = time.time() - start
+    label = _BACKEND_LABELS.get(backend, backend)
     log.info(
-        f"✅ Photo analyzed by Claude (subscription) in {wall:.1f}s "
+        f"✅ Photo analyzed by {label} in {wall:.1f}s "
         f"(cli={envelope.get('duration_ms')}ms "
         f"api={envelope.get('duration_api_ms')}ms "
         f"turns={envelope.get('num_turns')})."
@@ -241,7 +358,7 @@ def _finish_analysis(envelope: Dict, result_text: str, start: float) -> Optional
 
 def _attempt_stream(
     cli: str, image_bytes: bytes, env: Dict[str, str], start: float,
-    prompt: Optional[str] = None,
+    prompt: Optional[str] = None, backend: str = "claude",
 ) -> Tuple[Optional[Dict], bool]:
     """Single-turn dispatch: image on stdin, no temp file, no tool turns.
 
@@ -260,7 +377,7 @@ def _attempt_stream(
         "--verbose",
         "--tools", "",  # no tools: the answer must land in turn one
     ]
-    _append_model_and_extra_flags(cmd)
+    _append_model_and_extra_flags(cmd, backend)
     try:
         proc = subprocess.run(
             cmd,
@@ -281,13 +398,126 @@ def _attempt_stream(
         if text is None:
             log.warning("Claude CLI stream result envelope was unusable.")
             return None, True
-        return _finish_analysis(envelope, text, start), False
+        return _finish_analysis(envelope, text, start, backend), False
     except subprocess.TimeoutExpired:
         log.warning(f"Claude CLI timed out after {_timeout_seconds()}s.")
         return None, False
     except Exception as e:
         log.warning(f"Claude analyzer failed unexpectedly: {type(e).__name__}: {e}")
         return None, False
+
+
+def _zai_mcp_config(key: str) -> str:
+    """Inline --mcp-config JSON for Zhipu's OFFICIAL vision MCP server
+    (docs.bigmodel.cn coding-plan vision-mcp doc): the coding-plan key IS
+    the intended credential, Z_AI_MODE=ZHIPU selects the mainland platform."""
+    return json.dumps({
+        "mcpServers": {
+            "zai": {
+                "command": "npx",
+                "args": ["-y", "@z_ai/mcp-server"],
+                "env": {"Z_AI_API_KEY": key, "Z_AI_MODE": "ZHIPU"},
+            }
+        }
+    })
+
+
+def _attempt_glm_vision(
+    cli: str, image_bytes: bytes, env: Dict[str, str], start: float,
+    prompt: Optional[str] = None,
+) -> Optional[Dict]:
+    """GLM-backend photo dispatch: temp file + the official zai vision MCP.
+
+    The GLM coding-plan Anthropic endpoint is TEXT-ONLY — an image content
+    block never reaches a vision model there. Zhipu's sanctioned photo path
+    for plan users is their first-party vision MCP server (GLM-4.6V) reading
+    a LOCAL file, so this dispatch mirrors _attempt_file's temp-file shape
+    but allows ONLY the zai MCP tools — never Read. A steered prompt could
+    at worst point the vision tool at another IMAGE on this machine; it
+    cannot read .env or any text secret, which is the exfiltration class the
+    allow_file_fallback rule exists to stop.
+    """
+    key = _backend_key("glm")
+    if key is None:
+        return None
+    if _npx_path() is None:
+        log.warning("GLM vision needs npx (node) for @z_ai/mcp-server — "
+                    "not installed on this machine.")
+        return None
+    tmp_path = None
+    cfg_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="ct_glm_", suffix=".jpg", delete=False
+        ) as tmp:
+            tmp_path = tmp.name
+            tmp.write(image_bytes)
+        # The mcp-config goes through a 0600 TEMP FILE, never inline argv:
+        # inline JSON put the plan key into /proc/<pid>/cmdline for the
+        # whole run, and a CLI that echoes a rejected argument into stderr
+        # would hand it to _log_cli_exit (review 2026-07-30).
+        with tempfile.NamedTemporaryFile(
+            prefix="ct_glm_cfg_", suffix=".json", mode="w", delete=False
+        ) as cfg:
+            cfg_path = cfg.name
+            cfg.write(_zai_mcp_config(key))
+
+        cmd = [
+            cli, "-p",
+            (f"Use the zai vision tool to analyze the image file at "
+             f"{tmp_path}, then answer.\n\n"
+             f"{prompt or FOOD_DETECTION_PROMPT}"),
+            "--output-format", "json",
+            "--mcp-config", cfg_path,
+            "--allowedTools", "mcp__zai",
+        ]
+        _append_model_and_extra_flags(cmd, "glm")
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_timeout_seconds(),
+            cwd=str(Path(tmp_path).parent),
+            env=env,
+        )
+        if proc.returncode != 0:
+            _log_cli_exit(proc)
+            return None
+        envelope = json.loads(proc.stdout)
+        text = _result_text(envelope)
+        if text is None:
+            log.warning("GLM CLI returned an unusable result envelope.")
+            return None
+        # PROVE the vision tool actually ran. If the MCP server fails
+        # after launch (npm registry unreachable, startup crash) the CLI
+        # continues WITHOUT the tool and the model answers about an image
+        # it never saw — and the prompt's "unclear → not food" rule makes
+        # that a contract-valid wrong verdict. A real tool round-trip is
+        # ≥2 turns; a single-turn envelope here is a blind run.
+        turns = envelope.get("num_turns")
+        if not isinstance(turns, int) or turns < 2:
+            log.warning(
+                f"GLM vision run had no tool round-trip (num_turns={turns})"
+                " — the zai MCP server likely failed to start; discarding "
+                "the blind answer.")
+            return None
+        return _finish_analysis(envelope, text, start, "glm")
+    except subprocess.TimeoutExpired:
+        log.warning(f"GLM CLI timed out after {_timeout_seconds()}s.")
+        return None
+    except (json.JSONDecodeError, ValueError) as e:
+        log.warning(f"Could not parse GLM CLI output: {e}")
+        return None
+    except Exception as e:
+        log.warning(f"GLM analyzer failed unexpectedly: {type(e).__name__}: {e}")
+        return None
+    finally:
+        for p in (tmp_path, cfg_path):
+            if p:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
 
 
 def _attempt_file(
@@ -349,16 +579,19 @@ def _attempt_file(
                 pass
 
 
-def analyze_text_prompt(prompt: str) -> Optional[Dict]:
+def analyze_text_prompt(prompt: str, backend: str = "claude") -> Optional[Dict]:
     """Run an arbitrary JSON-answering prompt through the CLI (subscription).
 
     Used by the app-facing /api/text_intent endpoint so the phone's NL
     corrections cost no API money either. Same discipline as the photo path:
     single turn, no tools, serialized by _CLI_LOCK, and a contended CLI
     returns None (caller decides — the app falls back to its own provider)
-    rather than queueing behind a 120 s photo run.
+    rather than queueing behind a 120 s photo run. Text works on ALL three
+    backends: the vendor plans' Anthropic endpoints are text-native.
     """
-    if not is_configured():
+    if backend not in SUBSCRIPTION_BACKENDS:
+        return None
+    if not backend_available(backend):
         return None
     cli = _cli_path()
     if cli is None or not (prompt or "").strip():
@@ -369,14 +602,14 @@ def analyze_text_prompt(prompt: str) -> Optional[Dict]:
     start = time.time()
     try:
         cmd = [cli, "-p", "--output-format", "json", "--tools", ""]
-        _append_model_and_extra_flags(cmd)
+        _append_model_and_extra_flags(cmd, backend)
         proc = subprocess.run(
             cmd,
             input=prompt,
             capture_output=True,
             text=True,
             timeout=_timeout_seconds(),
-            env=_cli_env(),
+            env=_cli_env(backend),
         )
         if proc.returncode != 0:
             _log_cli_exit(proc)
@@ -414,6 +647,7 @@ def analyze_food_photo(
     image_bytes: bytes,
     prompt: Optional[str] = None,
     allow_file_fallback: bool = True,
+    backend: str = "claude",
 ) -> Optional[Dict]:
     """Analyze a food photo via the Claude Code CLI; None means 'use Gemini'.
 
@@ -428,8 +662,17 @@ def analyze_food_photo(
     content returned inside the analysis JSON. Reaching the fallback does
     not even need the rollback knob: a prompt that produces no output makes
     the stream attempt look like a CLI-shape failure.
+
+    [backend] selects whose subscription pays: 'claude' (default, the
+    existing path), 'glm' (coding plan; photos via the official vision MCP),
+    or 'doubao' (agent plan; stream dispatch only — its Read-file fallback
+    is refused unconditionally since image-block support there is already
+    the experiment, and a Read-enabled retry adds the exfiltration surface
+    on top of an unknown).
     """
-    if not is_configured():
+    if backend not in SUBSCRIPTION_BACKENDS:
+        return None
+    if not backend_available(backend, for_photo=True):
         return None
     cli = _cli_path()
     if cli is None or not image_bytes:
@@ -446,7 +689,15 @@ def analyze_food_photo(
     # memory-heavy CLI even mid-fallback.
     start = time.time()
     try:
-        env = _cli_env()
+        env = _cli_env(backend)
+        if backend == "glm":
+            # Text-only Anthropic endpoint: the stream dispatch cannot
+            # carry the image; the vision MCP path is the ONLY photo path.
+            return _attempt_glm_vision(cli, image_bytes, env, start, prompt)
+        if backend == "doubao":
+            analysis, _ = _attempt_stream(
+                cli, image_bytes, env, start, prompt, backend)
+            return analysis
         if _dispatch_mode() == "stream":
             analysis, retry_via_file = _attempt_stream(
                 cli, image_bytes, env, start, prompt)

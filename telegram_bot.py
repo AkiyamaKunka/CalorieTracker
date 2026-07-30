@@ -4831,7 +4831,10 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         """
         if not _authorized_api_request():
             return jsonify({"error": "Unauthorized"}), 401
-        return jsonify({"ok": True, "analyzer": claude_analyzer.status_label()})
+        # "backends" lets the phone's Test connection diagnose a missing
+        # server-side plan key (GLM_PLAN_KEY / DOUBAO_PLAN_KEY) remotely.
+        return jsonify({"ok": True, "analyzer": claude_analyzer.status_label(),
+                        "backends": claude_analyzer.backend_status()})
 
     @app.route('/api/claude_auth/start', methods=['POST'])
     def api_claude_auth_start():
@@ -4889,12 +4892,13 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         if not _authorized_api_request():
             return jsonify({"error": "Unauthorized"}), 401
         prompt = None
+        backend = "claude"
         if request.is_json:
-            # The app's shape: {image_b64, dietary_profile}. The caller may
-            # NOT supply a whole prompt: the analysis prompt is composed
-            # HERE from the server's own shared/ copy plus a bounded profile
-            # appendix. A caller-authored prompt would be an instruction
-            # channel into the CLI (see analyze_food_photo's
+            # The app's shape: {image_b64, dietary_profile, backend?}. The
+            # caller may NOT supply a whole prompt: the analysis prompt is
+            # composed HERE from the server's own shared/ copy plus a
+            # bounded profile appendix. A caller-authored prompt would be
+            # an instruction channel into the CLI (see analyze_food_photo's
             # allow_file_fallback note), which is not worth a settings knob.
             payload = request.get_json(silent=True) or {}
             raw = payload.get("image_b64")
@@ -4909,6 +4913,7 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
                 if len(profile) > API_PROFILE_MAX_CHARS:
                     return jsonify({"error": "profile_too_large"}), 413
                 prompt = build_photo_prompt_with_profile(profile)
+            backend = payload.get("backend") or "claude"
         elif 'photo' in request.files:
             data = request.files['photo'].read()
         else:
@@ -4917,19 +4922,25 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
             return jsonify({"error": "no_image"}), 400
         if len(data) > API_ANALYZE_MAX_BYTES:
             return jsonify({"error": "image_too_large"}), 413
-        if not claude_analyzer.is_configured():
-            return jsonify({"error": "claude_unavailable",
-                            "reason": "analyzer not configured"}), 503
+        if backend not in claude_analyzer.SUBSCRIPTION_BACKENDS:
+            return jsonify({"error": "bad_backend"}), 400
+        if not claude_analyzer.backend_available(backend, for_photo=True):
+            # 503 keeps old-app compat for claude; the reason string tells
+            # a new app WHICH server-side knob is missing.
+            return jsonify({
+                "error": "claude_unavailable",
+                "reason": claude_analyzer.backend_status().get(backend),
+            }), 503
         # allow_file_fallback=False: never run a network-influenced prompt
         # on the Read-tool path.
         analysis = claude_analyzer.analyze_food_photo(
-            data, prompt, allow_file_fallback=False)
+            data, prompt, allow_file_fallback=False, backend=backend)
         if not analysis:
             # Busy CLI (another photo owns it), timeout, or a junk reply.
             # 503 tells the app "transient" so the photo stays eligible.
             return jsonify({"error": "claude_unavailable"}), 503
         return jsonify({"ok": True, "analysis": analysis,
-                        "analyzed_by": "claude"})
+                        "analyzed_by": backend})
 
     @app.route('/api/text_intent', methods=['POST'])
     def api_text_intent():
@@ -4944,14 +4955,19 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
             return jsonify({"error": "no_prompt"}), 400
         if len(prompt) > API_TEXT_MAX_CHARS:
             return jsonify({"error": "prompt_too_large"}), 413
-        if not claude_analyzer.is_configured():
-            return jsonify({"error": "claude_unavailable",
-                            "reason": "analyzer not configured"}), 503
-        out = claude_analyzer.analyze_text_prompt(prompt)
+        backend = payload.get("backend") or "claude"
+        if backend not in claude_analyzer.SUBSCRIPTION_BACKENDS:
+            return jsonify({"error": "bad_backend"}), 400
+        if not claude_analyzer.backend_available(backend):
+            return jsonify({
+                "error": "claude_unavailable",
+                "reason": claude_analyzer.backend_status().get(backend),
+            }), 503
+        out = claude_analyzer.analyze_text_prompt(prompt, backend=backend)
         if not out:
             return jsonify({"error": "claude_unavailable"}), 503
         return jsonify({"ok": True, "result": out["result"],
-                        "analyzed_by": "claude"})
+                        "analyzed_by": backend})
 
     @app.route('/reconcile', methods=['POST'])
     def reconcile():

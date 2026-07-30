@@ -115,6 +115,7 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
       //     treating it as "key rejected" burned the photo non-retryably
       //     and told the user to fix a key that works (review 2026-07-29)
       //   DashScope 400 Arrearage — a 400 that is NOT a client bug
+      //   Anthropic 400 "credit balance is too low" — likewise
       // All mean "the key authenticated but the account needs money":
       // transient (the photo stays eligible; a recharge fixes it) and
       // quota-classed (validateKey accepts — the key itself is proven).
@@ -123,7 +124,9 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
               (body.contains('insufficient_quota') ||
                   body.contains('"1113"'))) ||
           (resp.statusCode == 403 && body.contains('AccountOverdue')) ||
-          (resp.statusCode == 400 && body.contains('Arrearage'));
+          (resp.statusCode == 400 &&
+              (body.contains('Arrearage') ||
+                  body.contains('credit balance is too low')));
       if (billingDead) {
         throw _ProviderException(
             'Provider balance or credits exhausted — check your '
@@ -148,6 +151,8 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
     if (!extract) return '';
     try {
       return extractText(jsonDecode(resp.body) as Map<String, dynamic>);
+    } on _ProviderException {
+      rethrow; // extractText may classify precisely — keep its message
     } catch (_) {
       throw const _ProviderException('unexpected response shape',
           transient: false);
@@ -548,8 +553,12 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
           ? {
               'image_b64': base64Encode(jpegBytes),
               'dietary_profile': settings.dietaryProfile ?? '',
+              // Whose subscription pays on the server: 'claude' (default),
+              // 'glm' (coding plan) or 'doubao' (agent plan). The plan
+              // keys live in the SERVER's .env — never on the phone.
+              'backend': settings.serverBackend,
             }
-          : {'prompt': prompt});
+          : {'prompt': prompt, 'backend': settings.serverBackend});
   }
 
   @override
@@ -558,6 +567,22 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
     // layer wants TEXT to parseAiJson, so hand the payload back as JSON —
     // that keeps every downstream rule (coerceIsFood, bare-array handling)
     // identical to the direct-API providers.
+    //
+    // analyzed_by is the payer receipt: a pre-upgrade server IGNORES the
+    // request's backend field, answers analyzed_by:'claude', and would
+    // silently spend the Claude plan forever while the user believes GLM
+    // or Doubao is paying. Refuse the mismatch loudly — permanent, since
+    // only a server update fixes it (a retry would spend the WRONG plan
+    // again and discard the result again).
+    final by = body['analyzed_by'];
+    if (by is String && by.isNotEmpty && by != settings.serverBackend) {
+      throw _ProviderException(
+          'The server analyzed with "$by", not the selected '
+          '"${settings.serverBackend}" — update the server so it '
+          'understands backend selection.',
+          transient: false,
+          verbatimMessage: true);
+    }
     final payload = body['analysis'] ?? body['result'];
     if (payload == null) throw const FormatException('no payload');
     return jsonEncode(payload);
@@ -632,7 +657,41 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
     try {
       final streamed = await client.send(req).timeout(deadline);
       final resp = await http.Response.fromStream(streamed);
-      if (resp.statusCode == 200) return null;
+      if (resp.statusCode == 200) {
+        // The server reports per-backend readiness — surface a chosen
+        // backend whose plan key is missing NOW, at test time, instead of
+        // as a 503 on tonight's dinner photo. `is`-checks, not casts: a
+        // JSON-but-not-object body must not fall into the generic catch
+        // and lie "could not reach" about a server that answered.
+        final backend = settings.serverBackend;
+        if (backend != 'claude') {
+          Object? decoded;
+          try {
+            decoded = jsonDecode(resp.body);
+          } on FormatException {
+            return null; // non-JSON 200 (proxy page?) — nothing to infer
+          }
+          if (decoded is Map) {
+            final backends = decoded['backends'];
+            if (backends is Map) {
+              final status = backends[backend]?.toString();
+              if (status != null && status != 'ready') {
+                return 'Server reachable, but its $backend backend is not '
+                    'ready: $status.';
+              }
+            } else {
+              // A real auth_check reply WITHOUT a backends map is the
+              // pre-upgrade server — which ignores the backend field and
+              // silently analyzes on the CLAUDE plan. The user chose a
+              // different payer; say so here, not never.
+              return 'Server reachable, but it predates backend selection '
+                  '— update the server, or analyses will use the Claude '
+                  'plan instead of $backend.';
+            }
+          }
+        }
+        return null;
+      }
       if (resp.statusCode == 401 || resp.statusCode == 403) {
         return 'Your server rejected that key.';
       }

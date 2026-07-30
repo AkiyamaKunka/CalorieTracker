@@ -42,6 +42,10 @@ abstract class SettingsStore {
   /// Base URL of the user's own server (AiProvider.server); '' when unset.
   String get serverBaseUrl;
 
+  /// Whose subscription pays on the server: 'claude' | 'glm' | 'doubao'
+  /// (AppSettings.serverBackends). Plan keys live in the server's .env.
+  String get serverBackend;
+
   Future<void> update({
     String? apiKey,
     String? provider,
@@ -51,6 +55,7 @@ abstract class SettingsStore {
     bool? watcherEnabled,
     String? dietaryProfile,
     String? serverBaseUrl,
+    String? serverBackend,
   });
 }
 

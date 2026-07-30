@@ -180,6 +180,8 @@ class _AppSettingsStore implements SettingsStore {
   String get dietaryProfile => _s.dietaryProfile ?? '';
   @override
   String get serverBaseUrl => _s.serverBaseUrl;
+  @override
+  String get serverBackend => _s.serverBackend;
 
   @override
   Future<void> update({
@@ -191,6 +193,7 @@ class _AppSettingsStore implements SettingsStore {
     bool? watcherEnabled,
     String? dietaryProfile,
     String? serverBaseUrl,
+    String? serverBackend,
   }) async {
     if (provider != null) {
       await _s.setProvider(AiProvider.values
@@ -239,6 +242,7 @@ class _AppSettingsStore implements SettingsStore {
     }
     if (dietaryProfile != null) await _s.setDietaryProfile(dietaryProfile);
     if (serverBaseUrl != null) await _s.setServerBaseUrl(serverBaseUrl);
+    if (serverBackend != null) await _s.setServerBackend(serverBackend);
   }
 }
 

@@ -332,7 +332,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             labelText: 'AI provider',
             helperText: 'Key and model below belong to the selected '
                 'provider. "My server" analyses run on your own server '
-                'under your Claude subscription — no API charges.',
+                'under your Claude, GLM, or Doubao subscription — '
+                'no API charges.',
             // Without this, multi-line helpers silently truncate to ONE
             // ellipsized line (Flutter's default) — measured on-device
             // 2026-07-29; the provider guidance was unreadable.
@@ -346,7 +347,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 value: 'anthropic', child: Text('Anthropic Claude')),
             DropdownMenuItem(
                 value: 'server',
-                child: Text('My server (Claude subscription)')),
+                child: Text('My server (subscription)')),
             // Mainland-China providers: the four above need a VPN there.
             DropdownMenuItem(
                 value: 'qwen', child: Text('Alibaba Qwen 通义千问')),
@@ -379,13 +380,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
               labelText: 'Server address',
               hintText: 'http://your.server.ip',
               helperText: 'Your CalorieTracker server — it analyses photos '
-                  'with your Claude subscription.',
+                  'with the subscription selected below.',
               border: OutlineInputBorder(),
             ),
             onSubmitted: (v) =>
                 widget.settings.update(serverBaseUrl: v.trim()),
             onTapOutside: (_) => widget.settings
                 .update(serverBaseUrl: _serverUrlController.text.trim()),
+          ),
+          const SizedBox(height: 12),
+          // Whose subscription the server spends. The vendor plan keys are
+          // SERVER-side .env entries (GLM_PLAN_KEY / DOUBAO_PLAN_KEY) —
+          // the phone only remembers which backend to ask for, so there is
+          // no key field here. Test connection reports a missing key.
+          SegmentedButton<String>(
+            key: const Key('serverBackendSelector'),
+            segments: const [
+              ButtonSegment(value: 'claude', label: Text('Claude')),
+              ButtonSegment(value: 'glm', label: Text('GLM')),
+              ButtonSegment(value: 'doubao', label: Text('Doubao')),
+            ],
+            selected: {widget.settings.serverBackend},
+            onSelectionChanged: (sel) async {
+              await widget.settings.update(serverBackend: sel.single);
+              if (!mounted) return;
+              setState(() {
+                _keyState = KeyValidationState.idle;
+                _keyError = null;
+              });
+            },
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Which subscription the server analyses with: your Claude '
+            'plan, a GLM Coding Plan (¥49/mo), or a Doubao Agent Plan '
+            '(¥40/mo). The plan key lives on the server, not the phone.',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant),
           ),
           const SizedBox(height: 12),
         ],

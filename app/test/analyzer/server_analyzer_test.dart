@@ -80,6 +80,139 @@ void main() {
     // an instruction channel into a CLI whose image path enables Read.
     expect(body['dietary_profile'], 'Cantonese home cooking');
     expect(body.containsKey('prompt'), isFalse);
+    expect(body['backend'], 'claude',
+        reason: 'the default backend travels explicitly');
+  });
+
+  test('the chosen server backend rides every request', () async {
+    final s = await serverSettings();
+    await s.setServerBackend('glm');
+    final requests = <http.Request>[];
+    final analyzer = ServerAnalyzer(
+      s,
+      normalizer: (b) async => b,
+      client: MockClient((req) async {
+        requests.add(req);
+        return http.Response(
+            jsonEncode({
+              'ok': true,
+              'analysis': {'is_food': true, 'total_calories': 1},
+              'result': {'intent': 'x'},
+            }),
+            200);
+      }),
+    );
+    await analyzer.analyzePhoto(jpeg());
+    await analyzer.textIntent('hi');
+    expect(requests, hasLength(2),
+        reason: 'both call shapes must have been exercised');
+    for (final req in requests) {
+      expect(jsonDecode(req.body)['backend'], 'glm');
+    }
+  });
+
+  test('serverBackend PERSISTS across a reload and rejects unknown values',
+      () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final store = MemoryKeyStore();
+    final s = await AppSettings.load(prefs: prefs, keyStore: store);
+    expect(s.serverBackend, 'claude');
+    await s.setServerBackend('doubao');
+    // A FRESH load from the same prefs must see the choice — the earlier
+    // version of this test only re-read the in-memory field.
+    final reloaded = await AppSettings.load(prefs: prefs, keyStore: store);
+    expect(reloaded.serverBackend, 'doubao');
+    await s.setServerBackend('gpt'); // unknown → safe default
+    expect(s.serverBackend, 'claude');
+  });
+
+  test('validateKey surfaces a chosen backend that is not ready', () async {
+    final s = await serverSettings();
+    await s.setServerBackend('glm');
+    final analyzer = ServerAnalyzer(s, client: MockClient((_) async {
+      return http.Response(
+          jsonEncode({
+            'ok': true,
+            'analyzer': 'enabled',
+            'backends': {
+              'claude': 'enabled',
+              'glm': 'no key (GLM_PLAN_KEY)',
+              'doubao': 'ready',
+            },
+          }),
+          200);
+    }));
+    final msg = await analyzer.validateKey('upload-key');
+    expect(msg, contains('GLM_PLAN_KEY'),
+        reason: 'a missing server-side plan key must show at TEST time, '
+            'not as a 503 on tonight’s dinner photo');
+
+    await s.setServerBackend('doubao');
+    expect(await analyzer.validateKey('upload-key'), isNull,
+        reason: 'ready backend validates clean');
+
+    await s.setServerBackend('claude');
+    expect(await analyzer.validateKey('upload-key'), isNull);
+  });
+
+  test('validateKey WARNS about an old server when a vendor backend is '
+      'chosen (it would silently bill the Claude plan)', () async {
+    final s = await serverSettings();
+    await s.setServerBackend('glm');
+    final analyzer = ServerAnalyzer(s, client: MockClient((_) async {
+      return http.Response(jsonEncode({'ok': true, 'analyzer': 'enabled'}), 200);
+    }));
+    expect(await analyzer.validateKey('upload-key'),
+        contains('update the server'),
+        reason: 'a real auth_check reply with no backends map IS the '
+            'pre-upgrade server — the wrong payer must be said out loud');
+
+    await s.setServerBackend('claude');
+    expect(await analyzer.validateKey('upload-key'), isNull,
+        reason: 'claude backend on an old server is exactly right');
+  });
+
+  test('validateKey does not cry "could not reach" over odd 200 bodies',
+      () async {
+    // A JSON array / non-map backends previously threw TypeError into the
+    // generic catch → 'Could not reach …' about a server that ANSWERED.
+    final s = await serverSettings();
+    await s.setServerBackend('glm');
+    for (final body in ['[]', '"ok"', '{"backends": "yes"}']) {
+      final analyzer = ServerAnalyzer(s,
+          client: MockClient((_) async => http.Response(body, 200)));
+      final msg = await analyzer.validateKey('upload-key');
+      expect(msg, isNot(contains('Could not reach')), reason: body);
+    }
+  });
+
+  test('a reply analyzed by the WRONG backend is refused, not logged',
+      () async {
+    final s = await serverSettings();
+    await s.setServerBackend('glm');
+    final analyzer = ServerAnalyzer(
+      s,
+      normalizer: (b) async => b,
+      client: MockClient((_) async => http.Response(
+          jsonEncode({
+            'ok': true,
+            'analysis': {'is_food': true, 'total_calories': 500},
+            'analyzed_by': 'claude', // pre-upgrade server: wrong payer
+          }),
+          200)),
+    );
+    final out = await analyzer.analyzePhoto(jpeg());
+    expect(out.analysis, isNull,
+        reason: 'accepting it would spend the Claude plan forever while '
+            'the user believes GLM pays');
+    expect(out.retryable, isFalse,
+        reason: 'a retry spends the wrong plan again');
+    expect(out.error, contains('update the server'));
+
+    await s.setServerBackend('claude');
+    final ok = await analyzer.analyzePhoto(jpeg());
+    expect(ok.isFood, isTrue, reason: 'matching payer sails through');
   });
 
   test('text intent hits /api/text_intent and unwraps result', () async {

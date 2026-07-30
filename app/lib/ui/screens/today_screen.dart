@@ -132,10 +132,15 @@ class TodayScreenState extends State<TodayScreen> {
                 Positioned(
                   right: 16,
                   bottom: 16,
-                  child: FloatingActionButton(
+                  // EXTENDED (labeled): a bare + next to a chat box that
+                  // also edits meals left the two entry points ambiguous
+                  // (user report 2026-07-30). "Add meal" vs the box's
+                  // "fix a logged meal" hint names each control's job.
+                  child: FloatingActionButton.extended(
                     key: const Key('addMealFab'),
                     onPressed: onAdd,
-                    child: const Icon(Icons.add),
+                    icon: const Icon(Icons.add),
+                    label: const Text('Add meal'),
                   ),
                 ),
             ],
@@ -250,8 +255,12 @@ class TodayScreenState extends State<TodayScreen> {
                 enabled: !_sending,
                 textInputAction: TextInputAction.send,
                 onSubmitted: (_) => _sendCorrection(),
+                // The hint must name this box's ROLE, not just show an
+                // example: with an example alone ("change meal 2 to...")
+                // it read as a second way to add meals and competed with
+                // the Add button (user report 2026-07-30).
                 decoration: const InputDecoration(
-                  hintText: 'e.g. "change meal 2 to roast duck rice"',
+                  hintText: 'Fix a logged meal: "meal 2 was roast duck"',
                   border: OutlineInputBorder(),
                   isDense: true,
                 ),
