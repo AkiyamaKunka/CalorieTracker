@@ -71,27 +71,59 @@ void main() {
         reason: 'gemini is unreachable from mainland China without one');
   });
 
-  test('rejected key stops at Authentication; billing only WARNS and '
-      'continues', () async {
+  test('rejected key stops at Authentication; out-of-credit only WARNS '
+      'and continues', () async {
     final rejected = _okAnalyzer()
       ..onValidateKey = (_) async => 'The provider rejected the API key.';
     var results = await _diag(analyzer: rejected).run().toList();
     expect(results.last.stage, 'Authentication');
     expect(results.last.status, DiagStatus.fail);
 
+    // probeKey, NOT validateKey: validateKey ACCEPTS a quota-class reply
+    // (the key did authenticate), so an empty account is invisible to it —
+    // this stage used to pin a string no production analyzer could ever
+    // return, i.e. a fake-only contract (review 2026-07-31).
     final broke = _okAnalyzer()
-      ..onValidateKey =
-          (_) async => 'Provider balance or credits exhausted — check '
-              'your billing.';
+      ..onProbeKey = (_) async => const KeyProbe(KeyProbeResult.outOfCredit,
+          message: 'Provider balance or credits exhausted.');
     results = await _diag(analyzer: broke).run().toList();
-    expect(
-        results
-            .firstWhere((r) => r.stage == 'Authentication')
-            .status,
-        DiagStatus.warn);
+    final auth = results.firstWhere((r) => r.stage == 'Authentication');
+    expect(auth.status, DiagStatus.warn);
+    expect(auth.summary, contains('cannot pay'));
+    expect(auth.fix, contains('free tier'));
     expect(results, hasLength(6),
         reason: 'out-of-credit is a warning, not a dead stop — the later '
             'stages still tell the user what else works');
+  });
+
+  test('a rate-limited key warns differently from an empty account',
+      () async {
+    final limited = _okAnalyzer()
+      ..onProbeKey = (_) async => const KeyProbe(KeyProbeResult.rateLimited,
+          message: 'Rate limit hit.');
+    final results = await _diag(analyzer: limited).run().toList();
+    final auth = results.firstWhere((r) => r.stage == 'Authentication');
+    expect(auth.status, DiagStatus.warn);
+    expect(auth.summary, contains('rate-limiting'));
+    expect(auth.fix, contains('Wait'),
+        reason: 'waiting fixes a rate limit; it never fixes a dead balance');
+  });
+
+  testWidgets('a stage that THROWS is reported, never silently green',
+      (tester) async {
+    tester.view.physicalSize = const Size(800, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final boom = _okAnalyzer()
+      ..onProbeKey = (_) async => throw StateError('provider exploded');
+    await tester.pumpWidget(MaterialApp(
+        home: DiagnosticsScreen(diagnostics: _diag(analyzer: boom))));
+    await tester.tap(find.byKey(const Key('runDiagnostics')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Everything works'), findsNothing,
+        reason: 'a half-finished run must never wear the green verdict');
+    expect(find.text('Test run'), findsOneWidget);
+    expect(find.textContaining('provider exploded'), findsOneWidget);
   });
 
   test('junk text reply warns; photo failure carries the verbatim error '

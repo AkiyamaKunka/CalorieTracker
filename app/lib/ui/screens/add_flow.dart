@@ -6,6 +6,8 @@
 /// the ONE owner of every meal action — the Today chat bar is gone.
 library;
 
+import 'dart:typed_data';
+
 import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 
@@ -93,36 +95,59 @@ class AddPhotoScreen extends StatefulWidget {
 }
 
 class _AddPhotoScreenState extends State<AddPhotoScreen> {
-  late Future<List<IntakePhoto>> _photos;
+  late Future<List<RecentAsset>> _assets;
   bool _analyzing = false;
   bool _permissionDenied = false;
+  // Future-cached per asset: dedupes in-flight fetches across rebuilds
+  // (the same rule the coverage screen learned).
+  final Map<String, Future<Uint8List?>> _thumbs = {};
 
   @override
   void initState() {
     super.initState();
-    _photos = _load();
+    _assets = _load();
   }
 
-  /// Ask for permission FIRST: pickFromRecent returns [] on denial, which
+  /// Ask for permission FIRST: the picker returns [] on denial, which
   /// rendered as 'No recent photos found.' — indistinguishable from an
   /// empty camera roll and, once the OS stops re-prompting, a permanent
   /// dead end in the app's headline flow.
-  Future<List<IntakePhoto>> _load() async {
+  ///
+  /// LISTS assets only. The previous version read up to 30 ORIGINALS (25 MB
+  /// each) before showing anything and then decoded each 12 MP image
+  /// full-res into a 120 px cell — hundreds of MB resident, on a screen
+  /// that uses exactly one photo.
+  Future<List<RecentAsset>> _load() async {
     final granted = await widget.services.requestPhotoPermission();
     if (!mounted) return const [];
     if (!granted) {
       setState(() => _permissionDenied = true);
       return const [];
     }
-    return widget.services.picker.recentPhotos();
+    return widget.services.picker.recentAssets();
   }
 
-  Future<void> _analyze(IntakePhoto photo) async {
+  Future<Uint8List?> _thumbFor(String assetId) => _thumbs.putIfAbsent(
+      assetId, () => widget.services.picker.thumbnail(assetId));
+
+  Future<void> _pick(RecentAsset asset) async {
     setState(() => _analyzing = true);
-    // User-picked → deliberate: reclaims failed/skipped/deleted ledger rows
-    // (spec §2.3 caller policies).
-    final deliberate = IntakePhoto(photo.bytes, photo.assetId, photo.fileName,
-        capturedAt: photo.capturedAt, deliberate: true);
+    // ORIGINAL bytes for THIS photo only — md5 identity (§6.2) needs the
+    // original, but only the chosen one.
+    final deliberate = await widget.services.picker.loadOriginal(asset);
+    if (!mounted) return;
+    if (deliberate == null) {
+      setState(() => _analyzing = false);
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('That photo could not be read (too large or '
+              'removed).')));
+      return;
+    }
+    await _analyze(deliberate);
+  }
+
+  Future<void> _analyze(IntakePhoto deliberate) async {
+    if (!_analyzing) setState(() => _analyzing = true);
     // Through the APP'S ONE pipeline (services.processPhoto → enqueue), not
     // a private instance: a second analyzer call concurrent with the
     // watcher self-inflicts rate limits and doubles resident photo bytes.
@@ -193,8 +218,8 @@ class _AddPhotoScreenState extends State<AddPhotoScreen> {
       appBar: AppBar(title: const Text('Recent photos')),
       body: Stack(
         children: [
-          FutureBuilder<List<IntakePhoto>>(
-            future: _photos,
+          FutureBuilder<List<RecentAsset>>(
+            future: _assets,
             builder: (context, snap) {
               if (snap.connectionState != ConnectionState.done) {
                 return const Center(child: CircularProgressIndicator());
@@ -206,7 +231,7 @@ class _AddPhotoScreenState extends State<AddPhotoScreen> {
                   child: Text('Could not load photos: ${snap.error}'),
                 ));
               }
-              final photos = snap.data ?? const [];
+              final assets = snap.data ?? const <RecentAsset>[];
               if (_permissionDenied) {
                 final open = widget.services.openSystemSettings;
                 return Center(
@@ -234,19 +259,34 @@ class _AddPhotoScreenState extends State<AddPhotoScreen> {
                   ),
                 );
               }
-              if (photos.isEmpty) {
+              if (assets.isEmpty) {
                 return const Center(child: Text('No recent photos found.'));
               }
               return GridView.builder(
                 padding: const EdgeInsets.all(8),
                 gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                     crossAxisCount: 3, crossAxisSpacing: 4, mainAxisSpacing: 4),
-                itemCount: photos.length,
+                itemCount: assets.length,
                 itemBuilder: (context, i) => GestureDetector(
                   key: Key('recentPhoto$i'),
-                  onTap: _analyzing ? null : () => _analyze(photos[i]),
-                  child: Image.memory(photos[i].bytes,
-                      fit: BoxFit.cover, gaplessPlayback: true),
+                  onTap: _analyzing ? null : () => _pick(assets[i]),
+                  child: FutureBuilder<Uint8List?>(
+                    future: _thumbFor(assets[i].id),
+                    builder: (context, snap) {
+                      final bytes = snap.data;
+                      if (bytes == null || bytes.isEmpty) {
+                        return Container(
+                            color: Theme.of(context)
+                                .colorScheme
+                                .surfaceContainerHighest);
+                      }
+                      // cacheWidth: decode at cell size, not 12 MP.
+                      return Image.memory(bytes,
+                          fit: BoxFit.cover,
+                          cacheWidth: 320,
+                          gaplessPlayback: true);
+                    },
+                  ),
                 ),
               );
             },

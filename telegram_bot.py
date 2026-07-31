@@ -1500,7 +1500,13 @@ def _authorized_api_request() -> bool:
     if not ANDROID_API_KEY:
         return False
     provided = request.headers.get("X-API-Key", "")
-    return hmac.compare_digest(str(provided), str(ANDROID_API_KEY))
+    # BYTES, not str: hmac.compare_digest raises TypeError on non-ASCII
+    # str arguments, and Werkzeug decodes headers as latin-1 — so a key
+    # pasted with a smart quote or an accented character made EVERY
+    # endpoint answer 500 (with a traceback) instead of 401, for the
+    # phone as well as for probes (review 2026-07-31).
+    return hmac.compare_digest(
+        str(provided).encode("utf-8"), str(ANDROID_API_KEY).encode("utf-8"))
 
 
 def _vpn_check_reliable_from_request(vpn_active: Optional[bool], vpn_check: str) -> bool:
@@ -4937,12 +4943,25 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
                             "reason": reason}), 503
         # allow_file_fallback=False: never run a network-influenced prompt
         # on the Read-tool path.
-        analysis = claude_analyzer.analyze_food_photo(
-            data, prompt, allow_file_fallback=False, backend=backend)
+        try:
+            analysis = claude_analyzer.analyze_food_photo(
+                data, prompt, allow_file_fallback=False, backend=backend,
+                raise_on_busy=True)
+        except claude_analyzer.AnalyzerBusy:
+            # Another photo owns the single-flight CLI — seconds fix this.
+            return jsonify({"error": "claude_unavailable",
+                            "reason": "the analyzer is busy with another "
+                                      "photo",
+                            "retry": True}), 503
         if not analysis:
-            # Busy CLI (another photo owns it), timeout, or a junk reply.
-            # 503 tells the app "transient" so the photo stays eligible.
-            return jsonify({"error": "claude_unavailable"}), 503
+            # The run HAPPENED and failed: timeout, a reply that broke the
+            # is_food contract, or a blind GLM run. Retrying spends another
+            # full CLI run (up to 120 s of the subscription) on a request
+            # that already answered — say so, so the app stops at one.
+            return jsonify({"error": "claude_unavailable",
+                            "reason": "the analysis ran but produced no "
+                                      "usable result",
+                            "retry": False}), 503
         return jsonify({"ok": True, "analysis": analysis,
                         "analyzed_by": backend})
 
@@ -4969,9 +4988,18 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
                 f"({reason}).")
             return jsonify({"error": "claude_unavailable",
                             "reason": reason}), 503
-        out = claude_analyzer.analyze_text_prompt(prompt, backend=backend)
+        try:
+            out = claude_analyzer.analyze_text_prompt(
+                prompt, backend=backend, raise_on_busy=True)
+        except claude_analyzer.AnalyzerBusy:
+            return jsonify({"error": "claude_unavailable",
+                            "reason": "the analyzer is busy",
+                            "retry": True}), 503
         if not out:
-            return jsonify({"error": "claude_unavailable"}), 503
+            return jsonify({"error": "claude_unavailable",
+                            "reason": "the analysis ran but produced no "
+                                      "usable result",
+                            "retry": False}), 503
         return jsonify({"ok": True, "result": out["result"],
                         "analyzed_by": backend})
 

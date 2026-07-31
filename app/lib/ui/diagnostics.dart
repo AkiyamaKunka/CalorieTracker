@@ -130,23 +130,35 @@ class ProviderDiagnostics {
     }
 
     // 3 ── Authentication & account ─────────────────────────────────────
-    final authError = await analyzer.validateKey(settings.apiKey);
-    if (authError == null) {
-      yield const DiagResult('Authentication', DiagStatus.pass,
-          'The provider accepted your key.');
-    } else if (authError.toLowerCase().contains('billing')) {
-      yield DiagResult('Authentication', DiagStatus.warn,
-          'The key works, but the account is out of credit.',
-          detail: authError,
-          fix: 'Top up the provider account, or switch to a free-tier '
-              'provider (GLM\'s default vision model is free).');
-    } else {
-      yield DiagResult(
-          'Authentication', DiagStatus.fail, 'The key was not accepted.',
-          detail: authError,
-          fix: 'Re-copy the key from the provider console — and check it '
-              'belongs to THIS provider (keys are not interchangeable).');
-      return;
+    // probeKey, NOT validateKey: validateKey deliberately ACCEPTS a
+    // quota-class reply (it proves the key authenticated), so an empty
+    // account looked identical to a healthy one and this stage could
+    // never name the out-of-credit case the page promises to name.
+    final probe = await analyzer.probeKey(settings.apiKey);
+    switch (probe.result) {
+      case KeyProbeResult.ok:
+        yield const DiagResult('Authentication', DiagStatus.pass,
+            'The provider accepted your key.');
+      case KeyProbeResult.outOfCredit:
+        yield DiagResult('Authentication', DiagStatus.warn,
+            'The key works, but the account cannot pay right now.',
+            detail: probe.message,
+            fix: 'Top up the provider account, or switch to a free tier '
+                "(Zhipu GLM's default vision model is free, no VPN "
+                'needed in mainland China).');
+      case KeyProbeResult.rateLimited:
+        yield DiagResult('Authentication', DiagStatus.warn,
+            'The key works, but the provider is rate-limiting right now.',
+            detail: probe.message,
+            fix: 'Wait a minute and re-run; photos are kept and retried '
+                'automatically meanwhile.');
+      case KeyProbeResult.rejected:
+        yield DiagResult(
+            'Authentication', DiagStatus.fail, 'The key was not accepted.',
+            detail: probe.message,
+            fix: 'Re-copy the key from the provider console — and check it '
+                'belongs to THIS provider (keys are not interchangeable).');
+        return;
     }
 
     // 4 ── Text round-trip ──────────────────────────────────────────────

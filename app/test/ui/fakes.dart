@@ -46,6 +46,20 @@ class FakeAnalyzer implements AnalyzerService {
     validatedKeys.add(apiKey);
     return onValidateKey?.call(apiKey) ?? Future.value(null);
   }
+
+  /// Diagnostics-facing probe. Default derives from [onValidateKey] like
+  /// the contract's own default; [onProbeKey] overrides it for the cases
+  /// validateKey CANNOT express (out of credit vs rate-limited).
+  Future<KeyProbe> Function(String apiKey)? onProbeKey;
+
+  @override
+  Future<KeyProbe> probeKey(String apiKey) async {
+    if (onProbeKey != null) return onProbeKey!(apiKey);
+    final error = await validateKey(apiKey);
+    return error == null
+        ? const KeyProbe(KeyProbeResult.ok)
+        : KeyProbe(KeyProbeResult.rejected, message: error);
+  }
 }
 
 class FakeExecutor implements NlExecutor {
@@ -152,8 +166,39 @@ class FakeSettings implements SettingsStore {
 
 class FakePicker implements RecentPhotoPicker {
   List<IntakePhoto> photos = const [];
+
+  /// Lazy-grid surface: assets derive from [photos] so existing suites keep
+  /// seeding one list. [loadedOriginals] proves the grid reads ORIGINAL
+  /// bytes for the tapped photo ONLY.
+  final List<String> loadedOriginals = [];
+  final List<String> thumbnailed = [];
+
   @override
   Future<List<IntakePhoto>> recentPhotos({int limit = 30}) async => photos;
+
+  @override
+  Future<List<RecentAsset>> recentAssets({int limit = 30}) async => [
+        for (final p in photos.take(limit))
+          RecentAsset(p.assetId, p.fileName,
+              p.capturedAt ?? DateTime(2026, 7, 31)),
+      ];
+
+  @override
+  Future<Uint8List?> thumbnail(String assetId) async {
+    thumbnailed.add(assetId);
+    final match = photos.where((p) => p.assetId == assetId);
+    return match.isEmpty ? null : match.first.bytes;
+  }
+
+  @override
+  Future<IntakePhoto?> loadOriginal(RecentAsset asset) async {
+    loadedOriginals.add(asset.id);
+    final match = photos.where((p) => p.assetId == asset.id);
+    if (match.isEmpty) return null;
+    final p = match.first;
+    return IntakePhoto(p.bytes, p.assetId, p.fileName,
+        capturedAt: p.capturedAt, deliberate: true);
+  }
 }
 
 class FakeIntake implements PhotoIntake {

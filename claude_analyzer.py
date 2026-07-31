@@ -73,6 +73,16 @@ from utils import parse_ai_json, parse_boolish
 
 log = logging.getLogger("claude_analyzer")
 
+class AnalyzerBusy(Exception):
+    """Another photo owns the single-flight CLI right now.
+
+    Distinct from a None return, which means the run HAPPENED and failed
+    (timeout, junk reply, blind GLM run) — those are terminal for this
+    photo, and the app must not spend three more 120 s CLI runs on them.
+    The endpoints map busy → retryable 503, terminal → non-retryable.
+    """
+
+
 # The CLI is a full Node process (hundreds of MB RSS). Single-flight: only
 # one run at a time, and a contended caller does NOT queue — it returns None
 # immediately so the photo falls through to Gemini instead of waiting out
@@ -579,7 +589,8 @@ def _attempt_file(
                 pass
 
 
-def analyze_text_prompt(prompt: str, backend: str = "claude") -> Optional[Dict]:
+def analyze_text_prompt(prompt: str, backend: str = "claude",
+                        raise_on_busy: bool = False) -> Optional[Dict]:
     """Run an arbitrary JSON-answering prompt through the CLI (subscription).
 
     Used by the app-facing /api/text_intent endpoint so the phone's NL
@@ -598,6 +609,8 @@ def analyze_text_prompt(prompt: str, backend: str = "claude") -> Optional[Dict]:
         return None
     if not _CLI_LOCK.acquire(blocking=False):
         log.info("Claude CLI busy — text intent declined.")
+        if raise_on_busy:
+            raise AnalyzerBusy()
         return None
     start = time.time()
     try:
@@ -648,6 +661,7 @@ def analyze_food_photo(
     prompt: Optional[str] = None,
     allow_file_fallback: bool = True,
     backend: str = "claude",
+    raise_on_busy: bool = False,
 ) -> Optional[Dict]:
     """Analyze a food photo via the Claude Code CLI; None means 'use Gemini'.
 
@@ -682,6 +696,11 @@ def analyze_food_photo(
     # run. Don't queue behind it — Gemini answers this photo in seconds.
     if not _CLI_LOCK.acquire(blocking=False):
         log.info("Claude CLI busy — falling back to Gemini for this photo.")
+        # Default False keeps the TELEGRAM contract ("None → use Gemini")
+        # byte-identical; only the API endpoints opt in, because only they
+        # need to tell the app "retry in seconds" from "do not retry".
+        if raise_on_busy:
+            raise AnalyzerBusy()
         return None
 
     # One photo = one CLI occupancy: the lock is held across BOTH attempts

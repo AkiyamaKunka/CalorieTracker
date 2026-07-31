@@ -68,8 +68,21 @@ class _FixMealScreenState extends State<FixMealScreen> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              'Say what to change, move, or delete — the meal numbers '
-              'match the Today list, and any language works.',
+              'Say what to change, move, or delete — describe the meal '
+              'however you like ("the noodles", "breakfast", "the 600 '
+              'kcal one"), in any language.',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 6),
+            // The old copy promised "the meal numbers match the Today
+            // list". They do not: Today renders no numbers at all, and the
+            // model resolves an index against a SEVEN-DAY window led by
+            // earlier days — so "meal 2" could rewrite yesterday's lunch
+            // (review 2026-07-31). Describing the dish is unambiguous.
+            Text(
+              'Naming the food is safest — meal numbers count across the '
+              'last 7 days, not just today.',
               style: theme.textTheme.bodySmall
                   ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
             ),
@@ -84,8 +97,8 @@ class _FixMealScreenState extends State<FixMealScreen> {
               onSubmitted: (_) => _send(),
               decoration: const InputDecoration(
                 labelText: 'What should change?',
-                hintText: 'e.g. "meal 2 was roast duck rice"\n'
-                    'or "删除第一餐"',
+                hintText: 'e.g. "the noodles were roast duck rice"\n'
+                    'or "删除刚才那杯咖啡"',
                 border: OutlineInputBorder(),
               ),
             ),

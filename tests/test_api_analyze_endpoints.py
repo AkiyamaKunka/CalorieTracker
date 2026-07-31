@@ -72,7 +72,7 @@ def test_photo_requires_the_api_key(client, monkeypatch):
     monkeypatch.setattr(claude_analyzer, "is_configured", lambda: True)
     called = []
     monkeypatch.setattr(claude_analyzer, "analyze_food_photo",
-                        lambda b, p=None, allow_file_fallback=True, backend="claude": called.append(b) or ANALYSIS)
+                        lambda b, p=None, allow_file_fallback=True, backend="claude", raise_on_busy=False: called.append(b) or ANALYSIS)
     resp = client.http.post("/api/analyze_photo", data=b"x",
                             content_type="image/jpeg")
     assert resp.status_code == 401
@@ -81,7 +81,7 @@ def test_photo_requires_the_api_key(client, monkeypatch):
 
 def test_photo_returns_analysis_without_touching_the_database(client, monkeypatch):
     monkeypatch.setattr(claude_analyzer, "is_configured", lambda: True)
-    monkeypatch.setattr(claude_analyzer, "analyze_food_photo", lambda b, p=None, allow_file_fallback=True, backend="claude": dict(ANALYSIS))
+    monkeypatch.setattr(claude_analyzer, "analyze_food_photo", lambda b, p=None, allow_file_fallback=True, backend="claude", raise_on_busy=False: dict(ANALYSIS))
     resp = client.http.post(
         "/api/analyze_photo",
         headers={"X-API-Key": "secret-key"},
@@ -102,7 +102,7 @@ def test_photo_accepts_a_raw_body_too(client, monkeypatch):
     monkeypatch.setattr(claude_analyzer, "is_configured", lambda: True)
     seen = {}
     monkeypatch.setattr(claude_analyzer, "analyze_food_photo",
-                        lambda b, p=None, allow_file_fallback=True, backend="claude": seen.setdefault("bytes", b) and None or dict(ANALYSIS))
+                        lambda b, p=None, allow_file_fallback=True, backend="claude", raise_on_busy=False: seen.setdefault("bytes", b) and None or dict(ANALYSIS))
     resp = client.http.post("/api/analyze_photo",
                             headers={"X-API-Key": "secret-key"},
                             data=b"rawjpeg", content_type="image/jpeg")
@@ -112,7 +112,7 @@ def test_photo_accepts_a_raw_body_too(client, monkeypatch):
 
 def test_photo_rejects_empty_and_oversize(client, monkeypatch):
     monkeypatch.setattr(claude_analyzer, "is_configured", lambda: True)
-    monkeypatch.setattr(claude_analyzer, "analyze_food_photo", lambda b, p=None, allow_file_fallback=True, backend="claude": dict(ANALYSIS))
+    monkeypatch.setattr(claude_analyzer, "analyze_food_photo", lambda b, p=None, allow_file_fallback=True, backend="claude", raise_on_busy=False: dict(ANALYSIS))
     empty = client.http.post("/api/analyze_photo",
                              headers={"X-API-Key": "secret-key"},
                              data=b"", content_type="image/jpeg")
@@ -136,7 +136,7 @@ def test_photo_503_when_the_cli_is_unavailable_or_busy(client, monkeypatch):
 
     # Configured, but the analyzer declined (contended lock / timeout / junk).
     monkeypatch.setattr(claude_analyzer, "is_configured", lambda: True)
-    monkeypatch.setattr(claude_analyzer, "analyze_food_photo", lambda b, p=None, allow_file_fallback=True, backend="claude": None)
+    monkeypatch.setattr(claude_analyzer, "analyze_food_photo", lambda b, p=None, allow_file_fallback=True, backend="claude", raise_on_busy=False: None)
     resp = client.http.post("/api/analyze_photo",
                             headers={"X-API-Key": "secret-key"},
                             data=b"jpeg", content_type="image/jpeg")
@@ -147,7 +147,7 @@ def test_photo_503_when_the_cli_is_unavailable_or_busy(client, monkeypatch):
 def test_text_intent_happy_path_and_auth(client, monkeypatch):
     monkeypatch.setattr(claude_analyzer, "is_configured", lambda: True)
     monkeypatch.setattr(claude_analyzer, "analyze_text_prompt",
-                        lambda p, backend="claude": {"result": {"intent": "correction"}})
+                        lambda p, backend="claude", raise_on_busy=False: {"result": {"intent": "correction"}})
     unauth = client.http.post("/api/text_intent", json={"prompt": "hi"})
     assert unauth.status_code == 401
 
@@ -162,7 +162,7 @@ def test_text_intent_happy_path_and_auth(client, monkeypatch):
 def test_text_intent_rejects_missing_blank_and_huge_prompts(client, monkeypatch):
     monkeypatch.setattr(claude_analyzer, "is_configured", lambda: True)
     monkeypatch.setattr(claude_analyzer, "analyze_text_prompt",
-                        lambda p, backend="claude": {"result": {}})
+                        lambda p, backend="claude", raise_on_busy=False: {"result": {}})
     h = {"X-API-Key": "secret-key"}
     assert client.http.post("/api/text_intent", headers=h, json={}).status_code == 400
     assert client.http.post("/api/text_intent", headers=h,
@@ -176,7 +176,7 @@ def test_text_intent_rejects_missing_blank_and_huge_prompts(client, monkeypatch)
 
 def test_text_intent_503_when_declined(client, monkeypatch):
     monkeypatch.setattr(claude_analyzer, "is_configured", lambda: True)
-    monkeypatch.setattr(claude_analyzer, "analyze_text_prompt", lambda p, backend="claude": None)
+    monkeypatch.setattr(claude_analyzer, "analyze_text_prompt", lambda p, backend="claude", raise_on_busy=False: None)
     resp = client.http.post("/api/text_intent",
                             headers={"X-API-Key": "secret-key"},
                             json={"prompt": "anything"})
@@ -194,7 +194,7 @@ def test_photo_json_composes_the_prompt_server_side_from_the_profile(
     seen = {}
 
     def fake(image_bytes, prompt=None, allow_file_fallback=True,
-             backend="claude"):
+             backend="claude", raise_on_busy=False):
         seen["bytes"] = image_bytes
         seen["prompt"] = prompt
         seen["fallback"] = allow_file_fallback
@@ -224,7 +224,7 @@ def test_photo_rejects_an_oversize_profile(client, monkeypatch):
     import base64 as b64
     monkeypatch.setattr(claude_analyzer, "is_configured", lambda: True)
     monkeypatch.setattr(claude_analyzer, "analyze_food_photo",
-                        lambda b, p=None, allow_file_fallback=True, backend="claude": dict(ANALYSIS))
+                        lambda b, p=None, allow_file_fallback=True, backend="claude", raise_on_busy=False: dict(ANALYSIS))
     monkeypatch.setattr(telegram_bot, "API_PROFILE_MAX_CHARS", 10)
     resp = client.http.post(
         "/api/analyze_photo", headers={"X-API-Key": "secret-key"},
@@ -256,7 +256,7 @@ def test_auth_check_is_a_pure_probe_and_never_stamps_the_watcher_heartbeat(
 def test_photo_json_rejects_bad_base64_and_missing_image(client, monkeypatch):
     monkeypatch.setattr(claude_analyzer, "is_configured", lambda: True)
     monkeypatch.setattr(claude_analyzer, "analyze_food_photo",
-                        lambda b, p=None, allow_file_fallback=True, backend="claude": dict(ANALYSIS))
+                        lambda b, p=None, allow_file_fallback=True, backend="claude", raise_on_busy=False: dict(ANALYSIS))
     h = {"X-API-Key": "secret-key"}
     assert client.http.post("/api/analyze_photo", headers=h,
                             json={"prompt": "x"}).status_code == 400
@@ -306,7 +306,8 @@ def test_photo_backend_reaches_the_analyzer_and_labels_the_answer(
                         lambda b, for_photo=False: True)
     seen = {}
 
-    def fake(b, p=None, allow_file_fallback=True, backend="claude"):
+    def fake(b, p=None, allow_file_fallback=True, backend="claude",
+         raise_on_busy=False):
         seen["backend"] = backend
         seen["fallback"] = allow_file_fallback
         return dict(ANALYSIS)
@@ -330,7 +331,7 @@ def test_text_intent_backend_passthrough_and_validation(client, monkeypatch):
                         lambda b, for_photo=False: True)
     seen = {}
 
-    def fake(p, backend="claude"):
+    def fake(p, backend="claude", raise_on_busy=False):
         seen["backend"] = backend
         return {"result": {"ok": 1}}
 
@@ -363,3 +364,70 @@ def test_auth_check_reports_backend_status(client, monkeypatch):
     body = resp.get_json()
     assert body["backends"]["glm"] == "ready"
     assert "DOUBAO_PLAN_KEY" in body["backends"]["doubao"]
+
+
+def test_busy_and_terminal_503s_are_distinguishable(client, monkeypatch):
+    """A contended CLI is worth retrying; a run that already answered is
+    NOT — three more 120 s CLI runs spend the subscription for the same
+    result (review 2026-07-31)."""
+    monkeypatch.setattr(claude_analyzer, "is_configured", lambda: True)
+    monkeypatch.setattr(claude_analyzer, "backend_available",
+                        lambda b, for_photo=False: True)
+
+    def busy(*a, **kw):
+        raise claude_analyzer.AnalyzerBusy()
+
+    monkeypatch.setattr(claude_analyzer, "analyze_food_photo", busy)
+    resp = client.http.post("/api/analyze_photo",
+                            headers={"X-API-Key": "secret-key"},
+                            data=b"jpeg", content_type="image/jpeg")
+    assert resp.status_code == 503
+    assert resp.get_json()["retry"] is True
+
+    monkeypatch.setattr(
+        claude_analyzer, "analyze_food_photo",
+        lambda b, p=None, allow_file_fallback=True, backend="claude",
+        raise_on_busy=False: None)
+    resp = client.http.post("/api/analyze_photo",
+                            headers={"X-API-Key": "secret-key"},
+                            data=b"jpeg", content_type="image/jpeg")
+    assert resp.status_code == 503
+    assert resp.get_json()["retry"] is False
+
+
+def test_the_endpoints_ask_the_analyzer_to_raise_on_busy(client, monkeypatch):
+    # The Telegram path must keep its None-means-fallback contract, so the
+    # busy signal is OPT-IN — the endpoints are the only opters.
+    monkeypatch.setattr(claude_analyzer, "is_configured", lambda: True)
+    monkeypatch.setattr(claude_analyzer, "backend_available",
+                        lambda b, for_photo=False: True)
+    seen = {}
+
+    def fake(b, p=None, allow_file_fallback=True, backend="claude",
+             raise_on_busy=False):
+        seen["raise_on_busy"] = raise_on_busy
+        return dict(ANALYSIS)
+
+    monkeypatch.setattr(claude_analyzer, "analyze_food_photo", fake)
+    client.http.post("/api/analyze_photo",
+                     headers={"X-API-Key": "secret-key"},
+                     data=b"jpeg", content_type="image/jpeg")
+    assert seen["raise_on_busy"] is True
+
+
+def test_a_non_ascii_api_key_is_401_not_500(client, monkeypatch):
+    """hmac.compare_digest raises TypeError on non-ASCII str arguments, and
+    Werkzeug decodes headers as latin-1 — so a key with a smart quote or an
+    accent made EVERY endpoint answer 500 with a traceback."""
+    monkeypatch.setattr(claude_analyzer, "is_configured", lambda: True)
+    for bad in ["café", "kéy—with–dashes", "密钥"]:
+        resp = client.http.post("/api/auth_check", headers={"X-API-Key": bad})
+        assert resp.status_code == 401, bad
+
+    # And the mirror case: a non-ASCII CONFIGURED key must not brick the API
+    # for a correct caller either.
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "sécret")
+    assert client.http.post("/api/auth_check",
+                            headers={"X-API-Key": "sécret"}).status_code == 200
+    assert client.http.post("/api/auth_check",
+                            headers={"X-API-Key": "wrong"}).status_code == 401

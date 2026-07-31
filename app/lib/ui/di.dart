@@ -5,6 +5,7 @@
 library;
 
 import 'dart:async' show unawaited;
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show compute;
 
@@ -16,6 +17,7 @@ import '../services/analyzer/provider_analyzers.dart'
     show ServerAnalyzer, createMultiProviderAnalyzer;
 import '../services/nl/executor.dart';
 import '../services/photo/coverage.dart';
+import '../services/photo/filename_dates.dart' show deriveCapturedAt;
 import '../services/photo/photo_hash.dart' show originalBytesMd5;
 import '../services/photo/photo_library.dart';
 import '../services/photo/share_intake.dart';
@@ -102,7 +104,7 @@ class AppServices {
       photoIntake: photoIntake,
       reports: reports,
       settings: _AppSettingsStore(settings, notifier),
-      picker: _ShareIntakePicker(shareIntake),
+      picker: _ShareIntakePicker(shareIntake, photoLibrary),
       requestPhotoPermission: _requestPhotosPermission,
       thumbs: MealThumbResolver(dao: dao, library: photoLibrary),
       coverage: CoverageAuditor(
@@ -251,13 +253,41 @@ class _AppSettingsStore implements SettingsStore {
   }
 }
 
-/// The Add-flow grid source: the photo module's pickFromRecent already
-/// returns ORIGINAL bytes with deliberate=true (spec §2.3/§6.2).
+/// The Add-flow grid source. recentPhotos (eager originals) is kept for
+/// compatibility; the GRID uses the lazy trio — list assets, thumbnail per
+/// visible cell, originals only for the tapped photo.
 class _ShareIntakePicker implements RecentPhotoPicker {
   final ShareIntake _share;
-  _ShareIntakePicker(this._share);
+  final PhotoLibrary _library;
+  _ShareIntakePicker(this._share, this._library);
 
   @override
   Future<List<IntakePhoto>> recentPhotos({int limit = 30}) =>
       _share.pickFromRecent(limit);
+
+  @override
+  Future<List<RecentAsset>> recentAssets({int limit = 30}) async {
+    if (!await _library.requestPermission()) return const [];
+    final assets = await _library.recentImages(limit);
+    return [
+      for (final a in assets.take(limit))
+        RecentAsset(a.id, await a.fileName(), a.createDateTime),
+    ];
+  }
+
+  @override
+  Future<Uint8List?> thumbnail(String assetId) =>
+      _library.thumbnailByAssetId(assetId);
+
+  @override
+  Future<IntakePhoto?> loadOriginal(RecentAsset asset) async {
+    final bytes = await _library.originBytesByAssetId(asset.id);
+    if (bytes == null || bytes.isEmpty) return null;
+    // §6.3 dating from the asset's own metadata, same rule the eager path
+    // applied; deliberate=true (user-picked, spec §2.3).
+    return IntakePhoto(bytes, asset.id, asset.fileName,
+        capturedAt: deriveCapturedAt(
+            fileName: asset.fileName, assetCreateDate: asset.createdAt),
+        deliberate: true);
+  }
 }

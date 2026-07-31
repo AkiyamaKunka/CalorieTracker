@@ -7,7 +7,8 @@ library;
 
 import 'dart:async';
 
-import 'package:crypto/crypto.dart';
+import 'dart:typed_data';
+
 import 'package:flutter/foundation.dart' show compute;
 import 'package:intl/intl.dart';
 
@@ -16,7 +17,11 @@ import '../core/contracts.dart';
 import '../services/analyzer/normalize.dart' show makeMealThumb;
 import '../services/photo/filename_dates.dart'
     show exifCapturedAt, validateCapturedAt;
+import '../services/photo/photo_hash.dart' show originalBytesMd5;
 import 'format.dart';
+
+Future<String> _computeMd5(Uint8List bytes) =>
+    compute(originalBytesMd5, bytes);
 
 enum PhotoOutcomeKind { saved, skipped, failed, duplicate, alreadyTracked }
 
@@ -57,7 +62,12 @@ class PhotoPipeline {
       {required this.dao,
       required this.analyzer,
       this.notify,
-      this.onMealSaved});
+      this.onMealSaved,
+      Future<String> Function(Uint8List bytes)? hasher})
+      : _hash = hasher ?? _computeMd5;
+
+  /// Injectable so tests stay synchronous; production hashes on a worker.
+  final Future<String> Function(Uint8List bytes) _hash;
 
   /// Wire the watcher intake with BACKPRESSURE: the intake awaits each
   /// photo's turn through the same global FIFO the share stream uses, so
@@ -100,7 +110,11 @@ class PhotoPipeline {
   /// One photo through the full pipeline. Never throws.
   Future<PhotoOutcome> process(IntakePhoto photo) async {
     // Identity = md5 of ORIGINAL bytes, normalized (spec §6.2, §2.2).
-    final hash = normalizeImageHash(md5.convert(photo.bytes).toString());
+    // OFF the UI isolate: md5 over a 12-25 MB original is tens of ms of
+    // straight-line work, and an album burst runs this once per photo —
+    // visible jank while the user scrolls (the coverage auditor already
+    // hashes via compute for exactly this reason).
+    final hash = normalizeImageHash(await _hash(photo.bytes));
     var reserved = false;
     try {
       // Pre-reservation 5-minute duplicate window — deliberate (user-facing)

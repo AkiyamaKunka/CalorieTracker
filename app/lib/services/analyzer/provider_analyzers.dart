@@ -78,6 +78,10 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
   /// backend looked identical to a hiccup and cost an hour of debugging
   /// on 2026-07-31.
   String? unavailableMessage(String body) => null;
+
+  /// Whether an in-place retry of a 503 can help. Overridden by
+  /// ServerAnalyzer, which knows "busy" from "already answered".
+  bool unavailableRetryInPlace(String body) => false;
   http.Request buildRequest(String key,
       {required String prompt, Uint8List? jpegBytes, required int maxTokens});
   String extractText(Map<String, dynamic> body);
@@ -105,15 +109,24 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
     }
     final req = buildRequest(key,
         prompt: prompt, jpegBytes: jpegBytes, maxTokens: maxTokens);
-    http.StreamedResponse streamed;
+    // The BODY read must sit inside the same timeout and the same catch as
+    // the send: a connection dropped after headers throws a raw
+    // ClientException that every caller's `on _ProviderException` clause
+    // would leak (breaking the "AnalyzerService never throws" contract),
+    // and a stalled body — routine on flaky mainland networks and GLM's
+    // free tier — would hang FOREVER, freezing the serialized photo
+    // pipeline behind it. One deadline covers headers + body.
+    final http.Response resp;
     try {
-      streamed = await client.send(req).timeout(deadline);
+      resp = await client
+          .send(req)
+          .then(http.Response.fromStream)
+          .timeout(deadline);
     } on TimeoutException {
       throw const _ProviderException('client deadline hit', transient: true);
     } catch (e) {
       throw _ProviderException('connection error: $e', transient: true);
     }
-    final resp = await http.Response.fromStream(streamed);
     if (resp.statusCode != 200) {
       // Exhausted-billing signatures, checked BEFORE the auth
       // classification because the providers disagree on the status code:
@@ -141,6 +154,7 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
             '$providerLabel billing.',
             transient: true,
             quotaClass: true,
+            billing: true,
             verbatimMessage: true);
       }
       if (resp.statusCode == 401 || resp.statusCode == 403) {
@@ -155,10 +169,12 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
       if (resp.statusCode == 503) {
         final custom = unavailableMessage(resp.body);
         if (custom != null) {
-          // Transient (config can be fixed and the photo must survive)
-          // but no in-place retry: seconds won't change a missing key.
+          // Transient at the OUTCOME level (the photo survives); whether an
+          // IN-PLACE retry helps is the server's call.
           throw _ProviderException(custom,
-              transient: true, retryInPlace: false, verbatimMessage: true);
+              transient: true,
+              retryInPlace: unavailableRetryInPlace(resp.body),
+              verbatimMessage: true);
         }
       }
       throw _ProviderException('HTTP ${resp.statusCode}',
@@ -270,6 +286,25 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
       return e.userMessage;
     }
   }
+
+  @override
+  Future<KeyProbe> probeKey(String apiKey) async {
+    try {
+      await _post(
+          prompt: 'ping', apiKeyOverride: apiKey, maxTokens: 1, extract: false);
+      return const KeyProbe(KeyProbeResult.ok);
+    } on _ProviderException catch (e) {
+      // The distinction validateKey CANNOT make: both of these accept the
+      // key, but only one is a "wait it out" situation.
+      if (e.billing) {
+        return KeyProbe(KeyProbeResult.outOfCredit, message: e.userMessage);
+      }
+      if (e.quotaClass) {
+        return KeyProbe(KeyProbeResult.rateLimited, message: e.userMessage);
+      }
+      return KeyProbe(KeyProbeResult.rejected, message: e.userMessage);
+    }
+  }
 }
 
 class _ProviderException implements Exception {
@@ -277,12 +312,18 @@ class _ProviderException implements Exception {
       {required this.transient,
       this.auth = false,
       this.quotaClass = false,
+      this.billing = false,
       this.retryInPlace = true,
       this.verbatimMessage = false});
   final String message;
   final bool transient;
   final bool auth;
   final bool quotaClass;
+
+  /// The key authenticated but the ACCOUNT cannot pay. A subset of
+  /// [quotaClass] (both accept the key) with a completely different
+  /// remedy: recharge, not wait.
+  final bool billing;
 
   /// False for conditions that cannot change within this call (missing
   /// key): still retryable at the OUTCOME level, but in-place sleeps are
@@ -539,14 +580,31 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
       if (decoded is Map) {
         final reason = decoded['reason'];
         if (reason is String && reason.isNotEmpty) {
-          return 'The server cannot analyze right now: $reason. Check the '
-              'backend selector in Settings (Test connection explains).';
+          // retry:true (busy CLI) — seconds fix it, so let the normal
+          // in-place retry run. Anything else is terminal for this photo:
+          // the run HAPPENED and produced nothing usable, and three more
+          // 120 s CLI runs would spend the subscription for the same
+          // answer (review 2026-07-31).
+          return 'The server cannot analyze right now: $reason.';
         }
       }
     } on FormatException {
       // fall through to the generic transient message
     }
     return null;
+  }
+
+  @override
+  bool unavailableRetryInPlace(String body) {
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map && decoded['retry'] is bool) {
+        return decoded['retry'] as bool;
+      }
+    } on FormatException {
+      // old server: keep the previous conservative behavior
+    }
+    return false;
   }
 
   /// The server runs a Claude CLI analysis (up to ~120 s, and up to ~240 s
@@ -689,8 +747,12 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
       ..headers['X-Client-Platform'] = 'app'
       ..body = '{}';
     try {
-      final streamed = await client.send(req).timeout(deadline);
-      final resp = await http.Response.fromStream(streamed);
+      // Body read inside the timeout, as in _post — a stalled body would
+      // otherwise hang the Test-connection button forever.
+      final resp = await client
+          .send(req)
+          .then(http.Response.fromStream)
+          .timeout(deadline);
       if (resp.statusCode == 200) {
         // The server reports per-backend readiness — surface a chosen
         // backend whose plan key is missing NOW, at test time, instead of
@@ -840,6 +902,9 @@ class MultiProviderAnalyzer implements AnalyzerService {
 
   @override
   Future<String?> validateKey(String apiKey) => _active.validateKey(apiKey);
+
+  @override
+  Future<KeyProbe> probeKey(String apiKey) => _active.probeKey(apiKey);
 }
 
 /// Integration seam for di.dart — replaces the direct Gemini factory.

@@ -219,6 +219,52 @@ void main() {
     expect(busyOut.error, isNot(contains('GLM_PLAN_KEY')));
   });
 
+  test('a BUSY 503 retries in place; an already-answered 503 does NOT',
+      () async {
+    // The server now says which kind of 503 this is. Retrying a run that
+    // already happened spends another 120 s CLI run of the subscription
+    // for the same answer (review 2026-07-31).
+    final s = await serverSettings();
+    var calls = 0;
+    final terminal = ServerAnalyzer(
+      s,
+      normalizer: (b) async => b,
+      sleep: (_) async {},
+      client: MockClient((_) async {
+        calls++;
+        return http.Response(
+            jsonEncode({
+              'error': 'claude_unavailable',
+              'reason': 'the analysis ran but produced no usable result',
+              'retry': false,
+            }),
+            503);
+      }),
+    );
+    await terminal.analyzePhoto(jpeg());
+    expect(calls, 1, reason: 'terminal 503 must not spend two more runs');
+
+    calls = 0;
+    final busy = ServerAnalyzer(
+      s,
+      normalizer: (b) async => b,
+      sleep: (_) async {},
+      client: MockClient((_) async {
+        calls++;
+        return http.Response(
+            jsonEncode({
+              'error': 'claude_unavailable',
+              'reason': 'the analyzer is busy with another photo',
+              'retry': true,
+            }),
+            503);
+      }),
+    );
+    final out = await busy.analyzePhoto(jpeg());
+    expect(calls, 3, reason: 'a busy CLI is exactly what retries are for');
+    expect(out.retryable, isTrue);
+  });
+
   test('a reply analyzed by the WRONG backend is refused, not logged',
       () async {
     final s = await serverSettings();

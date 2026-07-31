@@ -31,6 +31,20 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
         if (!mounted) return;
         setState(() => _results.add(r));
       }
+    } catch (e) {
+      // A stage that throws must not leave a half-finished run wearing the
+      // green "Everything works" verdict — that is the exact false
+      // reassurance this page exists to prevent.
+      if (mounted) {
+        setState(() => _results.add(DiagResult(
+              'Test run',
+              DiagStatus.fail,
+              'The check itself failed part-way through.',
+              detail: '$e',
+              fix: 'Re-run; if it keeps failing here, the provider is '
+                  'answering something the app cannot parse at all.',
+            )));
+      }
     } finally {
       if (mounted) {
         setState(() {

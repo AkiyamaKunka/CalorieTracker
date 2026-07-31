@@ -48,6 +48,10 @@ class FakeAnalyzer implements AnalyzerService {
 
   @override
   Future<String?> validateKey(String apiKey) async => null;
+
+  @override
+  Future<KeyProbe> probeKey(String apiKey) async =>
+      const KeyProbe(KeyProbeResult.ok);
 }
 
 class MemoryKeyStore implements SecureKeyStore {
