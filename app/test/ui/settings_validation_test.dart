@@ -133,6 +133,142 @@ void main() {
     expect(find.text('Custom — type a model name…'), findsOneWidget);
   });
 
+  testWidgets('switching provider reloads BOTH the key and the model, and '
+      'remounts the picker', (tester) async {
+    // The dropdown's onChanged is the only place these three move
+    // together; nothing tested it, so a dropped line would have shown
+    // Gemini's key under Doubao (review 2026-07-31).
+    tester.view.physicalSize = const Size(800, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final settings = FakeSettings(
+      keys: {'gemini': 'gem-key', 'glm': 'glm-key'},
+      models: {'gemini': 'gemini-2.5-flash', 'glm': 'glm-4.6v-flash'},
+    );
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: settings,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      requestPhotoPermission: () async => true,
+    )));
+    expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('apiKeyField')))
+            .controller!
+            .text,
+        'gem-key');
+
+    await tester.tap(find.byKey(const Key('providerDropdown')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('Zhipu GLM').last);
+    await tester.pumpAndSettle();
+
+    expect(settings.provider, 'glm');
+    expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('apiKeyField')))
+            .controller!
+            .text,
+        'glm-key',
+        reason: "the key field must show the NEW provider's key");
+    // The picker remounted onto the GLM list (its free flash default).
+    expect(find.textContaining('glm-4.6v-flash'), findsWidgets);
+    expect(find.byKey(const Key('modelField')), findsNothing,
+        reason: 'the GLM default IS curated — no custom field');
+  });
+
+  testWidgets('enabling the watcher without a usable key warns instead of '
+      'arming a switch that does nothing', (tester) async {
+    tester.view.physicalSize = const Size(800, 3000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final settings = FakeSettings(apiKey: '', watcherEnabled: false);
+    final intake = FakeIntake();
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: settings,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      photoIntake: intake,
+      requestPhotoPermission: () async => true,
+    )));
+    await tester.tap(find.byKey(const Key('watcherToggle')));
+    await tester.pumpAndSettle();
+
+    expect(settings.watcherEnabled, isTrue, reason: 'the toggle still arms');
+    expect(intake.started, isTrue);
+    expect(find.textContaining("won't be analyzed"), findsOneWidget);
+    expect(intake.backfillScans, 0,
+        reason: 'no key: reading photo bytes would be for nothing');
+  });
+
+  testWidgets('a quota pause gets its OWN warning wording', (tester) async {
+    tester.view.physicalSize = const Size(800, 3000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final paused = FakeSettings(apiKey: 'k')..isQuotaPaused = true;
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: paused,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      photoIntake: FakeIntake(),
+      requestPhotoPermission: () async => true,
+    )));
+    await tester.tap(find.byKey(const Key('watcherToggle')));
+    await tester.pumpAndSettle();
+    // The BANNER also says "daily quota" — assert the snackbar's own words.
+    expect(find.textContaining('new photos will wait'), findsOneWidget);
+  });
+
+  testWidgets('a healthy enable is silent and sweeps immediately',
+      (tester) async {
+    tester.view.physicalSize = const Size(800, 3000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final healthy = FakeSettings(apiKey: 'k');
+    final intake = FakeIntake();
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: healthy,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      photoIntake: intake,
+      requestPhotoPermission: () async => true,
+    )));
+    await tester.tap(find.byKey(const Key('watcherToggle')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining("won't be analyzed"), findsNothing);
+    expect(intake.backfillScans, 1,
+        reason: 'a healthy enable sweeps the window immediately');
+  });
+
+  testWidgets('first-run card shows only without a key, and the quota '
+      'banner only while paused', (tester) async {
+    final fresh = FakeSettings(apiKey: '');
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: fresh,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      requestPhotoPermission: () async => true,
+    )));
+    expect(find.byKey(const Key('firstRunCard')), findsOneWidget);
+    expect(find.textContaining('中国大陆用户'), findsOneWidget,
+        reason: 'the mainland steer is the point of the card');
+    expect(find.byKey(const Key('quotaPauseBanner')), findsNothing);
+    // The card must not still name a button that no longer exists.
+    expect(find.textContaining('Validate key'), findsNothing);
+
+    final paused = FakeSettings(apiKey: 'k')
+      ..isQuotaPaused = true
+      ..quotaPauseUntil = DateTime(2026, 7, 31, 23, 30);
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: paused,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      requestPhotoPermission: () async => true,
+    )));
+    expect(find.byKey(const Key('firstRunCard')), findsNothing);
+    expect(find.byKey(const Key('quotaPauseBanner')), findsOneWidget);
+  });
+
   testWidgets('watcher toggle stays off when permission is denied',
       (tester) async {
     final settings = FakeSettings(watcherEnabled: false);

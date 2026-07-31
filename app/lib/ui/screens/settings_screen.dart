@@ -455,7 +455,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   const SizedBox(height: 6),
                   Text(
                     '1) Pick an AI provider below.  2) Paste that '
-                    "provider's API key.  3) Tap Validate key.\n"
+                    "provider's API key (it saves as you type).  "
+                    '3) Tap "Test this provider" to check everything '
+                    'works.\n'
                     'Then turn on "Watch camera roll" and new food photos '
                     'log themselves.\n'
                     'In mainland China choose Qwen 通义千问, Doubao 豆包 or '

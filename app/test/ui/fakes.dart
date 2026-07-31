@@ -114,8 +114,14 @@ class FakeSettings implements SettingsStore {
   DateTime? quotaPauseUntil;
   @override
   bool get canAnalyze => apiKey.trim().isNotEmpty && !isQuotaPaused;
+  /// Provider-scoped MODELS too — the real store keeps one per provider,
+  /// and a shared field made provider-switch tests pass while production
+  /// would have shown Gemini's model under Doubao (review 2026-07-31).
+  final Map<String, String> modelsByProvider;
+
   @override
-  String model;
+  String get model => modelsByProvider[provider] ?? '';
+  set model(String v) => modelsByProvider[provider] = v;
   @override
   int lookbackDays;
   @override
@@ -132,12 +138,24 @@ class FakeSettings implements SettingsStore {
 
   FakeSettings({
     String apiKey = 'k',
-    this.model = 'gemini-2.5-flash',
+    String model = 'gemini-2.5-flash',
+    Map<String, String>? keys,
+    Map<String, String>? models,
     this.lookbackDays = 2,
     this.reportTime = '21:00',
     this.watcherEnabled = false,
     this.dietaryProfile = '',
-  }) : keysByProvider = {'gemini': apiKey};
+  })  : keysByProvider = keys ?? {'gemini': apiKey},
+        modelsByProvider = models ??
+            {
+              'gemini': model,
+              'openai': 'gpt-4o-mini',
+              'anthropic': 'claude-sonnet-5',
+              'qwen': 'qwen3-vl-flash',
+              'doubao': 'doubao-seed-2-0-mini-260428',
+              'glm': 'glm-4.6v-flash',
+              'server': 'server',
+            };
 
   @override
   Future<void> update({
