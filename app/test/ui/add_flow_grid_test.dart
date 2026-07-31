@@ -66,6 +66,33 @@ void main() {
         reason: '§6.3 dating must survive the lazy path');
   });
 
+  testWidgets('a double tap runs ONE analysis, not two', (tester) async {
+    // onTap reads _analyzing from the last BUILD, so two taps in the same
+    // frame both passed that gate — two model calls and two ledger
+    // reservations for one meal.
+    final picker = FakePicker()..photos = [_photo('a0')];
+    final processed = <IntakePhoto>[];
+    final services = makeServices(
+        picker: picker,
+        processPhoto: (photo) async {
+          processed.add(photo);
+          return const PhotoOutcome(PhotoOutcomeKind.saved, 'ok');
+        });
+    await tester.pumpWidget(
+        MaterialApp(home: AddPhotoScreen(services: services)));
+    await tester.pumpAndSettle();
+
+    // Two taps with NO pump between them: the same frame.
+    final cell = find.byKey(const Key('recentPhoto0'));
+    await tester.tap(cell);
+    await tester.tap(cell);
+    await tester.pumpAndSettle();
+
+    expect(picker.loadedOriginals, hasLength(1));
+    expect(processed, hasLength(1),
+        reason: 'one photo, one model call, one ledger reservation');
+  });
+
   testWidgets('an unreadable original says so instead of hanging on the '
       'spinner', (tester) async {
     // loadOriginal returns null for a photo that vanished or exceeds the

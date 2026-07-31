@@ -131,6 +131,11 @@ class _AddPhotoScreenState extends State<AddPhotoScreen> {
       assetId, () => widget.services.picker.thumbnail(assetId));
 
   Future<void> _pick(RecentAsset asset) async {
+    // Guard BEFORE the async gap: onTap reads _analyzing from the last
+    // BUILD, so two taps in the same frame both pass that check and run
+    // two analyses — two model calls, two ledger reservations, for one
+    // meal (review 2026-07-31).
+    if (_analyzing) return;
     setState(() => _analyzing = true);
     // ORIGINAL bytes for THIS photo only — md5 identity (§6.2) needs the
     // original, but only the chosen one.

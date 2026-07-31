@@ -320,6 +320,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
       // TransactionTooLargeException — and the import feature makes a
       // real FILE the thing the user actually wants to keep.
       final dir = await getTemporaryDirectory();
+      // Sweep older exports first: each is a FULL copy of the food log,
+      // and the cache dir is readable by anything with the app's storage
+      // — keeping a year of them there is a privacy cost with no upside.
+      try {
+        for (final f in dir.listSync()) {
+          if (f is File &&
+              f.path.split('/').last.startsWith('calorietracker-')) {
+            f.deleteSync();
+          }
+        }
+      } catch (_) {}
       final stamp = isoDate(DateTime.now());
       final file = File('${dir.path}/calorietracker-$stamp.json');
       await file.writeAsString(json, flush: true);
