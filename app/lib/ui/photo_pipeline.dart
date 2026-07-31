@@ -114,9 +114,17 @@ class PhotoPipeline {
     // straight-line work, and an album burst runs this once per photo —
     // visible jank while the user scrolls (the coverage auditor already
     // hashes via compute for exactly this reason).
-    final hash = normalizeImageHash(await _hash(photo.bytes));
+    //
+    // INSIDE the try: compute() spawns an isolate and can fail on a
+    // low-RAM device, and process() is contractually non-throwing — a
+    // throw here would poison the shared _tail future and silently stop
+    // ALL later photos until an app restart.
+    // Non-final: the catch block reads it, and a hash failure leaves it
+    // empty (nothing was reserved under it, so nothing to mark).
+    var hash = '';
     var reserved = false;
     try {
+      hash = normalizeImageHash(await _hash(photo.bytes));
       // Pre-reservation 5-minute duplicate window — deliberate (user-facing)
       // path only, matching the server's chat-only check (spec §2.3).
       if (photo.deliberate && await dao.isDuplicatePhoto(hash)) {

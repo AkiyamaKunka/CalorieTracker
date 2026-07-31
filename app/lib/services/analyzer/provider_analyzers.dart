@@ -731,6 +731,28 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
     }
   }
 
+  /// The server's probe is its FREE /api/auth_check — never the inherited
+  /// one. The base probeKey sends a 'ping' prompt, which for this provider
+  /// means POST /api/text_intent: a full CLI run under the owner's
+  /// subscription (up to the 5-minute deadline) whose prose reply then
+  /// fails the JSON contract, so a perfectly good setup was reported as
+  /// "The key was not accepted" — and the readiness verdicts this class
+  /// exists to produce were lost (regression caught 2026-07-31).
+  @override
+  Future<KeyProbe> probeKey(String apiKey) async {
+    final error = await validateKey(apiKey);
+    if (error == null) return const KeyProbe(KeyProbeResult.ok);
+    // "backend not ready" / "predates backend selection" are SERVER-side
+    // configuration facts, not a rejected upload key: the key reached the
+    // server and was accepted. Rate-limited is the closest non-rejecting
+    // class, and it carries the verbatim message.
+    final serverConfigured =
+        error.contains('not ready') || error.contains('update the server');
+    return KeyProbe(
+        serverConfigured ? KeyProbeResult.rateLimited : KeyProbeResult.rejected,
+        message: error);
+  }
+
   /// /api/auth_check proves "address reachable + key accepted" with no side
   /// effects and no CLI run. Deliberately NOT /ping: that is the Termux
   /// watcher's liveness channel, and stamping it from here would forge

@@ -70,13 +70,11 @@ abstract class SettingsStore {
 /// deliberate=true (user-picked → reclaims failed/skipped/deleted ledger
 /// rows, spec §2.3 caller policies).
 abstract class RecentPhotoPicker {
-  Future<List<IntakePhoto>> recentPhotos({int limit = 30});
-
   /// LIST the recent assets without reading their bytes, plus a per-asset
-  /// thumbnail fetch and an on-demand original. recentPhotos() eagerly
-  /// pulled up to 30 ORIGINALS (25 MB each) into one list and the grid
-  /// then decoded every 12 MP image full-res for a 120 px cell — hundreds
-  /// of MB resident on a screen that ends up using exactly one photo.
+  /// thumbnail fetch and an on-demand original. The eager recentPhotos()
+  /// this replaced pulled up to 30 ORIGINALS (25 MB each) into one list,
+  /// and the grid decoded every 12 MP image full-res for a ~120 px cell —
+  /// hundreds of MB resident on a screen that uses exactly one photo.
   Future<List<RecentAsset>> recentAssets({int limit = 30});
   Future<Uint8List?> thumbnail(String assetId);
   Future<IntakePhoto?> loadOriginal(RecentAsset asset);

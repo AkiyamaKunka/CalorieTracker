@@ -186,14 +186,11 @@ class FakeSettings implements SettingsStore {
 class FakePicker implements RecentPhotoPicker {
   List<IntakePhoto> photos = const [];
 
-  /// Lazy-grid surface: assets derive from [photos] so existing suites keep
-  /// seeding one list. [loadedOriginals] proves the grid reads ORIGINAL
-  /// bytes for the tapped photo ONLY.
+  /// Assets derive from [photos] so suites keep seeding one list.
+  /// [loadedOriginals] proves the grid reads ORIGINAL bytes for the tapped
+  /// photo ONLY.
   final List<String> loadedOriginals = [];
   final List<String> thumbnailed = [];
-
-  @override
-  Future<List<IntakePhoto>> recentPhotos({int limit = 30}) async => photos;
 
   @override
   Future<List<RecentAsset>> recentAssets({int limit = 30}) async => [

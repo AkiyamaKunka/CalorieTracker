@@ -1,6 +1,8 @@
-/// Onboarding/Settings (spec §8 knobs): Gemini key with live validateKey
-/// feedback, model, backfill-lookback slider, report time, watcher toggle
-/// (requests photo permission), dietary profile, JSON export via share_plus.
+/// Onboarding/Settings (spec §8 knobs), in six section builders: AI
+/// provider + key + curated model picker + one "Test this provider"
+/// action (the diagnostics page), photo intake (watcher, coverage audit,
+/// backfill window), daily-report time, dietary profile, and the data
+/// section (export to a file, import by merge).
 library;
 
 import 'dart:async' show unawaited;
@@ -430,8 +432,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       children: [
         ..._aiSection(theme),
         const Divider(height: 32),
-        ..._diagnosticsSection(theme),
-        const Divider(height: 32),
         ..._photoSection(theme),
         const Divider(height: 32),
         ..._reportSection(theme),
@@ -625,10 +625,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           obscureText: true,
           autocorrect: false,
           // Persist like the model/server-URL fields: the key used to be
-          // stored ONLY by a successful Validate, so paste-key → switch
-          // tab (or validation failing while offline) silently configured
-          // NOTHING while the field still showed the key. Validate stays
-          // the health check; typing is the commit.
+          // stored ONLY by a successful Validate (a button that no longer
+          // exists), so paste-key → switch tab silently configured NOTHING
+          // while the field still showed the key. Typing is the commit.
           onSubmitted: (v) => widget.settings.update(apiKey: v.trim()),
           onTapOutside: (_) =>
               widget.settings.update(apiKey: _keyController.text.trim()),
@@ -664,14 +663,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // ONE test action. 'Validate key' was a strict SUBSET of the
-              // diagnostics page (same validateKey call, stage 3 of six)
-              // and its other job — persisting the key on success — became
-              // redundant when the field started persisting on type. Two
-              // buttons that both mean "check my setup", one of which
-              // answers less, is the clutter this deletes.
+              // ONE test action for the whole screen. 'Validate key' ran a
+              // strict SUBSET of these checks and its other job (persisting
+              // the key on success) became redundant when the field started
+              // persisting on type; a separate diagnostics TILE further down
+              // was a third door to the same page.
               FilledButton.tonal(
-                key: const Key('validateKeyButton'),
+                key: const Key('testProviderButton'),
                 onPressed: () => Navigator.of(context).push(MaterialPageRoute(
                   builder: (_) => DiagnosticsScreen(
                     diagnostics: ProviderDiagnostics(
@@ -769,28 +767,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ],
         ],
-  ];
-
-  /// One tap to "why is analysis failing".
-  List<Widget> _diagnosticsSection(ThemeData theme) => [
-        // "Why doesn't my AI work" in one tap: names the broken piece
-        // (VPN, key, credit, format, quota) instead of a generic error.
-        ListTile(
-          key: const Key('diagnosticsTile'),
-          contentPadding: EdgeInsets.zero,
-          leading: const Icon(Icons.health_and_safety_outlined),
-          title: const Text('Test AI provider'),
-          subtitle: const Text('Find out exactly why analysis fails'),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: () => Navigator.of(context).push(MaterialPageRoute(
-            builder: (_) => DiagnosticsScreen(
-              diagnostics: ProviderDiagnostics(
-                settings: widget.settings,
-                analyzer: widget.analyzer,
-              ),
-            ),
-          )),
-        ),
   ];
 
   /// Camera-roll watching, coverage audit, backfill window.

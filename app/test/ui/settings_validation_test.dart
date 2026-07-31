@@ -33,10 +33,12 @@ void main() {
       requestPhotoPermission: () async => true,
     )));
     expect(find.text('Test this provider'), findsOneWidget);
+    expect(find.byKey(const Key('diagnosticsTile')), findsNothing,
+        reason: 'the tile was a third door to the same page');
     expect(find.text('Validate key'), findsNothing);
     expect(find.text('Key OK'), findsNothing);
 
-    await tester.tap(find.byKey(const Key('validateKeyButton')));
+    await tester.tap(find.byKey(const Key('testProviderButton')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('runDiagnostics')), findsOneWidget,
         reason: 'the one action opens the page that answers everything');
@@ -457,7 +459,11 @@ void importExportTests() {
     expect(find.textContaining('not JSON'), findsOneWidget);
   });
 
-  testWidgets('import: cancelling writes nothing', (tester) async {
+  testWidgets('import: cancelling after PASTING writes nothing', (tester) async {
+    // Cancelling an EMPTY dialog proves nothing (an unconditional import
+    // of '' would also leave dao.imported empty by throwing) — paste a
+    // valid payload first, so only the Cancel path can explain the
+    // silence (review 2026-07-31).
     tester.view.physicalSize = const Size(800, 3000);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
@@ -470,8 +476,14 @@ void importExportTests() {
     )));
     await tester.tap(find.byKey(const Key('importButton')));
     await tester.pumpAndSettle();
+    await tester.enterText(
+        find.byKey(const Key('importField')),
+        '{"format":"calorie_tracker_export","version":1,'
+        '"tables":{"meals":[{"date":"2026-07-30"}]}}');
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
-    expect(dao.imported, isEmpty);
+    expect(dao.imported, isEmpty,
+        reason: 'a pasted-but-cancelled payload must not be written');
+    expect(find.textContaining('Imported'), findsNothing);
   });
 }

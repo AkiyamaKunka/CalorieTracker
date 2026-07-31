@@ -104,7 +104,7 @@ class AppServices {
       photoIntake: photoIntake,
       reports: reports,
       settings: _AppSettingsStore(settings, notifier),
-      picker: _ShareIntakePicker(shareIntake, photoLibrary),
+      picker: _ShareIntakePicker(photoLibrary),
       requestPhotoPermission: _requestPhotosPermission,
       thumbs: MealThumbResolver(dao: dao, library: photoLibrary),
       coverage: CoverageAuditor(
@@ -253,17 +253,11 @@ class _AppSettingsStore implements SettingsStore {
   }
 }
 
-/// The Add-flow grid source. recentPhotos (eager originals) is kept for
-/// compatibility; the GRID uses the lazy trio — list assets, thumbnail per
-/// visible cell, originals only for the tapped photo.
+/// The Add-flow grid source: list assets, thumbnail per visible cell,
+/// original bytes only for the photo the user taps.
 class _ShareIntakePicker implements RecentPhotoPicker {
-  final ShareIntake _share;
   final PhotoLibrary _library;
-  _ShareIntakePicker(this._share, this._library);
-
-  @override
-  Future<List<IntakePhoto>> recentPhotos({int limit = 30}) =>
-      _share.pickFromRecent(limit);
+  _ShareIntakePicker(this._library);
 
   @override
   Future<List<RecentAsset>> recentAssets({int limit = 30}) async {
@@ -283,6 +277,11 @@ class _ShareIntakePicker implements RecentPhotoPicker {
   Future<IntakePhoto?> loadOriginal(RecentAsset asset) async {
     final bytes = await _library.originBytesByAssetId(asset.id);
     if (bytes == null || bytes.isEmpty) return null;
+    // §8 25 MB cap, as every other intake path enforces: the eager
+    // pickFromRecent skipped oversize photos, and the lazy rewrite lost
+    // that guard — a 40 MP original would hit the analyzer's normalizer
+    // and the base64 upload on a phone that cannot afford either.
+    if (bytes.length > maxPhotoBytes) return null;
     // §6.3 dating from the asset's own metadata, same rule the eager path
     // applied; deliberate=true (user-picked, spec §2.3).
     return IntakePhoto(bytes, asset.id, asset.fileName,

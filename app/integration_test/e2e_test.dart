@@ -110,23 +110,33 @@ void main() {
           timeout: const Duration(seconds: 60));
       _pass('A launch->onboarding Settings', sw);
 
-      // ── Stage B: enter key, validate (REAL network call) ──
+      // ── Stage B: enter the key (persists on submit), then run the REAL
+      // diagnostics page — the 'Validate key' button and its keyOkText
+      // marker were deleted 2026-07-31; the page is now the one test
+      // action, and its Authentication row is the live-network proof.
       await tester.tap(find.byKey(const Key('apiKeyField')));
       await tester.pump(const Duration(milliseconds: 300));
       await tester.enterText(find.byKey(const Key('apiKeyField')), _apiKey.trim());
+      await tester.testTextInput.receiveAction(TextInputAction.done);
       await tester.pump(const Duration(milliseconds: 300));
-      await tester.tap(find.byKey(const Key('validateKeyButton')));
-      await pumpUntilFound(tester, find.byKey(const Key('keyOkText')),
+      await tester.tap(find.byKey(const Key('testProviderButton')));
+      await pumpUntilFound(tester, find.byKey(const Key('runDiagnostics')),
+          what: 'diagnostics page');
+      await tester.tap(find.byKey(const Key('runDiagnostics')));
+      await pumpUntilFound(
+          tester, find.text('The provider accepted your key.'),
           probe: () {
-            // Safe to print: the analyzer's error string, never the key.
-            final err = find.byKey(const Key('keyErrorText')).evaluate();
-            if (err.isEmpty) return 'no error shown (still validating?)';
-            final w = err.first.widget;
-            return w is Text ? 'keyErrorText="${w.data}"' : 'non-text error widget';
+            final fail = find.textContaining('was not accepted').evaluate();
+            return fail.isEmpty
+                ? 'no verdict yet (still probing?)'
+                : 'the provider REJECTED the key';
           },
-          what: 'key validation success marker (keyOkText)',
-          timeout: const Duration(seconds: 90));
-      _pass('B live key validation', sw);
+          what: 'diagnostics Authentication PASS',
+          timeout: const Duration(seconds: 120));
+      _pass('B live key validation (diagnostics)', sw);
+      // Back to Settings so the following stages start where they expect.
+      await tester.pageBack();
+      await tester.pumpAndSettle();
 
       // ── Stage C: FAB add flow -> recent photos -> LIVE vision analysis ──
       await tester.tap(find.descendant(

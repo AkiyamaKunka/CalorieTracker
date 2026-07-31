@@ -7,6 +7,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:calorie_tracker/core/contracts.dart';
 import 'package:calorie_tracker/services/analyzer/provider_analyzers.dart';
 import 'package:calorie_tracker/services/settings/app_settings.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -263,6 +264,51 @@ void main() {
     final out = await busy.analyzePhoto(jpeg());
     expect(calls, 3, reason: 'a busy CLI is exactly what retries are for');
     expect(out.retryable, isTrue);
+  });
+
+  test('probeKey uses the FREE auth_check — never a CLI run — and keeps '
+      'the readiness verdicts', () async {
+    // The regression this pins (caught 2026-07-31, same day it shipped):
+    // switching diagnostics from validateKey to probeKey made the SERVER
+    // provider inherit the base probe, which posts a 'ping' prompt to
+    // /api/text_intent — a full CLI run under the owner's subscription
+    // whose prose reply then fails the JSON contract, so a healthy setup
+    // was reported as "The key was not accepted" and the remaining
+    // stages never ran.
+    final s = await serverSettings();
+    final paths = <String>[];
+    ServerAnalyzer make(String body, int status) => ServerAnalyzer(s,
+        normalizer: (b) async => b,
+        client: MockClient((req) async {
+          paths.add(req.url.path);
+          return http.Response(body, status);
+        }));
+
+    final ok = await make(
+            jsonEncode({'ok': true, 'backends': {'claude': 'enabled'}}), 200)
+        .probeKey('upload-key');
+    expect(paths, ['/api/auth_check'],
+        reason: 'the probe must not spend a model call');
+    expect(ok.result, KeyProbeResult.ok);
+
+    // A server-side config fact is NOT a rejected key.
+    paths.clear();
+    await s.setServerBackend('glm');
+    final notReady = await make(
+        jsonEncode({
+          'ok': true,
+          'backends': {'glm': 'no key (GLM_PLAN_KEY)'},
+        }),
+        200).probeKey('upload-key');
+    expect(notReady.result, isNot(KeyProbeResult.rejected),
+        reason: 'the upload key WAS accepted; the plan key is missing');
+    expect(notReady.message, contains('GLM_PLAN_KEY'));
+
+    // A genuinely rejected key still rejects.
+    paths.clear();
+    final bad = await make('{"error": "Unauthorized"}', 401)
+        .probeKey('upload-key');
+    expect(bad.result, KeyProbeResult.rejected);
   });
 
   test('a reply analyzed by the WRONG backend is refused, not logged',
