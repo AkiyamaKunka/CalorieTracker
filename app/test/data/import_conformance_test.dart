@@ -16,7 +16,6 @@ import 'package:calorie_tracker/data/db.dart';
 import 'package:calorie_tracker/data/meals_dao_impl.dart';
 import 'package:calorie_tracker/data/meals_logic.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:path/path.dart' as p;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 void main() {
@@ -38,8 +37,8 @@ void main() {
     // phone" would silently be one device and every import would look
     // like a duplicate.
     tmp = await Directory.systemTemp.createTemp('ct_import');
-    dbA = await openAppDatabase(path: p.join(tmp.path, 'a.db'));
-    dbB = await openAppDatabase(path: p.join(tmp.path, 'b.db'));
+    dbA = await openAppDatabase(path: '${tmp.path}/a.db');
+    dbB = await openAppDatabase(path: '${tmp.path}/b.db');
     daoA = SqfliteMealsDao(dbA, clock: () => now);
     daoB = SqfliteMealsDao(dbB, clock: () => now);
   });

@@ -103,6 +103,38 @@ void main() {
       expect(meal.time, '11:50 PM');
     });
 
+    test('an ANCIENT EXIF date is refused by the pipeline — the meal lands '
+        'today, not in 2015', () async {
+      // The §6.3 validation window must wrap the EXIF read INSIDE the
+      // pipeline, not only in the unit-tested helper: a stock photo or a
+      // camera with a dead clock would otherwise write a meal into a
+      // random month of the log where the user will never find it.
+      // (This test exists because that wrapper was silently dropped once.)
+      final meal = await savedMealFor(IntakePhoto(
+          jpegWithExif(dateTimeOriginal: '2015:03:04 09:00:00'),
+          'old-1',
+          'download.jpg',
+          deliberate: true));
+      final today = DateTime.now();
+      expect(meal.date,
+          '${today.year}-${today.month.toString().padLeft(2, '0')}-'
+          '${today.day.toString().padLeft(2, '0')}');
+    });
+
+    test('a FUTURE EXIF date is refused too', () async {
+      final ahead = DateTime.now().add(const Duration(days: 3));
+      final stamp = '${ahead.year}:'
+          '${ahead.month.toString().padLeft(2, '0')}:'
+          '${ahead.day.toString().padLeft(2, '0')} 12:00:00';
+      final meal = await savedMealFor(IntakePhoto(
+          jpegWithExif(dateTimeOriginal: stamp), 'fut-1', 'x.jpg',
+          deliberate: true));
+      final today = DateTime.now();
+      expect(meal.date,
+          '${today.year}-${today.month.toString().padLeft(2, '0')}-'
+          '${today.day.toString().padLeft(2, '0')}');
+    });
+
     test('an intake-derived capturedAt still outranks EXIF (§6.3 order '
         'unchanged)', () async {
       final assetDate = DateTime.now().subtract(const Duration(hours: 3));

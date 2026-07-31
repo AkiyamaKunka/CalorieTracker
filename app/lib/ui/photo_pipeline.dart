@@ -159,6 +159,10 @@ class PhotoPipeline {
       // before intake-time dating — same validation window (§9 app-only,
       // 2026-07-31). This is what keeps a 23:50 photo shared after
       // midnight on YESTERDAY's total.
+      // validateCapturedAt is NOT optional here: EXIF is attacker- and
+      // junk-controlled (a 2015 stock photo, a camera with a dead clock,
+      // a forward-set date), and an unvalidated value writes a meal into
+      // a random month of the user's log where they will never find it.
       final when = photo.capturedAt ??
           validateCapturedAt(exifCapturedAt(photo.bytes),
               now: DateTime.now()) ??

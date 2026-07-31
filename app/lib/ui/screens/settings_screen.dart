@@ -461,9 +461,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    // Sections are separate builders: this screen grew to ~950 lines
+    // and every feature landed in the same wall of children, which is
+    // how the 2026-07-30 review found stale copy three sections away
+    // from the code it described. Same widgets, same order.
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
+        ..._aiSection(theme),
+        const Divider(height: 32),
+        ..._diagnosticsSection(theme),
+        const Divider(height: 32),
+        ..._photoSection(theme),
+        const Divider(height: 32),
+        ..._reportSection(theme),
+        const Divider(height: 32),
+        ..._profileSection(theme),
+        const Divider(height: 32),
+        ..._dataSection(theme),
+        const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  /// Provider choice, key, model, and the states that explain them.
+  List<Widget> _aiSection(ThemeData theme) => [
         // First-run: the shell deliberately lands a key-less install here
         // (app.dart onboarding), but the screen used to open cold on a bare
         // form — and everything a mainland user needs to know (which
@@ -804,7 +826,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ],
         ],
-        const Divider(height: 32),
+  ];
+
+  /// One tap to "why is analysis failing".
+  List<Widget> _diagnosticsSection(ThemeData theme) => [
         // "Why doesn't my AI work" in one tap: names the broken piece
         // (VPN, key, credit, format, quota) instead of a generic error.
         ListTile(
@@ -823,7 +848,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           )),
         ),
-        const Divider(height: 32),
+  ];
+
+  /// Camera-roll watching, coverage audit, backfill window.
+  List<Widget> _photoSection(ThemeData theme) => [
         Text('Photo intake', style: theme.textTheme.titleMedium),
         if (widget.coverage != null && widget.processPhoto != null)
           ListTile(
@@ -879,7 +907,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 widget.settings.update(lookbackDays: v.round()),
           ),
         ),
-        const Divider(height: 32),
+  ];
+
+  /// Daily-report time.
+  List<Widget> _reportSection(ThemeData theme) => [
         Text('Daily report', style: theme.textTheme.titleMedium),
         ListTile(
           key: const Key('reportTimeTile'),
@@ -888,7 +919,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
           trailing: Text(_reportTime, style: theme.textTheme.titleMedium),
           onTap: _pickReportTime,
         ),
-        const Divider(height: 32),
+  ];
+
+  /// Dietary profile appended to the photo prompt (§1.3).
+  List<Widget> _profileSection(ThemeData theme) => [
         Text('Dietary profile', style: theme.textTheme.titleMedium),
         const SizedBox(height: 8),
         TextField(
@@ -902,7 +936,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             border: OutlineInputBorder(),
           ),
         ),
-        const Divider(height: 32),
+  ];
+
+  /// Export and import — the food log is the user's.
+  List<Widget> _dataSection(ThemeData theme) => [
         Text('Your data', style: theme.textTheme.titleMedium),
         const SizedBox(height: 8),
         FilledButton.icon(
@@ -940,8 +977,5 @@ class _SettingsScreenState extends State<SettingsScreen> {
           style: theme.textTheme.bodySmall
               ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
         ),
-        const SizedBox(height: 24),
-      ],
-    );
-  }
+  ];
 }
