@@ -456,9 +456,13 @@ def _attempt_glm_vision(
         return None
     tmp_path = None
     cfg_path = None
+    work_dir = None
     try:
+        # A dedicated EMPTY working directory: the image and the config
+        # used to share /tmp, so the run's cwd contained the plan-key file.
+        work_dir = tempfile.mkdtemp(prefix="ct_glm_run_")
         with tempfile.NamedTemporaryFile(
-            prefix="ct_glm_", suffix=".jpg", delete=False
+            prefix="ct_glm_", suffix=".jpg", delete=False, dir=work_dir
         ) as tmp:
             tmp_path = tmp.name
             tmp.write(image_bytes)
@@ -466,6 +470,7 @@ def _attempt_glm_vision(
         # inline JSON put the plan key into /proc/<pid>/cmdline for the
         # whole run, and a CLI that echoes a rejected argument into stderr
         # would hand it to _log_cli_exit (review 2026-07-30).
+        # The config lives OUTSIDE work_dir on purpose (see above).
         with tempfile.NamedTemporaryFile(
             prefix="ct_glm_cfg_", suffix=".json", mode="w", delete=False
         ) as cfg:
@@ -480,6 +485,13 @@ def _attempt_glm_vision(
             "--output-format", "json",
             "--mcp-config", cfg_path,
             "--allowedTools", "mcp__zai",
+            # --allowedTools is an AUTO-APPROVE list, not a disable list:
+            # the built-in read-only tools stay available to a prompt that
+            # carries caller-influenced text (the app's dietary profile).
+            # Name them explicitly forbidden, and run in a scratch cwd —
+            # the previous cwd held the temp MCP CONFIG with the plan key.
+            "--disallowedTools", "Read,Glob,Grep,LS,Bash,Write,Edit,WebFetch",
+            "--strict-mcp-config",
         ]
         _append_model_and_extra_flags(cmd, "glm")
         proc = subprocess.run(
@@ -487,7 +499,7 @@ def _attempt_glm_vision(
             capture_output=True,
             text=True,
             timeout=_timeout_seconds(),
-            cwd=str(Path(tmp_path).parent),
+            cwd=work_dir,
             env=env,
         )
         if proc.returncode != 0:
@@ -528,6 +540,11 @@ def _attempt_glm_vision(
                     os.unlink(p)
                 except OSError:
                     pass
+        if work_dir:
+            try:
+                os.rmdir(work_dir)
+            except OSError:
+                pass
 
 
 def _attempt_file(

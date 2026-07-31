@@ -1,8 +1,8 @@
-/// Settings screen: live validateKey feedback states (loading → success /
-/// error) against a fake analyzer.
+/// Settings screen behavior: the ONE test action (diagnostics), key and
+/// model persistence, the server backend selector, and the Claude OAuth
+/// re-connect flow. The old 'Validate key' states are gone with the button
+/// (2026-07-31) — the diagnostics page answers strictly more.
 library;
-
-import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -15,80 +15,45 @@ Widget _wrap(Widget child) => MaterialApp(home: Scaffold(body: child));
 
 void main() {
   connectClaudeTests();
-  testWidgets('validate key shows loading then success', (tester) async {
-    final analyzer = FakeAnalyzer();
-    final completer = Completer<String?>();
-    analyzer.onValidateKey = (_) => completer.future;
-    final settings = FakeSettings(apiKey: '');
 
+  testWidgets('ONE test action: the key field has no separate Validate — '
+      'it opens the diagnostics page', (tester) async {
+    // 'Validate key' ran the same analyzer.validateKey the diagnostics
+    // page runs as stage 3 of six, and its persist-on-success job became
+    // redundant when the field started persisting on type (2026-07-31).
+    tester.view.physicalSize = const Size(800, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final settings = FakeSettings(apiKey: 'k');
     await tester.pumpWidget(_wrap(SettingsScreen(
       settings: settings,
-      analyzer: analyzer,
+      analyzer: FakeAnalyzer(),
       dao: FakeDao(),
       requestPhotoPermission: () async => true,
     )));
+    expect(find.text('Test this provider'), findsOneWidget);
+    expect(find.text('Validate key'), findsNothing);
+    expect(find.text('Key OK'), findsNothing);
 
-    await tester.enterText(find.byKey(const Key('apiKeyField')), 'my-key');
     await tester.tap(find.byKey(const Key('validateKeyButton')));
-    await tester.pump();
-
-    // Loading state while the future is pending.
-    expect(find.byKey(const Key('keyValidating')), findsOneWidget);
-    expect(find.byKey(const Key('keyValid')), findsNothing);
-
-    completer.complete(null); // null = key OK (contract validateKey)
     await tester.pumpAndSettle();
+    expect(find.byKey(const Key('runDiagnostics')), findsOneWidget,
+        reason: 'the one action opens the page that answers everything');
+  });
 
-    expect(find.byKey(const Key('keyValid')), findsOneWidget);
-    expect(find.byKey(const Key('keyOkText')), findsOneWidget);
-    expect(analyzer.validatedKeys, ['my-key']);
-    // A valid key is persisted.
+  testWidgets('a typed key persists without any button', (tester) async {
+    final settings = FakeSettings(apiKey: '');
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: settings,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      requestPhotoPermission: () async => true,
+    )));
+    await tester.enterText(find.byKey(const Key('apiKeyField')), 'my-key');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
     expect(settings.apiKey, 'my-key');
   });
-
-  testWidgets('validate key shows the analyzer error', (tester) async {
-    final analyzer = FakeAnalyzer();
-    analyzer.onValidateKey = (_) async => 'API key not valid (403)';
-    final settings = FakeSettings(apiKey: '');
-
-    await tester.pumpWidget(_wrap(SettingsScreen(
-      settings: settings,
-      analyzer: analyzer,
-      dao: FakeDao(),
-      requestPhotoPermission: () async => true,
-    )));
-
-    await tester.enterText(find.byKey(const Key('apiKeyField')), 'bad-key');
-    await tester.tap(find.byKey(const Key('validateKeyButton')));
-    await tester.pumpAndSettle();
-
-    expect(find.byKey(const Key('keyInvalid')), findsOneWidget);
-    expect(find.text('API key not valid (403)'), findsOneWidget);
-    // The key IS persisted even though validation failed: typing commits,
-    // Validate is only the health check. The old refuse-to-store behavior
-    // silently lost a CORRECT key whenever validation failed transiently
-    // (offline, provider hiccup) — the field still showed it, configured
-    // nothing (review 2026-07-31).
-    expect(settings.apiKey, 'bad-key');
-  });
-
-  testWidgets('empty key never calls the analyzer', (tester) async {
-    final analyzer = FakeAnalyzer();
-
-    await tester.pumpWidget(_wrap(SettingsScreen(
-      settings: FakeSettings(apiKey: ''),
-      analyzer: analyzer,
-      dao: FakeDao(),
-      requestPhotoPermission: () async => true,
-    )));
-
-    await tester.tap(find.byKey(const Key('validateKeyButton')));
-    await tester.pumpAndSettle();
-
-    expect(analyzer.validatedKeys, isEmpty);
-    expect(find.byKey(const Key('keyInvalid')), findsOneWidget);
-  });
-
   testWidgets('server backend selector shows for the server provider and '
       'persists the choice', (tester) async {
     tester.view.physicalSize = const Size(800, 2000);

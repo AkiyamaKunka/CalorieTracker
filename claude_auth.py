@@ -101,8 +101,37 @@ def cancel_session() -> bool:
 
 
 def session_active() -> bool:
+    """True when a live, unexpired session exists — and REAPS an expired
+    one on the way past.
+
+    Without this an abandoned consent (the ordinary "tapped Connect, then
+    closed the sheet" path — the app never calls /cancel) left a full Node
+    process holding a PTY master fd, waiting on stdin forever, on a 1 GB
+    VM. TTL was consulted but nothing ever acted on it.
+    """
     with _lock:
-        return _session is not None and not _expired(_session)
+        sess = _session
+        if sess is None:
+            return False
+        if not _expired(sess):
+            return True
+        globals()["_session"] = None
+    log.info("Reaping an expired claude setup-token session.")
+    _kill_session(sess)
+    return False
+
+
+def reap_expired_session() -> bool:
+    """Sweep for periodic callers (the bot's poll loop). True if a stale
+    session was killed."""
+    with _lock:
+        sess = _session
+        if sess is None or not _expired(sess):
+            return False
+        globals()["_session"] = None
+    log.info("Reaping an expired claude setup-token session.")
+    _kill_session(sess)
+    return True
 
 
 def start_session(cli_path: str, env: Dict[str, str]) -> Dict:

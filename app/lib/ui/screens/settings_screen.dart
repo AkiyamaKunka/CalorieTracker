@@ -5,7 +5,10 @@ library;
 
 import 'dart:async' show unawaited;
 
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart' as launcher;
 
@@ -17,12 +20,11 @@ import '../../services/photo/coverage.dart';
 import '../../services/photo/photo_library.dart';
 import '../diagnostics.dart';
 import '../photo_pipeline.dart';
+import '../format.dart' show isoDate;
 import '../services.dart';
 import 'coverage_screen.dart';
 import 'diagnostics_screen.dart';
 import 'meal_editor_screen.dart';
-
-enum KeyValidationState { idle, validating, valid, invalid }
 
 /// Sentinel value for the model picker's "type it yourself" row.
 const String _kCustomModel = '__custom__';
@@ -113,8 +115,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late final TextEditingController _modelController;
   late final TextEditingController _profileController;
   late final TextEditingController _serverUrlController;
-  KeyValidationState _keyState = KeyValidationState.idle;
-  String? _keyError;
   bool _customModel = false;
   late int _lookbackDays;
   late String _reportTime;
@@ -144,42 +144,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _profileController.dispose();
     _serverUrlController.dispose();
     super.dispose();
-  }
-
-  Future<void> _validateKey() async {
-    final key = _keyController.text.trim();
-    if (key.isEmpty) {
-      setState(() {
-        _keyState = KeyValidationState.invalid;
-        _keyError = 'Enter an API key first.';
-      });
-      return;
-    }
-    setState(() {
-      _keyState = KeyValidationState.validating;
-      _keyError = null;
-    });
-    // Snapshot the provider: validation can take up to 90 s and the
-    // dropdown stays enabled — a mid-flight switch must not persist this
-    // key into the NEWLY selected provider's slot (and then show Key OK
-    // for a key that belongs to a different service).
-    final providerAtStart = widget.settings.provider;
-    final error = await widget.analyzer.validateKey(key); // null = OK
-    if (!mounted) return;
-    if (widget.settings.provider != providerAtStart) {
-      setState(() => _keyState = KeyValidationState.idle);
-      return; // stale validation: neither persist nor report
-    }
-    if (error == null) {
-      await widget.settings.update(apiKey: key);
-      if (!mounted) return;
-      setState(() => _keyState = KeyValidationState.valid);
-    } else {
-      setState(() {
-        _keyState = KeyValidationState.invalid;
-        _keyError = error;
-      });
-    }
   }
 
   Future<void> _toggleWatcher(bool enable) async {
@@ -319,8 +283,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _exporting = true);
     try {
       final json = await widget.dao.exportJson(); // spec §8 full export
-      await SharePlus.instance.share(
-          ShareParams(text: json, subject: 'CalorieTracker data export'));
+      // A FILE, not intent text: Android delivers EXTRA_TEXT through one
+      // binder transaction with a ~1 MB hard cap, so a year of meals used
+      // to kill the share (often the app) with
+      // TransactionTooLargeException — and the import feature makes a
+      // real FILE the thing the user actually wants to keep.
+      final dir = await getTemporaryDirectory();
+      final stamp = isoDate(DateTime.now());
+      final file = File('${dir.path}/calorietracker-$stamp.json');
+      await file.writeAsString(json, flush: true);
+      await SharePlus.instance.share(ShareParams(
+          files: [XFile(file.path)],
+          subject: 'CalorieTracker data export'));
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context)
@@ -433,30 +407,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             'stronger paid model.',
         _ => 'Default: gemini-2.5-flash',
       };
-
-  Widget _keyStatusIcon() {
-    switch (_keyState) {
-      case KeyValidationState.idle:
-        return const SizedBox.shrink();
-      case KeyValidationState.validating:
-        return const Padding(
-          padding: EdgeInsets.all(12),
-          child: SizedBox(
-            key: Key('keyValidating'),
-            width: 18,
-            height: 18,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          ),
-        );
-      case KeyValidationState.valid:
-        return const Icon(Icons.check_circle,
-            key: Key('keyValid'), color: Colors.green);
-      case KeyValidationState.invalid:
-        return Icon(Icons.error,
-            key: const Key('keyInvalid'),
-            color: Theme.of(context).colorScheme.error);
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -605,10 +555,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               // the newly selected provider's stored values.
               _keyController.text = widget.settings.apiKey;
               _modelController.text = widget.settings.model;
-              _customModel =
-                  !_isCuratedModel(widget.settings.provider, widget.settings.model);
-              _keyState = KeyValidationState.idle;
-              _keyError = null;
+              _customModel = !_isCuratedModel(
+                  widget.settings.provider, widget.settings.model);
             });
           },
         ),
@@ -646,11 +594,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             selected: {widget.settings.serverBackend},
             onSelectionChanged: (sel) async {
               await widget.settings.update(serverBackend: sel.single);
-              if (!mounted) return;
-              setState(() {
-                _keyState = KeyValidationState.idle;
-                _keyError = null;
-              });
+              if (mounted) setState(() {});
             },
           ),
           const SizedBox(height: 4),
@@ -668,14 +612,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
           controller: _keyController,
           obscureText: true,
           autocorrect: false,
-          onChanged: (_) {
-            if (_keyState != KeyValidationState.idle) {
-              setState(() {
-                _keyState = KeyValidationState.idle;
-                _keyError = null;
-              });
-            }
-          },
           // Persist like the model/server-URL fields: the key used to be
           // stored ONLY by a successful Validate, so paste-key → switch
           // tab (or validation failing while offline) silently configured
@@ -708,36 +644,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
             },
             helperMaxLines: 5, // multi-line guidance must not ellipsize
             border: const OutlineInputBorder(),
-            suffixIcon: _keyStatusIcon(),
           ),
         ),
-        if (_keyError != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: Text(
-              _keyError!,
-              key: const Key('keyErrorText'),
-              style: TextStyle(color: theme.colorScheme.error),
-            ),
-          ),
-        if (_keyState == KeyValidationState.valid)
-          const Padding(
-            padding: EdgeInsets.only(top: 6),
-            child: Text('Key OK', key: Key('keyOkText')),
-          ),
         const SizedBox(height: 8),
         Align(
           alignment: Alignment.centerLeft,
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
+              // ONE test action. 'Validate key' was a strict SUBSET of the
+              // diagnostics page (same validateKey call, stage 3 of six)
+              // and its other job — persisting the key on success — became
+              // redundant when the field started persisting on type. Two
+              // buttons that both mean "check my setup", one of which
+              // answers less, is the clutter this deletes.
               FilledButton.tonal(
                 key: const Key('validateKeyButton'),
-                onPressed: _keyState == KeyValidationState.validating
-                    ? null
-                    : _validateKey,
-                child: Text(
-                    _isServerProvider ? 'Test connection' : 'Validate key'),
+                onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => DiagnosticsScreen(
+                    diagnostics: ProviderDiagnostics(
+                      settings: widget.settings,
+                      analyzer: widget.analyzer,
+                    ),
+                  ),
+                )),
+                child: const Text('Test this provider'),
               ),
               // Claude OAuth is meaningless when the server's payer is a
               // GLM/Doubao plan — and the sign-in it launches needs a VPN

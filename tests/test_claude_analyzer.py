@@ -1236,6 +1236,7 @@ def test_glm_photo_uses_the_official_vision_mcp(monkeypatch):
     def run(cmd, **kwargs):
         captured["cmd"] = cmd
         captured["env"] = kwargs.get("env")
+        captured["cwd"] = kwargs.get("cwd")
         # The config temp file exists only DURING the run; read it here.
         cfg = cmd[cmd.index("--mcp-config") + 1]
         with open(cfg) as f:
@@ -1267,6 +1268,16 @@ def test_glm_photo_uses_the_official_vision_mcp(monkeypatch):
     assert "Read" not in flag_values.get("--allowedTools", ""), \
         "Read must never be enabled on this path"
     assert "--tools" not in cmd, "the no-tools text flag would kill the MCP"
+    # --allowedTools is an AUTO-APPROVE list, not a disable list: the
+    # built-ins stay reachable to a prompt carrying caller text (the app's
+    # dietary profile) unless they are named forbidden (review 2026-07-31).
+    denied = flag_values.get("--disallowedTools", "")
+    for tool in ("Read", "Glob", "Grep", "LS", "Bash", "Write"):
+        assert tool in denied, f"{tool} must be explicitly disallowed"
+    assert "--strict-mcp-config" in cmd
+    # And the run's cwd must NOT be the directory holding the plan key.
+    assert captured["cwd"] != os.path.dirname(cfg_path), \
+        "the working directory must not contain the mcp-config file"
     # Anthropic model ids must not be pushed at a vendor plan.
     assert "--model" not in cmd
     env = captured["env"]
