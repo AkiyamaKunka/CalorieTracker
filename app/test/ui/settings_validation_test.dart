@@ -126,6 +126,48 @@ void main() {
     expect(find.byKey(const Key('serverBackendSelector')), findsNothing);
   });
 
+  testWidgets('model is PICKED from a curated list, not typed', (tester) async {
+    final settings = FakeSettings(apiKey: 'k'); // gemini, curated default
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: settings,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      requestPhotoPermission: () async => true,
+    )));
+    expect(find.byKey(const Key('modelPicker')), findsOneWidget);
+    expect(find.byKey(const Key('modelField')), findsNothing,
+        reason: 'no raw text entry unless the user asks for Custom');
+
+    await tester.tap(find.byKey(const Key('modelPicker')));
+    await tester.pumpAndSettle();
+    await tester
+        .tap(find.text('gemini-2.5-pro — strongest, slower').last);
+    await tester.pumpAndSettle();
+    expect(settings.model, 'gemini-2.5-pro', reason: 'picking persists');
+
+    // The Custom row reveals the text field for unlisted models.
+    await tester.tap(find.byKey(const Key('modelPicker')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Custom — type a model name…').last);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('modelField')), findsOneWidget);
+  });
+
+  testWidgets('a stored unlisted model renders as Custom with the field '
+      'visible', (tester) async {
+    final settings =
+        FakeSettings(apiKey: 'k', model: 'gemini-exp-something-new');
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: settings,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      requestPhotoPermission: () async => true,
+    )));
+    expect(find.byKey(const Key('modelField')), findsOneWidget,
+        reason: 'an unlisted stored model must stay visible and editable');
+    expect(find.text('Custom — type a model name…'), findsOneWidget);
+  });
+
   testWidgets('watcher toggle stays off when permission is denied',
       (tester) async {
     final settings = FakeSettings(watcherEnabled: false);

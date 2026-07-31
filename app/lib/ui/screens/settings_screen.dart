@@ -22,6 +22,48 @@ import 'meal_editor_screen.dart';
 
 enum KeyValidationState { idle, validating, valid, invalid }
 
+/// Sentinel value for the model picker's "type it yourself" row.
+const String _kCustomModel = '__custom__';
+
+/// Curated vision-capable models per provider (verified 2026-07 research),
+/// with the tradeoff IN the label — users pick, they don't memorize vendor
+/// id strings like doubao-seed-2-0-mini-260428. The Custom row reveals a
+/// text field so a model a vendor ships NEXT month never bricks the app.
+const Map<String, List<(String, String)>> _knownModels = {
+  'gemini': [
+    ('gemini-2.5-flash', 'gemini-2.5-flash — fast, free-tier default'),
+    ('gemini-2.5-pro', 'gemini-2.5-pro — strongest, slower'),
+  ],
+  'openai': [
+    ('gpt-4o-mini', 'gpt-4o-mini — cheap, default'),
+    ('gpt-4o', 'gpt-4o — stronger, pricier'),
+  ],
+  'anthropic': [
+    ('claude-sonnet-5', 'claude-sonnet-5 — default'),
+    ('claude-haiku-4-5', 'claude-haiku-4-5 — fastest, cheapest'),
+    ('claude-opus-5', 'claude-opus-5 — strongest, priciest'),
+  ],
+  'qwen': [
+    ('qwen3-vl-flash', 'qwen3-vl-flash — cheapest, default'),
+    ('qwen3-vl-plus', 'qwen3-vl-plus — stronger, paid'),
+    ('qwen-vl-max', 'qwen-vl-max — legacy flagship'),
+  ],
+  'doubao': [
+    ('doubao-seed-2-0-mini-260428', 'seed-2.0 mini — cheapest, default'),
+    ('doubao-seed-2-0-lite-260428', 'seed-2.0 lite — mid tier'),
+    ('doubao-seed-2-1-turbo-260628', 'seed-2.1 turbo — stronger'),
+    ('doubao-seed-2-1-pro-260628', 'seed-2.1 pro — strongest'),
+  ],
+  'glm': [
+    ('glm-4.6v-flash', 'glm-4.6v-flash — FREE 免费, default'),
+    ('glm-4.6v', 'glm-4.6v — stronger, paid'),
+    ('glm-5v-turbo', 'glm-5v-turbo — newest flagship'),
+  ],
+};
+
+bool _isCuratedModel(String provider, String model) =>
+    (_knownModels[provider] ?? const []).any((m) => m.$1 == model);
+
 class SettingsScreen extends StatefulWidget {
   final SettingsStore settings;
   final AnalyzerService analyzer;
@@ -71,6 +113,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late final TextEditingController _serverUrlController;
   KeyValidationState _keyState = KeyValidationState.idle;
   String? _keyError;
+  bool _customModel = false;
   late int _lookbackDays;
   late String _reportTime;
   late bool _watcherEnabled;
@@ -83,6 +126,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _keyController = TextEditingController(text: s.apiKey);
     _modelController = TextEditingController(
         text: s.model.isEmpty ? 'gemini-2.5-flash' : s.model);
+    _customModel = !_isCuratedModel(s.provider, _modelController.text);
     _profileController = TextEditingController(text: s.dietaryProfile);
     _serverUrlController = TextEditingController(text: s.serverBaseUrl);
     _lookbackDays = s.lookbackDays.clamp(1, 30); // spec §6.4 range
@@ -465,6 +509,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               // the newly selected provider's stored values.
               _keyController.text = widget.settings.apiKey;
               _modelController.text = widget.settings.model;
+              _customModel =
+                  !_isCuratedModel(widget.settings.provider, widget.settings.model);
               _keyState = KeyValidationState.idle;
               _keyError = null;
             });
@@ -623,23 +669,67 @@ class _SettingsScreenState extends State<SettingsScreen> {
         // The server path has no model field: the VM's own
         // CLAUDE_ANALYZER_MODEL decides, and a phone-side value would be a
         // lie the user could not act on.
-        if (!_isServerProvider)
-          TextField(
-            key: const Key('modelField'),
-            controller: _modelController,
-            autocorrect: false,
-            onSubmitted: (v) => widget.settings.update(model: v.trim()),
-            // Tap-away must not lose the edit — onSubmitted only fires on
-            // the keyboard action key.
-            onTapOutside: (_) =>
-                widget.settings.update(model: _modelController.text.trim()),
-            decoration: InputDecoration(
-              labelText: 'Model',
-              helperText: _modelHelperText(),
-              helperMaxLines: 4, // the Doubao versioned-ID warning wraps
-              border: const OutlineInputBorder(),
+        if (!_isServerProvider) ...[
+          // PICKED, not typed (user report 2026-07-31: "the model's name
+          // shouldn't be typed by user but selected"): a dropdown of
+          // verified models with the tradeoff in the label. KeyedSubtree:
+          // a provider switch must rebuild the picker with the new
+          // provider's items and selection.
+          KeyedSubtree(
+            key: ValueKey('modelPicker-${widget.settings.provider}'),
+            child: DropdownButtonFormField<String>(
+              key: const Key('modelPicker'),
+              initialValue: _customModel
+                  ? _kCustomModel
+                  : widget.settings.model,
+              decoration: const InputDecoration(
+                labelText: 'Model',
+                border: OutlineInputBorder(),
+              ),
+              items: [
+                for (final (id, label) in _knownModels[
+                        widget.settings.provider] ??
+                    const <(String, String)>[])
+                  DropdownMenuItem(value: id, child: Text(label)),
+                const DropdownMenuItem(
+                    value: _kCustomModel,
+                    child: Text('Custom — type a model name…')),
+              ],
+              onChanged: (v) async {
+                if (v == null) return;
+                if (v == _kCustomModel) {
+                  setState(() => _customModel = true);
+                  return;
+                }
+                await widget.settings.update(model: v);
+                if (!mounted) return;
+                setState(() {
+                  _customModel = false;
+                  _modelController.text = v;
+                });
+              },
             ),
           ),
+          if (_customModel) ...[
+            const SizedBox(height: 8),
+            TextField(
+              key: const Key('modelField'),
+              controller: _modelController,
+              autocorrect: false,
+              onSubmitted: (v) => widget.settings.update(model: v.trim()),
+              // Tap-away must not lose the edit — onSubmitted only fires
+              // on the keyboard action key.
+              onTapOutside: (_) => widget.settings
+                  .update(model: _modelController.text.trim()),
+              decoration: InputDecoration(
+                labelText: 'Custom model name',
+                helperText: _modelHelperText(),
+                helperMaxLines: 4, // the Doubao versioned-ID warning wraps
+                border: const OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ],
         const Divider(height: 32),
         Text('Photo intake', style: theme.textTheme.titleMedium),
         if (widget.coverage != null && widget.processPhoto != null)
