@@ -19,6 +19,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:calorie_tracker/core/contracts.dart';
+import 'package:calorie_tracker/data/meals_logic.dart';
 
 class BaseFakeDao implements MealsDao {
   final List<Meal> meals = [];
@@ -225,4 +226,20 @@ class BaseFakeDao implements MealsDao {
         'exported_at': '2026-07-17T20:00:00.000',
         'tables': const {'meals': <Object>[]},
       });
+
+  /// Validates like production (a wrong file must throw here too) and
+  /// records the payload; row merging is the real DAO's job, pinned by the
+  /// conformance suite against real SQLite.
+  final List<String> imported = [];
+
+  @override
+  Future<ImportSummary> importJson(String json) async {
+    final parsed = parseExportEnvelope(json);
+    imported.add(json);
+    return ImportSummary(
+      {for (final e in parsed.tables.entries) e.key: e.value.length},
+      const {},
+      exportedAt: parsed.exportedAt,
+    );
+  }
 }

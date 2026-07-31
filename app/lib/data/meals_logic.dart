@@ -161,3 +161,54 @@ Map<String, dynamic> buildExportEnvelope(
       'exported_at': exportedAt.toIso8601String(),
       'tables': tables,
     };
+
+/// The export format the importer accepts. Bump-tolerant on purpose: a
+/// file from a NEWER app version still imports (unknown tables/columns are
+/// skipped row-by-row), because refusing outright would strand a user
+/// moving between devices mid-upgrade.
+const String kExportFormat = 'calorie_tracker_export';
+const int kExportVersion = 1;
+
+/// A parsed export: the per-table rows plus the stamp for the UI.
+class ParsedExport {
+  const ParsedExport(this.tables, this.exportedAt);
+  final Map<String, List<Map<String, Object?>>> tables;
+  final String? exportedAt;
+}
+
+/// Strictly validate an export payload — a wrong file is the ONE case
+/// where import must refuse loudly, since the alternative is silently
+/// writing a stranger's (or a random JSON's) rows into the food log.
+ParsedExport parseExportEnvelope(String json) {
+  final Object? decoded;
+  try {
+    decoded = jsonDecode(json);
+  } on FormatException {
+    throw const FormatException('That file is not JSON.');
+  }
+  if (decoded is! Map) {
+    throw const FormatException('That file is not a CalorieTracker export.');
+  }
+  if (decoded['format'] != kExportFormat) {
+    throw const FormatException(
+        'That file is not a CalorieTracker export (wrong format tag).');
+  }
+  final version = decoded['version'];
+  if (version is! int || version < 1) {
+    throw const FormatException('That export has an unusable version tag.');
+  }
+  final rawTables = decoded['tables'];
+  if (rawTables is! Map) {
+    throw const FormatException('That export has no tables section.');
+  }
+  final tables = <String, List<Map<String, Object?>>>{};
+  rawTables.forEach((key, value) {
+    if (key is! String || value is! List) return;
+    tables[key] = [
+      for (final row in value)
+        if (row is Map) Map<String, Object?>.from(row),
+    ];
+  });
+  final stamp = decoded['exported_at'];
+  return ParsedExport(tables, stamp is String ? stamp : null);
+}

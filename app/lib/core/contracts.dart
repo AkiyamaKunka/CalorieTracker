@@ -114,6 +114,24 @@ abstract class MealsDao {
   Future<void> saveActivity(String date,
       {num? activeCalories, int? steps, double? distanceKm});
   Future<String> exportJson(); // full data export (spec §8)
+
+  /// Merge a previously exported envelope into THIS database (§9 app-only).
+  /// Never destructive: existing rows win, new rows are added, and the
+  /// result reports what happened. Throws [FormatException] on a payload
+  /// that is not a CalorieTracker export.
+  Future<ImportSummary> importJson(String json);
+}
+
+/// Outcome of [MealsDao.importJson] — per-table added/skipped counts so the
+/// UI can say "142 meals added, 3 already here" instead of "done".
+class ImportSummary {
+  const ImportSummary(this.added, this.skipped, {this.exportedAt});
+  final Map<String, int> added;
+  final Map<String, int> skipped;
+  final String? exportedAt;
+
+  int get totalAdded => added.values.fold(0, (a, b) => a + b);
+  int get totalSkipped => skipped.values.fold(0, (a, b) => a + b);
 }
 
 /// Result of one photo analysis (spec §3).

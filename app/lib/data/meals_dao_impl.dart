@@ -452,4 +452,93 @@ ON CONFLICT(chat_id, date) DO UPDATE SET
     }
     return jsonEncode(buildExportEnvelope(tables, _clock()));
   }
+
+  @override
+  Future<ImportSummary> importJson(String json) async {
+    final envelope = parseExportEnvelope(json); // throws FormatException
+    final tables = envelope.tables;
+    final added = <String, int>{};
+    final skipped = <String, int>{};
+
+    await _db.transaction((txn) async {
+      for (final table in kExportTables) {
+        final rows = tables[table];
+        if (rows == null) continue;
+        var a = 0, s = 0;
+        for (final raw in rows) {
+          final row = Map<String, Object?>.from(raw);
+          // The row's own id must NOT be reused: this DB has its own
+          // autoincrement sequence, and a colliding id would either fail
+          // or overwrite a real meal. meal_id references are dropped for
+          // the same reason (the ledger row still records the status).
+          row.remove('id');
+          if (table == 'photo_ingestions') row['meal_id'] = null;
+          if (await _importRowExists(txn, table, row)) {
+            s++;
+            continue;
+          }
+          try {
+            await txn.insert(table, row,
+                conflictAlgorithm: ConflictAlgorithm.ignore);
+            a++;
+          } catch (_) {
+            // A row whose shape does not fit this schema version is
+            // skipped, never fatal: a partial import beats none.
+            s++;
+          }
+        }
+        added[table] = a;
+        skipped[table] = s;
+      }
+    });
+    return ImportSummary(added, skipped, exportedAt: envelope.exportedAt);
+  }
+
+  /// Identity per table — the dedup rule that makes re-importing the same
+  /// file a no-op instead of doubling the user's calories.
+  Future<bool> _importRowExists(
+      DatabaseExecutor txn, String table, Map<String, Object?> row) async {
+    final (where, args) = switch (table) {
+      // A meal is the same meal when the same photo was logged at the same
+      // clock time; photoless meals fall back to date+time+analysis.
+      'meals' => (
+          'chat_id = ? AND date = ? AND time = ? AND '
+              'IFNULL(image_hash, \'\') = ? AND analysis = ?',
+          [
+            row['chat_id'],
+            row['date'],
+            row['time'],
+            row['image_hash'] ?? '',
+            row['analysis'],
+          ]
+        ),
+      'photo_ingestions' => (
+          'chat_id = ? AND image_hash = ?',
+          [row['chat_id'], row['image_hash']]
+        ),
+      'body_weight' => (
+          'chat_id = ? AND date = ?',
+          [row['chat_id'], row['date']]
+        ),
+      'activities' => (
+          'chat_id = ? AND date = ?',
+          [row['chat_id'], row['date']]
+        ),
+      'fitness_profile' => ('chat_id = ?', [row['chat_id']]),
+      'workouts' => (
+          'chat_id = ? AND date = ? AND logged_at = ? AND '
+              'IFNULL(workout_type, \'\') = ?',
+          [
+            row['chat_id'],
+            row['date'],
+            row['logged_at'],
+            row['workout_type'] ?? '',
+          ]
+        ),
+      _ => ('1 = 0', const <Object?>[]),
+    };
+    final hit = await txn.query(table,
+        columns: ['1'], where: where, whereArgs: args, limit: 1);
+    return hit.isNotEmpty;
+  }
 }

@@ -120,6 +120,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late String _reportTime;
   late bool _watcherEnabled;
   bool _exporting = false;
+  bool _importing = false;
 
   @override
   void initState() {
@@ -241,6 +242,77 @@ class _SettingsScreenState extends State<SettingsScreen> {
         '${picked.minute.toString().padLeft(2, '0')}';
     setState(() => _reportTime = formatted);
     await widget.settings.update(reportTime: formatted);
+  }
+
+  /// Import via PASTE, deliberately: adding a file-picker plugin for a
+  /// once-a-year action costs a platform dependency on both OSes, while
+  /// every transfer route the owner actually uses (WeChat/AirDrop/email/
+  /// Termux) can put text on the clipboard. The parser refuses anything
+  /// that is not a CalorieTracker export, so a mis-paste is a message,
+  /// never a corrupted log.
+  Future<void> _import() async {
+    final controller = TextEditingController();
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Import exported data'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+                'Paste the contents of an exported JSON file. Existing '
+                'meals are kept; only new ones are added.'),
+            const SizedBox(height: 12),
+            TextField(
+              key: const Key('importField'),
+              controller: controller,
+              maxLines: 4,
+              autofocus: true,
+              decoration: const InputDecoration(
+                hintText: '{"format":"calorie_tracker_export",…',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel')),
+          FilledButton(
+              key: const Key('importConfirm'),
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Import')),
+        ],
+      ),
+    );
+    final payload = controller.text;
+    controller.dispose();
+    if (go != true || !mounted) return;
+    setState(() => _importing = true);
+    try {
+      final summary = await widget.dao.importJson(payload);
+      if (!mounted) return;
+      final meals = summary.added['meals'] ?? 0;
+      final kept = summary.totalSkipped;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(summary.totalAdded == 0
+              ? 'Nothing new to import — everything in that file is '
+                  'already here.'
+              : 'Imported $meals meal${meals == 1 ? '' : 's'} '
+                  '(${summary.totalAdded} rows total)'
+                  '${kept > 0 ? '; $kept already here' : ''}.')));
+    } on FormatException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.message)));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Import failed: $e')));
+    } finally {
+      if (mounted) setState(() => _importing = false);
+    }
   }
 
   Future<void> _export() async {
@@ -831,6 +903,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ),
         const Divider(height: 32),
+        Text('Your data', style: theme.textTheme.titleMedium),
+        const SizedBox(height: 8),
         FilledButton.icon(
           key: const Key('exportButton'),
           onPressed: _exporting ? null : _export,
@@ -841,6 +915,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   child: CircularProgressIndicator(strokeWidth: 2))
               : const Icon(Icons.ios_share),
           label: const Text('Export data (JSON)'),
+        ),
+        const SizedBox(height: 8),
+        // The other half of export, missing until 2026-07-31: without it a
+        // new phone (or a re-signed build, which Android treats as a
+        // different app and wipes) meant starting the food log from zero.
+        // MERGE semantics, never replace — see MealsDao.importJson.
+        OutlinedButton.icon(
+          key: const Key('importButton'),
+          onPressed: _importing ? null : _import,
+          icon: _importing
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2))
+              : const Icon(Icons.file_download_outlined),
+          label: const Text('Import data (JSON)'),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'Import MERGES an exported file into this phone: meals already '
+          'here are left alone, so importing twice never doubles your '
+          'calories. Paste the file contents in the next step.',
+          style: theme.textTheme.bodySmall
+              ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
         ),
         const SizedBox(height: 24),
       ],

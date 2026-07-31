@@ -102,8 +102,11 @@ class HistoryScreenState extends State<HistoryScreen> {
     final logged = _perDay.keys.toList()..sort();
     final today = DateTime.now();
     var end = DateTime(today.year, today.month, today.day);
+    // The §5.3 query window ends at today, so logged.last can exceed
+    // `end` only through clock skew between reload and this build — the
+    // guard keeps the span covering the data even then.
     final newest = DateTime.parse(logged.last);
-    if (newest.isAfter(end)) end = newest; // hand-edited future dates
+    if (newest.isAfter(end)) end = newest;
     final dates = <String>[];
     final start = DateTime.parse(logged.first);
     // Day+1 through the CONSTRUCTOR, not Duration(days: 1): a 24h add
