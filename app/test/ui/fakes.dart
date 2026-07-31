@@ -30,7 +30,6 @@ class FakeAnalyzer implements AnalyzerService {
 
   /// Test hook: controls validateKey resolution. Default resolves null (OK).
   Future<String?> Function(String apiKey)? onValidateKey;
-  final List<String> validatedKeys = [];
 
   @override
   Future<AnalysisOutcome> analyzePhoto(Uint8List originalBytes) async {
@@ -43,10 +42,8 @@ class FakeAnalyzer implements AnalyzerService {
       nextTextIntent;
 
   @override
-  Future<String?> validateKey(String apiKey) {
-    validatedKeys.add(apiKey);
-    return onValidateKey?.call(apiKey) ?? Future.value(null);
-  }
+  Future<String?> validateKey(String apiKey) =>
+      onValidateKey?.call(apiKey) ?? Future.value(null);
 
   /// Diagnostics-facing probe. Default derives from [onValidateKey] like
   /// the contract's own default; [onProbeKey] overrides it for the cases
