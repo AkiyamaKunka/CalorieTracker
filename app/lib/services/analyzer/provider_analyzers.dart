@@ -70,6 +70,14 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
   /// a wrong / retired / not-yet-activated MODEL id, not a bad key — and
   /// the generic message left users regenerating a key that worked.
   String? get notFoundMessage => null;
+
+  /// Verbatim message for an HTTP 503, built from the response [body];
+  /// null for the generic transient bucket. ServerAnalyzer overrides this:
+  /// its 503 carries a `reason` (busy CLI vs "no key (GLM_PLAN_KEY)") that
+  /// the generic 'network or service issue' message hid — a refused
+  /// backend looked identical to a hiccup and cost an hour of debugging
+  /// on 2026-07-31.
+  String? unavailableMessage(String body) => null;
   http.Request buildRequest(String key,
       {required String prompt, Uint8List? jpegBytes, required int maxTokens});
   String extractText(Map<String, dynamic> body);
@@ -143,6 +151,15 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
       if (resp.statusCode == 404 && notFound != null) {
         throw _ProviderException(notFound,
             transient: false, verbatimMessage: true);
+      }
+      if (resp.statusCode == 503) {
+        final custom = unavailableMessage(resp.body);
+        if (custom != null) {
+          // Transient (config can be fixed and the photo must survive)
+          // but no in-place retry: seconds won't change a missing key.
+          throw _ProviderException(custom,
+              transient: true, retryInPlace: false, verbatimMessage: true);
+        }
       }
       throw _ProviderException('HTTP ${resp.statusCode}',
           transient: _isTransientStatus(resp.statusCode),
@@ -514,6 +531,23 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
   String get model => 'server';
   @override
   String get providerLabel => 'server';
+
+  @override
+  String? unavailableMessage(String body) {
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map) {
+        final reason = decoded['reason'];
+        if (reason is String && reason.isNotEmpty) {
+          return 'The server cannot analyze right now: $reason. Check the '
+              'backend selector in Settings (Test connection explains).';
+        }
+      }
+    } on FormatException {
+      // fall through to the generic transient message
+    }
+    return null;
+  }
 
   /// The server runs a Claude CLI analysis (up to ~120 s, and up to ~240 s
   /// across its internal stream→file fallback) behind a synchronous Flask

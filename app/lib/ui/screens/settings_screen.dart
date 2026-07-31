@@ -15,9 +15,11 @@ import 'package:flutter/foundation.dart' show compute;
 import '../../services/analyzer/normalize.dart' show makeMealThumb;
 import '../../services/photo/coverage.dart';
 import '../../services/photo/photo_library.dart';
+import '../diagnostics.dart';
 import '../photo_pipeline.dart';
 import '../services.dart';
 import 'coverage_screen.dart';
+import 'diagnostics_screen.dart';
 import 'meal_editor_screen.dart';
 
 enum KeyValidationState { idle, validating, valid, invalid }
@@ -730,6 +732,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ],
         ],
+        const Divider(height: 32),
+        // "Why doesn't my AI work" in one tap: names the broken piece
+        // (VPN, key, credit, format, quota) instead of a generic error.
+        ListTile(
+          key: const Key('diagnosticsTile'),
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.health_and_safety_outlined),
+          title: const Text('Test AI provider'),
+          subtitle: const Text('Find out exactly why analysis fails'),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => Navigator.of(context).push(MaterialPageRoute(
+            builder: (_) => DiagnosticsScreen(
+              diagnostics: ProviderDiagnostics(
+                settings: widget.settings,
+                analyzer: widget.analyzer,
+              ),
+            ),
+          )),
+        ),
         const Divider(height: 32),
         Text('Photo intake', style: theme.textTheme.titleMedium),
         if (widget.coverage != null && widget.processPhoto != null)

@@ -1,6 +1,7 @@
 /// Today: running totals header (spec §5.1), typical-day line, today's meal
-/// cards, pull-to-refresh, and the chat-style correction box feeding the NL
-/// executor (spec §4).
+/// cards, pull-to-refresh, and the one Meals button (add + fix, spec §4
+/// corrections now live in its sheet — the pinned chat bar is gone,
+/// 2026-07-31).
 library;
 
 import 'package:flutter/material.dart';
@@ -8,7 +9,6 @@ import 'package:flutter/material.dart';
 import '../../core/contracts.dart';
 import '../format.dart';
 import '../meal_thumbs.dart';
-import '../nl_presenter.dart';
 import '../widgets/meal_card.dart';
 import 'meal_editor_screen.dart';
 
@@ -19,11 +19,8 @@ class TodayScreen extends StatefulWidget {
   /// Photo thumbnails for the cards; null (tests) renders placeholders.
   final MealThumbResolver? thumbs;
 
-  /// Opens the add flow (+ button). The button is rendered HERE, inside the
-  /// body above the chat box, not as a Scaffold FAB: a bottom-right Scaffold
-  /// FAB floats over the body's last rows — which on this screen is the
-  /// correction box, so the + sat exactly on top of the send button (user
-  /// report 2026-07-27). Null (tests / other hosts) hides the button.
+  /// Opens the meals sheet (add / describe / manual / fix). Null (tests /
+  /// other hosts) hides the button.
   final VoidCallback? onAdd;
   const TodayScreen(
       {super.key,
@@ -37,9 +34,7 @@ class TodayScreen extends StatefulWidget {
 }
 
 class TodayScreenState extends State<TodayScreen> {
-  final TextEditingController _chatController = TextEditingController();
   bool _loading = true;
-  bool _sending = false;
   String? _error;
   List<Meal> _todayMeals = const [];
   Map<String, num> _priorDayTotals = const {};
@@ -48,12 +43,6 @@ class TodayScreenState extends State<TodayScreen> {
   void initState() {
     super.initState();
     reload();
-  }
-
-  @override
-  void dispose() {
-    _chatController.dispose();
-    super.dispose();
   }
 
   Future<void> reload() async {
@@ -93,60 +82,27 @@ class TodayScreenState extends State<TodayScreen> {
     if (mounted) await reload();
   }
 
-  Future<void> _sendCorrection() async {
-    final text = _chatController.text.trim();
-    if (text.isEmpty || _sending) return;
-    setState(() => _sending = true);
-    try {
-      final replies = await widget.executor.handleText(text);
-      _chatController.clear();
-      if (!mounted) return;
-      // Sending is over once the executor returns; the reply presentation
-      // (incl. the blocking delete-confirmation modal) is not "sending".
-      setState(() => _sending = false);
-      await presentNlReplies(context, widget.executor, replies);
-      await reload();
-    } catch (e) {
-      if (!mounted) return;
-      // Executor is spec'd never to throw (§4.9); belt-and-braces anyway.
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('That request failed: $e')));
-    } finally {
-      if (mounted) setState(() => _sending = false);
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final onAdd = widget.onAdd;
-    return Column(
+    // The chat bar that used to sit under this Stack is GONE
+    // (2026-07-31, user request): corrections live in the meals button's
+    // sheet ("Fix or delete a meal"), so Today is purely the day's list
+    // plus the one button.
+    return Stack(
       children: [
-        Expanded(
-          child: Stack(
-            children: [
-              _body(context),
-              // Anchored 16px above the chat box (the Column's next child),
-              // so the two can never overlap — at any text scale, and when
-              // the keyboard pushes the chat box up.
-              if (onAdd != null)
-                Positioned(
-                  right: 16,
-                  bottom: 16,
-                  // EXTENDED (labeled): a bare + next to a chat box that
-                  // also edits meals left the two entry points ambiguous
-                  // (user report 2026-07-30). "Add meal" vs the box's
-                  // "fix a logged meal" hint names each control's job.
-                  child: FloatingActionButton.extended(
-                    key: const Key('addMealFab'),
-                    onPressed: onAdd,
-                    icon: const Icon(Icons.add),
-                    label: const Text('Add meal'),
-                  ),
-                ),
-            ],
+        _body(context),
+        if (onAdd != null)
+          Positioned(
+            right: 16,
+            bottom: 16,
+            child: FloatingActionButton.extended(
+              key: const Key('addMealFab'),
+              onPressed: onAdd,
+              icon: const Icon(Icons.add),
+              label: const Text('Meals'),
+            ),
           ),
-        ),
-        _correctionBox(context),
       ],
     );
   }
@@ -188,7 +144,7 @@ class TodayScreenState extends State<TodayScreen> {
                     const Text('No meals logged yet today.'),
                     const SizedBox(height: 8),
                     Text(
-                      'Tap "Add meal" below to log one from a photo or a '
+                      'Tap "Meals" below to log one from a photo or a '
                       'description — or turn on "Watch camera roll" in '
                       'Settings and new food photos log themselves.',
                       textAlign: TextAlign.center,
@@ -255,51 +211,4 @@ class TodayScreenState extends State<TodayScreen> {
     );
   }
 
-  /// Chat-style correction box: free text → NlExecutor → snackbar/dialog
-  /// replies including the delete-confirmation modal (spec §4).
-  Widget _correctionBox(BuildContext context) {
-    return SafeArea(
-      top: false,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-        child: Row(
-          children: [
-            Expanded(
-              child: TextField(
-                key: const Key('correctionField'),
-                controller: _chatController,
-                enabled: !_sending,
-                textInputAction: TextInputAction.send,
-                onSubmitted: (_) => _sendCorrection(),
-                // The hint must name this box's ROLE, not just show an
-                // example: with an example alone ("change meal 2 to...")
-                // it read as a second way to add meals and competed with
-                // the Add button (user report 2026-07-30).
-                decoration: const InputDecoration(
-                  hintText: 'Fix a logged meal: "meal 2 was roast duck"',
-                  border: OutlineInputBorder(),
-                  isDense: true,
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            _sending
-                ? const Padding(
-                    padding: EdgeInsets.all(8),
-                    child: SizedBox(
-                        width: 24,
-                        height: 24,
-                        child: CircularProgressIndicator(strokeWidth: 2)),
-                  )
-                : IconButton.filled(
-                    key: const Key('correctionSend'),
-                    onPressed: _sendCorrection,
-                    icon: const Icon(Icons.send),
-                    tooltip: 'Send',
-                  ),
-          ],
-        ),
-      ),
-    );
-  }
 }

@@ -4926,11 +4926,15 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
             return jsonify({"error": "bad_backend"}), 400
         if not claude_analyzer.backend_available(backend, for_photo=True):
             # 503 keeps old-app compat for claude; the reason string tells
-            # a new app WHICH server-side knob is missing.
-            return jsonify({
-                "error": "claude_unavailable",
-                "reason": claude_analyzer.backend_status().get(backend),
-            }), 503
+            # a new app WHICH server-side knob is missing. LOGGED: a burst
+            # of these was invisible in the journal on 2026-07-31 and cost
+            # an hour of "why is my API broken".
+            reason = claude_analyzer.backend_status().get(backend)
+            log.warning(
+                f"analyze_photo refused: backend '{backend}' unavailable "
+                f"({reason}).")
+            return jsonify({"error": "claude_unavailable",
+                            "reason": reason}), 503
         # allow_file_fallback=False: never run a network-influenced prompt
         # on the Read-tool path.
         analysis = claude_analyzer.analyze_food_photo(
@@ -4959,10 +4963,12 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         if backend not in claude_analyzer.SUBSCRIPTION_BACKENDS:
             return jsonify({"error": "bad_backend"}), 400
         if not claude_analyzer.backend_available(backend):
-            return jsonify({
-                "error": "claude_unavailable",
-                "reason": claude_analyzer.backend_status().get(backend),
-            }), 503
+            reason = claude_analyzer.backend_status().get(backend)
+            log.warning(
+                f"text_intent refused: backend '{backend}' unavailable "
+                f"({reason}).")
+            return jsonify({"error": "claude_unavailable",
+                            "reason": reason}), 503
         out = claude_analyzer.analyze_text_prompt(prompt, backend=backend)
         if not out:
             return jsonify({"error": "claude_unavailable"}), 503

@@ -1,8 +1,9 @@
 /// Add flow (FAB): pick a recent photo (grid → analyzing spinner → meal
 /// card, spec §2.3/§3/§6 pipeline with deliberate=true), or DESCRIBE a meal
 /// in free text (NlExecutor.describeMeal → estimate → the meal editor as a
-/// preview → insert). The describe path is new-meal ONLY; corrections and
-/// deletes stay on Today's chat box (handleText, spec §4).
+/// preview → insert), enter numbers manually, or FIX/delete a logged meal
+/// (FixMealScreen → handleText, spec §4). Since 2026-07-31 this sheet is
+/// the ONE owner of every meal action — the Today chat bar is gone.
 library;
 
 import 'package:flutter/foundation.dart' show compute;
@@ -11,6 +12,7 @@ import 'package:flutter/material.dart';
 import '../../core/contracts.dart';
 import '../../services/analyzer/normalize.dart' show makeMealThumb;
 import '../photo_pipeline.dart';
+import 'fix_meal_screen.dart';
 import 'meal_editor_screen.dart';
 import '../services.dart';
 
@@ -46,6 +48,16 @@ Future<void> openAddFlow(BuildContext context, UiServices services,
             subtitle: const Text('Type the numbers yourself — no AI'),
             onTap: () => Navigator.of(ctx).pop('manual'),
           ),
+          // Corrections lived in a chat bar pinned to Today until
+          // 2026-07-31 — the user's verdict: one button owns ALL meal
+          // actions, adding and fixing alike.
+          ListTile(
+            key: const Key('addFixMeal'),
+            leading: const Icon(Icons.build_outlined),
+            title: const Text('Fix or delete a meal'),
+            subtitle: const Text('"meal 2 was roast duck", "删除第一餐"'),
+            onTap: () => Navigator.of(ctx).pop('fix'),
+          ),
         ],
       ),
     ),
@@ -62,6 +74,9 @@ Future<void> openAddFlow(BuildContext context, UiServices services,
     // Defaults to today/now inside the editor (MealDraft.blank).
     await Navigator.of(context).push(MaterialPageRoute<void>(
         builder: (_) => MealEditorScreen(dao: services.dao)));
+  } else if (choice == 'fix') {
+    await Navigator.of(context).push(MaterialPageRoute<void>(
+        builder: (_) => FixMealScreen(executor: services.executor)));
   } else {
     return;
   }

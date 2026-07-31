@@ -187,6 +187,38 @@ void main() {
     }
   });
 
+  test('a 503 with a reason surfaces it VERBATIM — a refused backend must '
+      'not look like a network hiccup', () async {
+    // The 2026-07-31 incident: GLM selected, no plan key on the server —
+    // every request 503ed and the app said only 'network or service
+    // issue'. An hour of log archaeology later, this test.
+    final s = await serverSettings();
+    final analyzer = ServerAnalyzer(
+      s,
+      normalizer: (b) async => b,
+      client: MockClient((_) async => http.Response(
+          jsonEncode({
+            'error': 'claude_unavailable',
+            'reason': 'no key (GLM_PLAN_KEY)',
+          }),
+          503)),
+    );
+    final out = await analyzer.analyzePhoto(jpeg());
+    expect(out.retryable, isTrue, reason: 'config is fixable; keep photos');
+    expect(out.error, contains('GLM_PLAN_KEY'),
+        reason: 'the server said exactly what is missing — repeat it');
+    // A bare 503 (busy CLI) keeps the generic transient message.
+    final busy = ServerAnalyzer(
+      s,
+      normalizer: (b) async => b,
+      client: MockClient((_) async =>
+          http.Response('{"error": "claude_unavailable"}', 503)),
+    );
+    final busyOut = await busy.analyzePhoto(jpeg());
+    expect(busyOut.retryable, isTrue);
+    expect(busyOut.error, isNot(contains('GLM_PLAN_KEY')));
+  });
+
   test('a reply analyzed by the WRONG backend is refused, not logged',
       () async {
     final s = await serverSettings();

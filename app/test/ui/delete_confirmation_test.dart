@@ -7,18 +7,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:calorie_tracker/core/contracts.dart';
-import 'package:calorie_tracker/ui/screens/today_screen.dart';
+import 'package:calorie_tracker/ui/screens/fix_meal_screen.dart';
 
 import 'fakes.dart';
 
+// The correction bar moved off Today into FixMealScreen (2026-07-31);
+// the modal contract is unchanged.
 Future<void> _pumpTodayAndSend(
     WidgetTester tester, FakeExecutor executor, String text) async {
   await tester.pumpWidget(MaterialApp(
-    home: Scaffold(body: TodayScreen(dao: FakeDao(), executor: executor)),
+    home: FixMealScreen(executor: executor),
   ));
   await tester.pumpAndSettle();
-  await tester.enterText(find.byKey(const Key('correctionField')), text);
-  await tester.tap(find.byKey(const Key('correctionSend')));
+  await tester.enterText(find.byKey(const Key('fixMealField')), text);
+  await tester.tap(find.byKey(const Key('fixMealSend')));
   await tester.pumpAndSettle();
 }
 
