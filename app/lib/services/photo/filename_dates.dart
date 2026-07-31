@@ -7,6 +7,10 @@
 /// test_parse_captured_at_age_boundary_inclusive_at_max_age.
 library;
 
+import 'dart:typed_data';
+
+import 'package:image/image.dart' show decodeJpgExif;
+
 import '../../core/shared_generated.dart';
 
 /// Port of `_FILENAME_TS_RE` (upload_photo.py): 8 digits, '_', 6 digits,
@@ -107,4 +111,41 @@ DateTime? deriveCapturedAt(
   return validateCapturedAt(capturedAtFromFilename(fileName),
           now: clock, maxAgeDays: maxAgeDays) ??
       validateCapturedAt(assetCreateDate, now: clock, maxAgeDays: maxAgeDays);
+}
+
+/// EXIF 'YYYY:MM:DD HH:MM:SS' — colons in the DATE part, per spec. A
+/// tolerant tail (some cameras write 'T' or sub-seconds) but a strict head.
+final RegExp _exifDateTimeRe =
+    RegExp(r'^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})');
+
+/// The camera's own shutter timestamp from the JPEG's EXIF block
+/// (DateTimeOriginal, else the IFD0 DateTime), or null. App-only §9
+/// addition (2026-07-31): the LAST dating resort before intake-time — it
+/// is the only truth left for share-sheet photos whose filename carries no
+/// timestamp and which have no library asset (WeChat saves, downloads).
+/// EXIF carries no timezone; the value is the camera's local wall clock,
+/// which is exactly what meal dating wants. UNVALIDATED — callers apply
+/// [validateCapturedAt]. Never throws: hostile bytes return null.
+DateTime? exifCapturedAt(Uint8List jpegBytes) {
+  try {
+    final exif = decodeJpgExif(jpegBytes);
+    if (exif == null) return null;
+    final raw = (exif.exifIfd['DateTimeOriginal'] ??
+            exif.imageIfd['DateTime'])
+        ?.toString();
+    if (raw == null) return null;
+    final m = _exifDateTimeRe.firstMatch(raw.trim());
+    if (m == null) return null;
+    final parts = [for (var i = 1; i <= 6; i++) int.parse(m.group(i)!)];
+    final dt = DateTime(
+        parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]);
+    // DateTime() normalizes overflow (month 13 → next year); a normalized
+    // value means the EXIF was junk, not a date.
+    if (dt.month != parts[1] || dt.day != parts[2] || dt.hour != parts[3]) {
+      return null;
+    }
+    return dt;
+  } catch (_) {
+    return null;
+  }
 }

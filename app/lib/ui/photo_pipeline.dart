@@ -14,6 +14,8 @@ import 'package:intl/intl.dart';
 import '../core/coerce.dart';
 import '../core/contracts.dart';
 import '../services/analyzer/normalize.dart' show makeMealThumb;
+import '../services/photo/filename_dates.dart'
+    show exifCapturedAt, validateCapturedAt;
 import 'format.dart';
 
 enum PhotoOutcomeKind { saved, skipped, failed, duplicate, alreadyTracked }
@@ -152,7 +154,15 @@ class PhotoPipeline {
 
       // Backdating: a valid capturedAt (validated by the intake module,
       // spec §6.3) sets date/time; timestamp stays now (spec §2.2).
-      final when = photo.capturedAt ?? DateTime.now();
+      // When BOTH §6.3 sources failed (share-sheet photo, no timestamp in
+      // the filename), the JPEG's own EXIF shutter time is the last truth
+      // before intake-time dating — same validation window (§9 app-only,
+      // 2026-07-31). This is what keeps a 23:50 photo shared after
+      // midnight on YESTERDAY's total.
+      final when = photo.capturedAt ??
+          validateCapturedAt(exifCapturedAt(photo.bytes),
+              now: DateTime.now()) ??
+          DateTime.now();
       final id = await dao.saveMeal(
         Meal(
           id: 0, // assigned by the DAO on insert
