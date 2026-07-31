@@ -141,6 +141,48 @@ void main() {
     expect(rows.single['status'], 'saved');
   });
 
+  test('an EDITED meal does not re-import as a duplicate of its backup',
+      () async {
+    // The identity used to include the analysis JSON, so any correction
+    // (every edit path rewrites analysis) made an older backup look like a
+    // different meal — importing it would have shown the same lunch twice,
+    // once with the wrong numbers. A PHOTO meal's identity is its photo.
+    final id = await seed(daoA, date: '2026-07-29', cal: 610, hash: 'h1');
+    final backup = await daoA.exportJson(); // taken BEFORE the correction
+    await daoA.updateMealFields(id,
+        analysis: {'is_food': true, 'total_calories': 480});
+    await daoB.importJson(await daoA.exportJson()); // current state
+    final summary = await daoB.importJson(backup); // the older file
+
+    expect(summary.added['meals'], 0,
+        reason: 'the corrected meal and its pre-edit ancestor are ONE meal');
+    final meals = await daoB.mealsBetween('2026-07-01', '2026-07-31');
+    expect(meals, hasLength(1));
+    expect(meals.single.analysis['total_calories'], 480,
+        reason: 'the corrected numbers must survive');
+  });
+
+  test('two photoless meals in the same minute stay distinct', () async {
+    // Without a photo there is no stable anchor, so date+time+analysis is
+    // the fallback identity — and a coffee is not a sandwich.
+    await daoA.saveMeal(Meal(
+        id: 0,
+        date: '2026-07-30',
+        time: '08:00 AM',
+        timestamp: '2026-07-30T08:00:00.000',
+        source: MealSource.manualText,
+        analysis: {'is_food': true, 'total_calories': 90}));
+    await daoA.saveMeal(Meal(
+        id: 0,
+        date: '2026-07-30',
+        time: '08:00 AM',
+        timestamp: '2026-07-30T08:00:00.000',
+        source: MealSource.manualText,
+        analysis: {'is_food': true, 'total_calories': 450}));
+    final summary = await daoB.importJson(await daoA.exportJson());
+    expect(summary.added['meals'], 2);
+  });
+
   test('two activities on the SAME DAY both survive an import', () async {
     // The dedup key was date-only at first, which would have collapsed a
     // morning walk and an evening run into one row (review 2026-07-31).

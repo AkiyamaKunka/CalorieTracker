@@ -120,6 +120,7 @@ class PhotoManagerLibrary implements PhotoLibrary {
     return state.hasAccess;
   }
 
+
   Future<List<LibraryAsset>> _query(
       FilterOptionGroup filter, int limit) async {
     final paths = await PhotoManager.getAssetPathList(

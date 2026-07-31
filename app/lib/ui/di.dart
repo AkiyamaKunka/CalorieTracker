@@ -97,6 +97,12 @@ class AppServices {
         onMealSaved: signalMealsChanged);
 
     final photoLibrary = PhotoManagerLibrary();
+    // PhotoManager, NOT permission_handler: on Android <=12 the latter's
+    // Permission.photos resolves to READ_MEDIA_IMAGES (SDK 33+ only) and
+    // auto-DENIES with no dialog, dead-ending both photo flows on the
+    // cheap end of the friend cohort. PhotoManager.requestPermissionExtend
+    // handles every version and reports limited vs full.
+    Future<bool> requestPhotos() => photoLibrary.requestPermission();
     final ui = UiServices(
       dao: dao,
       analyzer: analyzer,
@@ -105,7 +111,7 @@ class AppServices {
       reports: reports,
       settings: _AppSettingsStore(settings, notifier),
       picker: _ShareIntakePicker(photoLibrary),
-      requestPhotoPermission: _requestPhotosPermission,
+      requestPhotoPermission: requestPhotos,
       thumbs: MealThumbResolver(dao: dao, library: photoLibrary),
       coverage: CoverageAuditor(
           library: photoLibrary,
@@ -151,11 +157,6 @@ class AppServices {
 
     return _instance = AppServices._(ui, pipeline, settings);
   }
-}
-
-Future<bool> _requestPhotosPermission() async {
-  final status = await Permission.photos.request();
-  return status.isGranted || status.isLimited;
 }
 
 /// Test seam for the adapter below: it is the ONLY production code that

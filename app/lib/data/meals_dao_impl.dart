@@ -508,19 +508,21 @@ ON CONFLICT(chat_id, date) DO UPDATE SET
   Future<bool> _importRowExists(
       DatabaseExecutor txn, String table, Map<String, Object?> row) async {
     final (where, args) = switch (table) {
-      // A meal is the same meal when the same photo was logged at the same
-      // clock time; photoless meals fall back to date+time+analysis.
-      'meals' => (
-          'chat_id = ? AND date = ? AND time = ? AND '
-              'IFNULL(image_hash, \'\') = ? AND analysis = ?',
-          [
-            row['chat_id'],
-            row['date'],
-            row['time'],
-            row['image_hash'] ?? '',
-            row['analysis'],
-          ]
-        ),
+      // A PHOTO meal's identity is its photo (chat+hash): editing its
+      // numbers must NOT make an older backup re-import it as a second
+      // meal. A PHOTOLESS meal has no such anchor, so it falls back to
+      // date+time+analysis — which is also what keeps two different
+      // same-minute text meals distinct.
+      'meals' => ((row['image_hash'] as String?)?.isNotEmpty ?? false)
+          ? (
+              'chat_id = ? AND image_hash = ?',
+              [row['chat_id'], row['image_hash']]
+            )
+          : (
+              'chat_id = ? AND date = ? AND time = ? AND '
+                  'IFNULL(image_hash, \'\') = \'\' AND analysis = ?',
+              [row['chat_id'], row['date'], row['time'], row['analysis']]
+            ),
       'photo_ingestions' => (
           'chat_id = ? AND image_hash = ?',
           [row['chat_id'], row['image_hash']]

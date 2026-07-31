@@ -79,9 +79,10 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
   /// on 2026-07-31.
   String? unavailableMessage(String body) => null;
 
-  /// Whether an in-place retry of a 503 can help. Overridden by
-  /// ServerAnalyzer, which knows "busy" from "already answered".
-  bool unavailableRetryInPlace(String body) => false;
+  /// The server's own verdict on a 503: true = busy (retry helps), false =
+  /// the run already answered (terminal), null = it did not say (an old
+  /// server, or a configuration refusal). Overridden by ServerAnalyzer.
+  bool? unavailableRetry(String body) => null;
   http.Request buildRequest(String key,
       {required String prompt, Uint8List? jpegBytes, required int maxTokens});
   String extractText(Map<String, dynamic> body);
@@ -169,11 +170,18 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
       if (resp.statusCode == 503) {
         final custom = unavailableMessage(resp.body);
         if (custom != null) {
-          // Transient at the OUTCOME level (the photo survives); whether an
-          // IN-PLACE retry helps is the server's call.
+          // Three cases, deliberately distinct:
+          //   true  → the CLI was BUSY: retry in place, photo survives.
+          //   false → the run HAPPENED and produced nothing usable:
+          //           TERMINAL, or the watcher re-spends a full CLI run on
+          //           this photo every single scan.
+          //   null  → no verdict (old server, or a config refusal like a
+          //           missing plan key): keep the photo, but do NOT spin —
+          //           seconds cannot add a plan key.
+          final verdict = unavailableRetry(resp.body);
           throw _ProviderException(custom,
-              transient: true,
-              retryInPlace: unavailableRetryInPlace(resp.body),
+              transient: verdict != false,
+              retryInPlace: verdict == true,
               verbatimMessage: true);
         }
       }
@@ -299,7 +307,11 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
       if (e.billing) {
         return KeyProbe(KeyProbeResult.outOfCredit, message: e.userMessage);
       }
-      if (e.quotaClass) {
+      // A transient transport failure (timeout, dropped connection) is NOT
+      // a rejected key — reporting "The key was not accepted" for a flaky
+      // network sends the user to regenerate a fine key. Only a genuine
+      // auth refusal rejects; everything transient is "try again".
+      if (e.quotaClass || (e.transient && !e.auth)) {
         return KeyProbe(KeyProbeResult.rateLimited, message: e.userMessage);
       }
       return KeyProbe(KeyProbeResult.rejected, message: e.userMessage);
@@ -595,16 +607,16 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
   }
 
   @override
-  bool unavailableRetryInPlace(String body) {
+  bool? unavailableRetry(String body) {
     try {
       final decoded = jsonDecode(body);
       if (decoded is Map && decoded['retry'] is bool) {
         return decoded['retry'] as bool;
       }
     } on FormatException {
-      // old server: keep the previous conservative behavior
+      // fall through
     }
-    return false;
+    return null; // old server / configuration refusal
   }
 
   /// The server runs a Claude CLI analysis (up to ~120 s, and up to ~240 s

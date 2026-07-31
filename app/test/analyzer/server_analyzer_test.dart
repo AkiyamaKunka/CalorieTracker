@@ -194,18 +194,26 @@ void main() {
     // every request 503ed and the app said only 'network or service
     // issue'. An hour of log archaeology later, this test.
     final s = await serverSettings();
+    var calls = 0;
     final analyzer = ServerAnalyzer(
       s,
       normalizer: (b) async => b,
-      client: MockClient((_) async => http.Response(
-          jsonEncode({
-            'error': 'claude_unavailable',
-            'reason': 'no key (GLM_PLAN_KEY)',
-          }),
-          503)),
+      sleep: (_) async {},
+      client: MockClient((_) async {
+        calls++;
+        return http.Response(
+            jsonEncode({
+              'error': 'claude_unavailable',
+              'reason': 'no key (GLM_PLAN_KEY)',
+            }),
+            503);
+      }),
     );
     final out = await analyzer.analyzePhoto(jpeg());
     expect(out.retryable, isTrue, reason: 'config is fixable; keep photos');
+    expect(calls, 1,
+        reason: 'a 503 with no retry verdict must NOT spin — seconds '
+            'cannot add a plan key');
     expect(out.error, contains('GLM_PLAN_KEY'),
         reason: 'the server said exactly what is missing — repeat it');
     // A bare 503 (busy CLI) keeps the generic transient message.
@@ -242,8 +250,11 @@ void main() {
             503);
       }),
     );
-    await terminal.analyzePhoto(jpeg());
+    final terminalOut = await terminal.analyzePhoto(jpeg());
     expect(calls, 1, reason: 'terminal 503 must not spend two more runs');
+    expect(terminalOut.retryable, isFalse,
+        reason: 'the run ALREADY answered — a watcher that keeps '
+            're-offering this photo re-spends a full CLI run every scan');
 
     calls = 0;
     final busy = ServerAnalyzer(

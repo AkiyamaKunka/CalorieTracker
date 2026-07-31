@@ -181,6 +181,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     'working API key is set above.')));
       }
       await widget.photoIntake?.start();
+      // A "selected photos" (limited) grant is a TRAP: the watcher can
+      // only ever see the photos picked in that one dialog, so a meal
+      // shot later is invisible forever — and the toggle used to turn on
+      // regardless, silently. Say so, with a path to fix it.
+      final lib = widget.photoLibrary;
+      if (lib != null && !await lib.hasFullAccess()) {
+        if (!mounted) return;
+        final open = widget.openSystemSettings;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            duration: const Duration(seconds: 8),
+            content: const Text(
+                'Only SELECTED photos are shared, so new food photos '
+                "won't be seen automatically. Grant access to ALL photos "
+                'for automatic logging.'),
+            action: open == null
+                ? null
+                : SnackBarAction(
+                    label: 'Fix', onPressed: () => open())));
+      }
       // Instant feedback on enable: sweep the lookback window right away
       // instead of waiting for the next change event / background run.
       // Only when analyses can actually succeed (key present, no quota
@@ -624,10 +643,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
           controller: _keyController,
           obscureText: true,
           autocorrect: false,
-          // Persist like the model/server-URL fields: the key used to be
-          // stored ONLY by a successful Validate (a button that no longer
-          // exists), so paste-key → switch tab silently configured NOTHING
-          // while the field still showed the key. Typing is the commit.
+          // Saves as you type — literally, so the welcome card's promise
+          // holds and a paste-then-switch-tab can never lose the key.
+          // (It used to persist only on a successful Validate, a button
+          // that no longer exists.) A trailing whitespace from a paste is
+          // trimmed on the model/tap-away commits below.
+          onChanged: (v) => widget.settings.update(apiKey: v.trim()),
           onSubmitted: (v) => widget.settings.update(apiKey: v.trim()),
           onTapOutside: (_) =>
               widget.settings.update(apiKey: _keyController.text.trim()),

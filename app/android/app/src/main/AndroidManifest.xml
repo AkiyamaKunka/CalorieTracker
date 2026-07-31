@@ -9,6 +9,14 @@
          external-storage read. WorkManager background scan needs no extra
          permission. -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
+    <!-- Android 14+ partial access: WITHOUT this, the "Select photos"
+         option grants a TEMPORARY full READ_MEDIA_IMAGES that reads as
+         authorized, so the app cannot tell it apart from a full grant and
+         the watcher silently sees only the picked photos. Declaring it
+         makes the limited grant persist as PermissionState.limited, which
+         the toggle now detects and warns about. -->
+    <uses-permission
+        android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED"/>
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32"/>

@@ -412,22 +412,24 @@ class GeminiAnalyzer implements AnalyzerService {
       );
       return const KeyProbe(KeyProbeResult.ok);
     } on GeminiException catch (e) {
-      if (e.message.startsWith('HTTP ')) {
-        switch (classifyGeminiError(e.message)) {
-          // Gemini's free tier has no balance to run out of; the daily cap
-          // is the equivalent "the key is fine, you cannot spend now".
-          case GeminiErrorClass.dailyQuotaExhausted:
-            return KeyProbe(KeyProbeResult.outOfCredit,
-                message: _pausedMessage());
-          case GeminiErrorClass.quotaRateLimit:
-            return KeyProbe(KeyProbeResult.rateLimited,
-                message: _userMessageFor(e.message));
-          default:
-            break;
-        }
+      switch (classifyGeminiError(e.message)) {
+        // Gemini's free tier has no balance to run out of; the daily cap
+        // is the equivalent "the key is fine, you cannot spend now".
+        case GeminiErrorClass.dailyQuotaExhausted:
+          return KeyProbe(KeyProbeResult.outOfCredit,
+              message: _pausedMessage());
+        case GeminiErrorClass.quotaRateLimit:
+        case GeminiErrorClass.networkService:
+          // A DEADLINE/CONNECTION failure is a network problem, not a
+          // rejected key — do not send the user to regenerate a fine key.
+          return KeyProbe(KeyProbeResult.rateLimited,
+              message: _userMessageFor(e.message));
+        case GeminiErrorClass.auth:
+        case GeminiErrorClass.modelError:
+        case GeminiErrorClass.unknown:
+          return KeyProbe(KeyProbeResult.rejected,
+              message: _userMessageFor(e.message));
       }
-      return KeyProbe(KeyProbeResult.rejected,
-          message: _userMessageFor(e.message));
     }
   }
 }
