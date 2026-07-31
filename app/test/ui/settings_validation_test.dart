@@ -15,6 +15,7 @@ Widget _wrap(Widget child) => MaterialApp(home: Scaffold(body: child));
 
 void main() {
   connectClaudeTests();
+  importExportTests();
 
   testWidgets('ONE test action: the key field has no separate Validate — '
       'it opens the diagnostics page', (tester) async {
@@ -404,5 +405,73 @@ void connectClaudeTests() {
       openUrl: (_) async => true,
     ));
     expect(find.byKey(const Key('connectClaudeButton')), findsNothing);
+  });
+}
+
+void importExportTests() {
+  testWidgets('import: a pasted export merges and reports what happened',
+      (tester) async {
+    tester.view.physicalSize = const Size(800, 3000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final dao = FakeDao();
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: FakeSettings(apiKey: 'k'),
+      analyzer: FakeAnalyzer(),
+      dao: dao,
+      requestPhotoPermission: () async => true,
+    )));
+    await tester.tap(find.byKey(const Key('importButton')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.byKey(const Key('importField')),
+        '{"format":"calorie_tracker_export","version":1,'
+        '"exported_at":"2026-07-30T10:00:00.000",'
+        '"tables":{"meals":[{"date":"2026-07-30"}]}}');
+    await tester.tap(find.byKey(const Key('importConfirm')));
+    await tester.pumpAndSettle();
+
+    expect(dao.imported, hasLength(1));
+    expect(find.textContaining('Imported 1 meal'), findsOneWidget);
+  });
+
+  testWidgets('import: a wrong file is REFUSED with a readable reason',
+      (tester) async {
+    tester.view.physicalSize = const Size(800, 3000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final dao = FakeDao();
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: FakeSettings(apiKey: 'k'),
+      analyzer: FakeAnalyzer(),
+      dao: dao,
+      requestPhotoPermission: () async => true,
+    )));
+    await tester.tap(find.byKey(const Key('importButton')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.byKey(const Key('importField')), 'my shopping list');
+    await tester.tap(find.byKey(const Key('importConfirm')));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('not JSON'), findsOneWidget);
+  });
+
+  testWidgets('import: cancelling writes nothing', (tester) async {
+    tester.view.physicalSize = const Size(800, 3000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final dao = FakeDao();
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: FakeSettings(apiKey: 'k'),
+      analyzer: FakeAnalyzer(),
+      dao: dao,
+      requestPhotoPermission: () async => true,
+    )));
+    await tester.tap(find.byKey(const Key('importButton')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(dao.imported, isEmpty);
   });
 }

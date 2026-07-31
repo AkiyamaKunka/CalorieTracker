@@ -115,6 +115,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late final TextEditingController _modelController;
   late final TextEditingController _profileController;
   late final TextEditingController _serverUrlController;
+  final TextEditingController _importController = TextEditingController();
   bool _customModel = false;
   late int _lookbackDays;
   late String _reportTime;
@@ -143,6 +144,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _modelController.dispose();
     _profileController.dispose();
     _serverUrlController.dispose();
+    _importController.dispose();
     super.dispose();
   }
 
@@ -215,29 +217,38 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// that is not a CalorieTracker export, so a mis-paste is a message,
   /// never a corrupted log.
   Future<void> _import() async {
-    final controller = TextEditingController();
+    // The controller is owned by the STATE, not the dialog closure: a
+    // locally-created one gets disposed while the dialog's exit animation
+    // is still rebuilding the field ("A TextEditingController was used
+    // after being disposed" — caught by the new test).
+    _importController.clear();
     final go = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Import exported data'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-                'Paste the contents of an exported JSON file. Existing '
-                'meals are kept; only new ones are added.'),
-            const SizedBox(height: 12),
-            TextField(
-              key: const Key('importField'),
-              controller: controller,
-              maxLines: 4,
-              autofocus: true,
-              decoration: const InputDecoration(
-                hintText: '{"format":"calorie_tracker_export",…',
-                border: OutlineInputBorder(),
+        // Scrollable + bounded: an AlertDialog's content is laid out
+        // against the available height, and an unbounded Column here
+        // overflowed by ~97000 px on a tall viewport.
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                  'Paste the contents of an exported JSON file. Existing '
+                  'meals are kept; only new ones are added.'),
+              const SizedBox(height: 12),
+              TextField(
+                key: const Key('importField'),
+                controller: _importController,
+                maxLines: 4,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  hintText: '{"format":"calorie_tracker_export",…',
+                  border: OutlineInputBorder(),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -250,8 +261,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ],
       ),
     );
-    final payload = controller.text;
-    controller.dispose();
+    final payload = _importController.text;
     if (go != true || !mounted) return;
     setState(() => _importing = true);
     try {

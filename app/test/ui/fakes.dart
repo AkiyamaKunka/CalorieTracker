@@ -6,6 +6,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:calorie_tracker/core/contracts.dart';
+import 'package:calorie_tracker/ui/photo_pipeline.dart';
 import 'package:calorie_tracker/ui/services.dart';
 
 import '../support/fake_meals_dao.dart';
@@ -269,6 +270,7 @@ UiServices makeServices({
   FakePicker? picker,
   FakeIntake? intake,
   bool grantPhotoPermission = true,
+  Future<PhotoOutcome> Function(IntakePhoto photo)? processPhoto,
 }) =>
     UiServices(
       dao: dao ?? FakeDao(),
@@ -279,4 +281,5 @@ UiServices makeServices({
       photoIntake: intake ?? FakeIntake(),
       reports: FakeReports(),
       requestPhotoPermission: () async => grantPhotoPermission,
+      processPhoto: processPhoto,
     );
