@@ -478,9 +478,18 @@ ON CONFLICT(chat_id, date) DO UPDATE SET
             continue;
           }
           try {
-            await txn.insert(table, row,
+            // OR IGNORE swallows EVERY constraint violation (NOT NULL
+            // included) and returns 0 instead of throwing — counting
+            // unconditionally would report rows that never landed, and
+            // this summary is the user's only evidence the transfer
+            // worked.
+            final rowId = await txn.insert(table, row,
                 conflictAlgorithm: ConflictAlgorithm.ignore);
-            a++;
+            if (rowId > 0) {
+              a++;
+            } else {
+              s++;
+            }
           } catch (_) {
             // A row whose shape does not fit this schema version is
             // skipped, never fatal: a partial import beats none.
@@ -520,9 +529,33 @@ ON CONFLICT(chat_id, date) DO UPDATE SET
           'chat_id = ? AND date = ?',
           [row['chat_id'], row['date']]
         ),
+      // NOT date alone: activities allows many rows per day (UNIQUE is
+      // chat_id+source+external_id, and manual rows carry a NULL
+      // external_id so each save inserts). Keying on the day would have
+      // collapsed a morning walk and an evening run into one.
+      // NOT date alone: activities allows many rows per day (UNIQUE is
+      // chat_id+source+external_id, and manual rows carry a NULL
+      // external_id so each save inserts). Keying on the day would have
+      // collapsed a morning walk and an evening run into one. logged_at
+      // is the per-row stamp that makes two same-day manual rows distinct.
       'activities' => (
-          'chat_id = ? AND date = ?',
-          [row['chat_id'], row['date']]
+          'chat_id = ? AND date = ? AND IFNULL(source, \'\') = ? AND '
+              'IFNULL(external_id, \'\') = ? AND '
+              'IFNULL(logged_at, \'\') = ? AND '
+              'IFNULL(active_calories, -1) = ? AND '
+              'IFNULL(distance_km, -1) = ? AND IFNULL(raw, \'\') = ?',
+          [
+            row['chat_id'],
+            row['date'],
+            row['source'] ?? '',
+            row['external_id'] ?? '',
+            row['logged_at'] ?? '',
+            // The NUMBERS too: two manual saves in the same second share a
+            // logged_at, and a walk is not a run.
+            row['active_calories'] ?? -1,
+            row['distance_km'] ?? -1,
+            row['raw'] ?? '',
+          ]
         ),
       'fitness_profile' => ('chat_id = ?', [row['chat_id']]),
       'workouts' => (

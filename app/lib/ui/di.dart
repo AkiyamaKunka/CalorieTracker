@@ -158,6 +158,16 @@ Future<bool> _requestPhotosPermission() async {
   return status.isGranted || status.isLimited;
 }
 
+/// Test seam for the adapter below: it is the ONLY production code that
+/// maps the UI's provider-scoped apiKey/model onto AppSettings' seven
+/// slots, and every widget test uses a fake that merely SIMULATES that
+/// routing — so a real mis-route would have stayed green (review
+/// 2026-07-31). [notifier] is optional here; the daily-report reschedule
+/// is exercised by the report suite.
+SettingsStore createSettingsStore(AppSettings settings,
+        {ReportNotifier? notifier}) =>
+    _AppSettingsStore(settings, notifier ?? ReportNotifier(dailyBody: null));
+
 /// Adapts the persistent AppSettings onto the UI's SettingsStore, keeping
 /// the background job and the daily-report schedule in lockstep with edits.
 class _AppSettingsStore implements SettingsStore {

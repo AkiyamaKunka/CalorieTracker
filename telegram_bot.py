@@ -6014,6 +6014,14 @@ def main():
             # their own stamps), so the clock stays fresh while healthy.
             _stamp_progress()
             maybe_warn_stale_android_heartbeat(bot)
+            # Sweep an abandoned `claude setup-token` consent: the app has
+            # no /cancel call, so "tapped Connect, closed the sheet" would
+            # otherwise leave a full Node process holding a PTY fd forever
+            # on this 1 GB VM. The reaper existed but nothing called it.
+            try:
+                claude_auth.reap_expired_session()
+            except Exception:
+                pass
 
             for update in updates:
                 update_id = update.get("update_id")

@@ -141,6 +141,48 @@ void main() {
     expect(rows.single['status'], 'saved');
   });
 
+  test('two activities on the SAME DAY both survive an import', () async {
+    // The dedup key was date-only at first, which would have collapsed a
+    // morning walk and an evening run into one row (review 2026-07-31).
+    await daoA.saveActivity('2026-07-30', steps: 3000, activeCalories: 120);
+    await daoA.saveActivity('2026-07-30', steps: 9000, activeCalories: 480);
+    final summary = await daoB.importJson(await daoA.exportJson());
+    expect(summary.added['activities'], 2);
+    final rows = await dbB.query('activities');
+    expect(rows, hasLength(2));
+  });
+
+  test('a row rejected by SQLite counts as skipped, never as added',
+      () async {
+    // INSERT OR IGNORE swallows constraint violations and returns 0
+    // instead of throwing, so an unconditional counter reported rows that
+    // never landed — and this summary is the user's only evidence the
+    // transfer worked.
+    final payload = jsonEncode({
+      'format': kExportFormat,
+      'version': 1,
+      'tables': {
+        'meals': [
+          // NOT NULL violations: no date/time/timestamp/analysis.
+          {'chat_id': 1},
+          {
+            'chat_id': 1,
+            'date': '2026-07-30',
+            'time': '01:00 PM',
+            'timestamp': '2026-07-30T13:00:00.000',
+            'source': 'app_photo',
+            'image_hash': 'good',
+            'analysis': '{"is_food":true,"total_calories":300}',
+          },
+        ]
+      },
+    });
+    final summary = await daoB.importJson(payload);
+    expect(summary.added['meals'], 1);
+    expect(summary.skipped['meals'], 1);
+    expect(await daoB.mealsBetween('2026-07-01', '2026-07-31'), hasLength(1));
+  });
+
   group('refusal', () {
     test('non-JSON, wrong format tag, and missing tables all throw',
         () async {
