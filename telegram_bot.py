@@ -5999,7 +5999,25 @@ def main():
     # Start Flask in a background thread
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False), daemon=True).start()
     log.info("🚀 Flask REST API started on port 5000")
-    
+
+    # API-ONLY mode: the phone app's /api/* endpoints and the Telegram
+    # chat bot share ONE process, so `systemctl stop` would take the app's
+    # photo analysis down with the chat interface. TELEGRAM_POLLING=off
+    # retires the chat half while the app keeps working. The loop still
+    # stamps progress: the watchdog kills a process whose stamp goes stale
+    # (WATCHDOG_HANG_THRESHOLD_SECONDS), and "idle on purpose" must not
+    # look like "hung".
+    if parse_boolish(os.environ.get("TELEGRAM_POLLING", "1")) is False:
+        log.info("Telegram polling is OFF (TELEGRAM_POLLING=0) — serving "
+                 "the phone API only. Chat commands will not be answered.")
+        try:
+            while True:
+                _stamp_progress()
+                time.sleep(30)
+        except KeyboardInterrupt:
+            log.info("Shutting down.")
+            return
+
     log.info("Bot is running! Listening for corrections and commands.")
     log.info("Press Ctrl+C to stop.\n")
 
