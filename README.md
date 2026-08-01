@@ -422,8 +422,11 @@ Two rules matter more than style here:
 
 1. **Never commit a credential.** `scripts/check_public_safety.sh` runs at
    HEAD by default and scans the full history with
-   `PUBLIC_SAFETY_SCAN_HISTORY=1`. Run the history scan before pushing
-   anywhere public — a key removed in a later commit is still published.
+   `PUBLIC_SAFETY_SCAN_HISTORY=1`. Run the history scan before pushing —
+   this repo is public, and a key removed in a later commit is still
+   published. (The repo's own pre-publication story: three credentials
+   survived a "scrub" commit in history and were caught by a 37-agent
+   audit; the published history is a `git filter-repo` rewrite.)
 2. **Server and app must stay in parity.** If you change a prompt or a
    shared constant, change it in `shared/`, regenerate with
    `python3 scripts/sync_shared.py`, and run both suites.
