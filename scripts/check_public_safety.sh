@@ -23,10 +23,10 @@ fi
 
 secret_matches=$(
   git grep -n -I -E \
-    '(termux-super-secret|secret-android-key|136\.112\.|8675[0-9]+|TELEGRAM_BOT_TOKEN</key>|AIza[0-9A-Za-z_-]{20,}|[0-9]{8,}:[A-Za-z0-9_-]{20,})' \
+    '(termux-super-secret|secret-android-key|136\.112\.|8675[0-9]+|TELEGRAM_BOT_TOKEN</key>|AIza[0-9A-Za-z_-]{20,}|[0-9]{8,}:[A-Za-z0-9_-]{20,}|PUSHPLUS_TOKEN[\"'"'"' =:]+[0-9a-f]{32}|sk-ant-(api|oat)[0-9A-Za-z_-]{20,}|sk-proj-[0-9A-Za-z_-]{20,}|sk-ws-[0-9A-Za-z_-]{20,})' \
     -- . ':!*.jpg' ':!*.jpeg' ':!*.png' ':!*.heic' ':!*.heif' \
     ':!scripts/check_public_safety.sh' \
-    2>/dev/null || true
+    2>/dev/null | grep -vE 'FAKE_TOKEN|oat01-NEW|EXAMPLE|placeholder' || true
 )
 
 if [ -n "$secret_matches" ]; then
@@ -43,8 +43,12 @@ fi
 if [ "${PUBLIC_SAFETY_SCAN_HISTORY:-}" = "1" ]; then
   history_matches=$(
     git rev-list --all | while read -r commit; do
-      git grep -I -l -E \
-        '(AIza[0-9A-Za-z_-]{30,}|sk-ant-api[0-9A-Za-z_-]{20,}|sk-proj-[0-9A-Za-z_-]{20,}|[0-9]{9,10}:AA[A-Za-z0-9_-]{30,})' \
+      # NO -I: the initial commit's __pycache__/*.pyc blobs provably
+      # contain the Gemini, Telegram and PushPlus secrets as string
+      # constants, and -I (skip binaries) walked straight past them. Any
+      # future .pyc, .db or bundled APK would hide a key the same way.
+      git grep -l -E \
+        '(AIza[0-9A-Za-z_-]{30,}|sk-ant-api[0-9A-Za-z_-]{20,}|sk-ant-oat[0-9A-Za-z_-]{20,}|sk-proj-[0-9A-Za-z_-]{20,}|sk-[A-Za-z0-9]{32,}|[0-9]{9,10}:AA[A-Za-z0-9_-]{30,}|PUSHPLUS_TOKEN[\"'"'"' =:]+[0-9a-f]{32})' \
         "$commit" -- . ':!tests/*' ':!scripts/check_public_safety.sh' \
         2>/dev/null | sed "s|^|$commit |"
     done
