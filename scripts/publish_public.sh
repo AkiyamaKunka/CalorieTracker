@@ -38,7 +38,11 @@ and a Flutter app (iOS + Android) that runs the same pipeline on-device.
 Published with a fresh history on purpose — see scripts/publish_public.sh."
 
 echo "==> Verifying the NEW history has no secrets"
-PUBLIC_SAFETY_SCAN_HISTORY=1 bash scripts/check_public_safety.sh
+# HEAD, not --all: the point of the orphan commit is that main's dirty
+# ancestry is not reachable from it. Scanning every ref would always fail
+# and would tell us nothing about what is being pushed.
+PUBLIC_SAFETY_SCAN_HISTORY=1 PUBLIC_SAFETY_HISTORY_REFS=HEAD \
+  bash scripts/check_public_safety.sh
 
 echo "==> Pushing to $REMOTE/main"
 git push --force "$REMOTE" "$TMP_BRANCH:main"

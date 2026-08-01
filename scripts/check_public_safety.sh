@@ -41,8 +41,13 @@ fi
 # is opt-in (PUBLIC_SAFETY_SCAN_HISTORY=1) because a full-history grep is
 # slow; run it before ANY push to a public remote.
 if [ "${PUBLIC_SAFETY_SCAN_HISTORY:-}" = "1" ]; then
+  # Which history to walk. Default --all (every ref: "is this repo safe
+  # to publish?"). The publish script narrows it to the orphan branch it
+  # just built, because that branch's history is what actually ships —
+  # main's dirty ancestry is deliberately NOT part of it.
+  history_refs="${PUBLIC_SAFETY_HISTORY_REFS:---all}"
   history_matches=$(
-    git rev-list --all | while read -r commit; do
+    git rev-list $history_refs | while read -r commit; do
       # NO -I: the initial commit's __pycache__/*.pyc blobs provably
       # contain the Gemini, Telegram and PushPlus secrets as string
       # constants, and -I (skip binaries) walked straight past them. Any
