@@ -114,6 +114,24 @@ abstract class MealsDao {
   Future<void> saveActivity(String date,
       {num? activeCalories, int? steps, double? distanceKm});
   Future<String> exportJson(); // full data export (spec §8)
+
+  /// Merge a previously exported envelope into THIS database (§9 app-only).
+  /// Never destructive: existing rows win, new rows are added, and the
+  /// result reports what happened. Throws [FormatException] on a payload
+  /// that is not a CalorieTracker export.
+  Future<ImportSummary> importJson(String json);
+}
+
+/// Outcome of [MealsDao.importJson] — per-table added/skipped counts so the
+/// UI can say "142 meals added, 3 already here" instead of "done".
+class ImportSummary {
+  const ImportSummary(this.added, this.skipped, {this.exportedAt});
+  final Map<String, int> added;
+  final Map<String, int> skipped;
+  final String? exportedAt;
+
+  int get totalAdded => added.values.fold(0, (a, b) => a + b);
+  int get totalSkipped => skipped.values.fold(0, (a, b) => a + b);
 }
 
 /// Result of one photo analysis (spec §3).
@@ -148,6 +166,40 @@ abstract class AnalyzerService {
   Future<AnalysisOutcome> analyzePhoto(Uint8List originalBytes);
   Future<Map<String, dynamic>?> textIntent(String prompt); // raw JSON or null
   Future<String?> validateKey(String apiKey); // null = OK, else error text
+
+  /// Richer probe for the diagnostics page. [validateKey] deliberately
+  /// ACCEPTS a quota-class reply (it proves the key authenticated), which
+  /// makes "key fine, account empty" indistinguishable from "all good" —
+  /// so diagnostics could never name the out-of-credit case it promises
+  /// to name. Default: derive from validateKey so third-party/fake
+  /// implementations keep working.
+  Future<KeyProbe> probeKey(String apiKey) async {
+    final error = await validateKey(apiKey);
+    return error == null
+        ? const KeyProbe(KeyProbeResult.ok)
+        : KeyProbe(KeyProbeResult.rejected, message: error);
+  }
+}
+
+/// What a [AnalyzerService.probeKey] learned about the credential.
+enum KeyProbeResult {
+  ok,
+
+  /// The key authenticated but the account cannot pay — a recharge (or a
+  /// free-tier provider) is the fix, NOT a new key.
+  outOfCredit,
+
+  /// The key authenticated but the provider is rate-limiting right now.
+  rateLimited,
+
+  /// The provider refused the credential, or the request could not be made.
+  rejected,
+}
+
+class KeyProbe {
+  const KeyProbe(this.result, {this.message});
+  final KeyProbeResult result;
+  final String? message;
 }
 
 /// One executed NL action's user-visible result (spec §4).

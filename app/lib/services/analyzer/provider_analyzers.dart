@@ -64,6 +64,25 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
   String? get apiKey;
   String get model;
   String get providerLabel;
+
+  /// Verbatim message for an HTTP 404, or null for the generic bucket.
+  /// The compat providers override this: a 404 there almost always means
+  /// a wrong / retired / not-yet-activated MODEL id, not a bad key — and
+  /// the generic message left users regenerating a key that worked.
+  String? get notFoundMessage => null;
+
+  /// Verbatim message for an HTTP 503, built from the response [body];
+  /// null for the generic transient bucket. ServerAnalyzer overrides this:
+  /// its 503 carries a `reason` (busy CLI vs "no key (GLM_PLAN_KEY)") that
+  /// the generic 'network or service issue' message hid — a refused
+  /// backend looked identical to a hiccup and cost an hour of debugging
+  /// on 2026-07-31.
+  String? unavailableMessage(String body) => null;
+
+  /// The server's own verdict on a 503: true = busy (retry helps), false =
+  /// the run already answered (terminal), null = it did not say (an old
+  /// server, or a configuration refusal). Overridden by ServerAnalyzer.
+  bool? unavailableRetry(String body) => null;
   http.Request buildRequest(String key,
       {required String prompt, Uint8List? jpegBytes, required int maxTokens});
   String extractText(Map<String, dynamic> body);
@@ -91,37 +110,90 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
     }
     final req = buildRequest(key,
         prompt: prompt, jpegBytes: jpegBytes, maxTokens: maxTokens);
-    http.StreamedResponse streamed;
+    // The BODY read must sit inside the same timeout and the same catch as
+    // the send: a connection dropped after headers throws a raw
+    // ClientException that every caller's `on _ProviderException` clause
+    // would leak (breaking the "AnalyzerService never throws" contract),
+    // and a stalled body — routine on flaky mainland networks and GLM's
+    // free tier — would hang FOREVER, freezing the serialized photo
+    // pipeline behind it. One deadline covers headers + body.
+    final http.Response resp;
     try {
-      streamed = await client.send(req).timeout(deadline);
+      resp = await client
+          .send(req)
+          .then(http.Response.fromStream)
+          .timeout(deadline);
     } on TimeoutException {
       throw const _ProviderException('client deadline hit', transient: true);
     } catch (e) {
       throw _ProviderException('connection error: $e', transient: true);
     }
-    final resp = await http.Response.fromStream(streamed);
-    if (resp.statusCode == 401 || resp.statusCode == 403) {
-      throw const _ProviderException('key rejected',
-          transient: false, auth: true);
-    }
     if (resp.statusCode != 200) {
-      // OpenAI overloads 429 for BOTH transient rate limits and exhausted
-      // billing (insufficient_quota) — the latter needs the user, not a
-      // retry message.
-      final billingDead = resp.statusCode == 429 &&
-          resp.body.contains('insufficient_quota');
-      throw _ProviderException(
-          billingDead
-              ? 'Provider credits exhausted — check your '
-                  '$providerLabel billing.'
-              : 'HTTP ${resp.statusCode}',
+      // Exhausted-billing signatures, checked BEFORE the auth
+      // classification because the providers disagree on the status code:
+      //   OpenAI    429 insufficient_quota
+      //   Zhipu GLM 429 code "1113" (余额不足 — also NOT a rate limit)
+      //   Ark/Doubao 403 AccountOverdueError — a 403 that is NOT auth;
+      //     treating it as "key rejected" burned the photo non-retryably
+      //     and told the user to fix a key that works (review 2026-07-29)
+      //   DashScope 400 Arrearage — a 400 that is NOT a client bug
+      //   Anthropic 400 "credit balance is too low" — likewise
+      // All mean "the key authenticated but the account needs money":
+      // transient (the photo stays eligible; a recharge fixes it) and
+      // quota-classed (validateKey accepts — the key itself is proven).
+      final body = resp.body;
+      final billingDead = (resp.statusCode == 429 &&
+              (body.contains('insufficient_quota') ||
+                  body.contains('"1113"'))) ||
+          (resp.statusCode == 403 && body.contains('AccountOverdue')) ||
+          (resp.statusCode == 400 &&
+              (body.contains('Arrearage') ||
+                  body.contains('credit balance is too low')));
+      if (billingDead) {
+        throw _ProviderException(
+            'Provider balance or credits exhausted — check your '
+            '$providerLabel billing.',
+            transient: true,
+            quotaClass: true,
+            billing: true,
+            verbatimMessage: true);
+      }
+      if (resp.statusCode == 401 || resp.statusCode == 403) {
+        throw const _ProviderException('key rejected',
+            transient: false, auth: true);
+      }
+      final notFound = notFoundMessage;
+      if (resp.statusCode == 404 && notFound != null) {
+        throw _ProviderException(notFound,
+            transient: false, verbatimMessage: true);
+      }
+      if (resp.statusCode == 503) {
+        final custom = unavailableMessage(resp.body);
+        if (custom != null) {
+          // Three cases, deliberately distinct:
+          //   true  → the CLI was BUSY: retry in place, photo survives.
+          //   false → the run HAPPENED and produced nothing usable:
+          //           TERMINAL, or the watcher re-spends a full CLI run on
+          //           this photo every single scan.
+          //   null  → no verdict (old server, or a config refusal like a
+          //           missing plan key): keep the photo, but do NOT spin —
+          //           seconds cannot add a plan key.
+          final verdict = unavailableRetry(resp.body);
+          throw _ProviderException(custom,
+              transient: verdict != false,
+              retryInPlace: verdict == true,
+              verbatimMessage: true);
+        }
+      }
+      throw _ProviderException('HTTP ${resp.statusCode}',
           transient: _isTransientStatus(resp.statusCode),
-          quotaClass: resp.statusCode == 429,
-          verbatimMessage: billingDead);
+          quotaClass: resp.statusCode == 429);
     }
     if (!extract) return '';
     try {
       return extractText(jsonDecode(resp.body) as Map<String, dynamic>);
+    } on _ProviderException {
+      rethrow; // extractText may classify precisely — keep its message
     } catch (_) {
       throw const _ProviderException('unexpected response shape',
           transient: false);
@@ -222,6 +294,29 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
       return e.userMessage;
     }
   }
+
+  @override
+  Future<KeyProbe> probeKey(String apiKey) async {
+    try {
+      await _post(
+          prompt: 'ping', apiKeyOverride: apiKey, maxTokens: 1, extract: false);
+      return const KeyProbe(KeyProbeResult.ok);
+    } on _ProviderException catch (e) {
+      // The distinction validateKey CANNOT make: both of these accept the
+      // key, but only one is a "wait it out" situation.
+      if (e.billing) {
+        return KeyProbe(KeyProbeResult.outOfCredit, message: e.userMessage);
+      }
+      // A transient transport failure (timeout, dropped connection) is NOT
+      // a rejected key — reporting "The key was not accepted" for a flaky
+      // network sends the user to regenerate a fine key. Only a genuine
+      // auth refusal rejects; everything transient is "try again".
+      if (e.quotaClass || (e.transient && !e.auth)) {
+        return KeyProbe(KeyProbeResult.rateLimited, message: e.userMessage);
+      }
+      return KeyProbe(KeyProbeResult.rejected, message: e.userMessage);
+    }
+  }
 }
 
 class _ProviderException implements Exception {
@@ -229,12 +324,18 @@ class _ProviderException implements Exception {
       {required this.transient,
       this.auth = false,
       this.quotaClass = false,
+      this.billing = false,
       this.retryInPlace = true,
       this.verbatimMessage = false});
   final String message;
   final bool transient;
   final bool auth;
   final bool quotaClass;
+
+  /// The key authenticated but the ACCOUNT cannot pay. A subset of
+  /// [quotaClass] (both accept the key) with a completely different
+  /// remedy: recharge, not wait.
+  final bool billing;
 
   /// False for conditions that cannot change within this call (missing
   /// key): still retryable at the OUTCOME level, but in-place sleeps are
@@ -301,6 +402,97 @@ class OpenAiAnalyzer extends _HttpVisionAnalyzer {
         'max_completion_tokens': maxTokens,
       });
     return req;
+  }
+
+  @override
+  String extractText(Map<String, dynamic> body) =>
+      ((body['choices'] as List).first as Map)['message']['content'] as String;
+}
+
+/// Any OpenAI-compatible chat-completions vision backend, parameterized by
+/// endpoint. This is how the mainland-China providers (Alibaba Qwen,
+/// ByteDance Doubao, Zhipu GLM — all of which expose OpenAI-compatible
+/// APIs) ride the exact request/retry/coercion contract OpenAI already
+/// gets, without three copies of the class.
+///
+/// Differences from [OpenAiAnalyzer] kept deliberately:
+/// - `max_tokens`, not `max_completion_tokens`: the compat layers accept
+///   the classic field; several reject the newer one with 400.
+/// - `response_format` json_object only when [supportsJsonMode] — Zhipu's
+///   API reference marks the field TEXT-models-only ("仅文本模型支持此字段"),
+///   so vision calls there must rely on the prompt + fence-stripping parse.
+/// - [extraBody] for provider extension fields — Doubao and GLM vision
+///   models THINK by default; `thinking: {type: disabled}` cuts the cost
+///   and latency of a fixed-schema extraction task (researched 2026-07-29).
+class OpenAiCompatAnalyzer extends _HttpVisionAnalyzer {
+  OpenAiCompatAnalyzer(
+    super.settings, {
+    required this.endpoint,
+    required this.label,
+    required this.keyOf,
+    required this.modelOf,
+    this.supportsJsonMode = true,
+    this.extraBody = const {},
+    this.notFoundHint,
+    super.client,
+    super.sleep,
+    super.normalizer,
+  });
+
+  final Uri endpoint;
+  final String label;
+  final String? Function(AppSettings) keyOf;
+  final String Function(AppSettings) modelOf;
+  final bool supportsJsonMode;
+  final Map<String, Object?> extraBody;
+
+  /// Per-provider HTTP-404 explanation (see [notFoundMessage]).
+  final String? notFoundHint;
+
+  @override
+  String? get apiKey => keyOf(settings);
+  @override
+  String get model => modelOf(settings);
+  @override
+  String get providerLabel => label;
+  @override
+  String? get notFoundMessage => notFoundHint;
+
+  @override
+  http.Request buildRequest(String key,
+      {required String prompt, Uint8List? jpegBytes, required int maxTokens}) {
+    final content = <Map<String, Object?>>[
+      {'type': 'text', 'text': prompt},
+      if (jpegBytes != null)
+        {
+          'type': 'image_url',
+          'image_url': {
+            'url': 'data:image/jpeg;base64,${base64Encode(jpegBytes)}'
+          }
+        },
+    ];
+    // The model field is free text: a user-typed *thinking* model id
+    // (doubao-seed-*-thinking-*, glm-4.1v-thinking-*) REQUIRES thinking,
+    // and sending {type: disabled} to one is a hard 400 on every call.
+    final extras = Map<String, Object?>.of(extraBody);
+    if (model.contains('thinking')) extras.remove('thinking');
+    return http.Request('POST', endpoint)
+      ..headers['Authorization'] = 'Bearer $key'
+      ..headers['Content-Type'] = 'application/json'
+      // extras spread FIRST: on a key collision the computed core fields
+      // must win, or a config entry could silently clobber model/messages
+      // or validateKey's 1-token cap (jsonEncode keeps the LAST value —
+      // no error would ever surface).
+      ..body = jsonEncode({
+        ...extras,
+        'model': model,
+        'messages': [
+          {'role': 'user', 'content': content}
+        ],
+        if (supportsJsonMode && jpegBytes != null)
+          'response_format': {'type': 'json_object'},
+        'max_tokens': maxTokens,
+      });
   }
 
   @override
@@ -393,6 +585,40 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
   @override
   String get providerLabel => 'server';
 
+  @override
+  String? unavailableMessage(String body) {
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map) {
+        final reason = decoded['reason'];
+        if (reason is String && reason.isNotEmpty) {
+          // retry:true (busy CLI) — seconds fix it, so let the normal
+          // in-place retry run. Anything else is terminal for this photo:
+          // the run HAPPENED and produced nothing usable, and three more
+          // 120 s CLI runs would spend the subscription for the same
+          // answer (review 2026-07-31).
+          return 'The server cannot analyze right now: $reason.';
+        }
+      }
+    } on FormatException {
+      // fall through to the generic transient message
+    }
+    return null;
+  }
+
+  @override
+  bool? unavailableRetry(String body) {
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map && decoded['retry'] is bool) {
+        return decoded['retry'] as bool;
+      }
+    } on FormatException {
+      // fall through
+    }
+    return null; // old server / configuration refusal
+  }
+
   /// The server runs a Claude CLI analysis (up to ~120 s, and up to ~240 s
   /// across its internal stream→file fallback) behind a synchronous Flask
   /// handler, so the 90 s API default would abandon work that is still
@@ -431,8 +657,12 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
           ? {
               'image_b64': base64Encode(jpegBytes),
               'dietary_profile': settings.dietaryProfile ?? '',
+              // Whose subscription pays on the server: 'claude' (default),
+              // 'glm' (coding plan) or 'doubao' (agent plan). The plan
+              // keys live in the SERVER's .env — never on the phone.
+              'backend': settings.serverBackend,
             }
-          : {'prompt': prompt});
+          : {'prompt': prompt, 'backend': settings.serverBackend});
   }
 
   @override
@@ -441,6 +671,22 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
     // layer wants TEXT to parseAiJson, so hand the payload back as JSON —
     // that keeps every downstream rule (coerceIsFood, bare-array handling)
     // identical to the direct-API providers.
+    //
+    // analyzed_by is the payer receipt: a pre-upgrade server IGNORES the
+    // request's backend field, answers analyzed_by:'claude', and would
+    // silently spend the Claude plan forever while the user believes GLM
+    // or Doubao is paying. Refuse the mismatch loudly — permanent, since
+    // only a server update fixes it (a retry would spend the WRONG plan
+    // again and discard the result again).
+    final by = body['analyzed_by'];
+    if (by is String && by.isNotEmpty && by != settings.serverBackend) {
+      throw _ProviderException(
+          'The server analyzed with "$by", not the selected '
+          '"${settings.serverBackend}" — update the server so it '
+          'understands backend selection.',
+          transient: false,
+          verbatimMessage: true);
+    }
     final payload = body['analysis'] ?? body['result'];
     if (payload == null) throw const FormatException('no payload');
     return jsonEncode(payload);
@@ -497,6 +743,28 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
     }
   }
 
+  /// The server's probe is its FREE /api/auth_check — never the inherited
+  /// one. The base probeKey sends a 'ping' prompt, which for this provider
+  /// means POST /api/text_intent: a full CLI run under the owner's
+  /// subscription (up to the 5-minute deadline) whose prose reply then
+  /// fails the JSON contract, so a perfectly good setup was reported as
+  /// "The key was not accepted" — and the readiness verdicts this class
+  /// exists to produce were lost (regression caught 2026-07-31).
+  @override
+  Future<KeyProbe> probeKey(String apiKey) async {
+    final error = await validateKey(apiKey);
+    if (error == null) return const KeyProbe(KeyProbeResult.ok);
+    // "backend not ready" / "predates backend selection" are SERVER-side
+    // configuration facts, not a rejected upload key: the key reached the
+    // server and was accepted. Rate-limited is the closest non-rejecting
+    // class, and it carries the verbatim message.
+    final serverConfigured =
+        error.contains('not ready') || error.contains('update the server');
+    return KeyProbe(
+        serverConfigured ? KeyProbeResult.rateLimited : KeyProbeResult.rejected,
+        message: error);
+  }
+
   /// /api/auth_check proves "address reachable + key accepted" with no side
   /// effects and no CLI run. Deliberately NOT /ping: that is the Termux
   /// watcher's liveness channel, and stamping it from here would forge
@@ -513,9 +781,47 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
       ..headers['X-Client-Platform'] = 'app'
       ..body = '{}';
     try {
-      final streamed = await client.send(req).timeout(deadline);
-      final resp = await http.Response.fromStream(streamed);
-      if (resp.statusCode == 200) return null;
+      // Body read inside the timeout, as in _post — a stalled body would
+      // otherwise hang the Test-connection button forever.
+      final resp = await client
+          .send(req)
+          .then(http.Response.fromStream)
+          .timeout(deadline);
+      if (resp.statusCode == 200) {
+        // The server reports per-backend readiness — surface a chosen
+        // backend whose plan key is missing NOW, at test time, instead of
+        // as a 503 on tonight's dinner photo. `is`-checks, not casts: a
+        // JSON-but-not-object body must not fall into the generic catch
+        // and lie "could not reach" about a server that answered.
+        final backend = settings.serverBackend;
+        if (backend != 'claude') {
+          Object? decoded;
+          try {
+            decoded = jsonDecode(resp.body);
+          } on FormatException {
+            return null; // non-JSON 200 (proxy page?) — nothing to infer
+          }
+          if (decoded is Map) {
+            final backends = decoded['backends'];
+            if (backends is Map) {
+              final status = backends[backend]?.toString();
+              if (status != null && status != 'ready') {
+                return 'Server reachable, but its $backend backend is not '
+                    'ready: $status.';
+              }
+            } else {
+              // A real auth_check reply WITHOUT a backends map is the
+              // pre-upgrade server — which ignores the backend field and
+              // silently analyzes on the CLAUDE plan. The user chose a
+              // different payer; say so here, not never.
+              return 'Server reachable, but it predates backend selection '
+                  '— update the server, or analyses will use the Claude '
+                  'plan instead of $backend.';
+            }
+          }
+        }
+        return null;
+      }
       if (resp.statusCode == 401 || resp.statusCode == 403) {
         return 'Your server rejected that key.';
       }
@@ -528,24 +834,96 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
   }
 }
 
+/// The mainland-China providers, as [OpenAiCompatAnalyzer] configurations.
+/// Endpoints are the providers' OpenAI-compatible chat-completions URLs —
+/// mainland regions, reachable there without a VPN. Facts verified against
+/// current provider docs 2026-07-29 (see the workflow research notes).
+OpenAiCompatAnalyzer createQwenAnalyzer(AppSettings settings,
+        {http.Client? client}) =>
+    OpenAiCompatAnalyzer(settings,
+        // The MAINLAND (Beijing) platform. dashscope-intl (Singapore) is a
+        // separate platform with separate keys — a mainland key gets 401
+        // there. This app targets mainland users; intl users have the
+        // other four providers.
+        endpoint: Uri.parse(
+            'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions'),
+        label: 'Qwen',
+        keyOf: (s) => s.qwenApiKey,
+        modelOf: (s) => s.qwenModel,
+        // json_object works on the stable qwen3-vl/qwen-vl IDs and needs
+        // the word "json" in a message — both shared prompts say JSON.
+        // qwen3-vl defaults to thinking OFF in compat mode: send nothing.
+        notFoundHint: 'Qwen model not found — check the model name in '
+            'Settings (stable IDs like qwen3-vl-flash; -latest snapshots '
+            'lack JSON mode).',
+        client: client);
+
+OpenAiCompatAnalyzer createDoubaoAnalyzer(AppSettings settings,
+        {http.Client? client}) =>
+    OpenAiCompatAnalyzer(settings,
+        endpoint: Uri.parse(
+            'https://ark.cn-beijing.volces.com/api/v3/chat/completions'),
+        label: 'Doubao',
+        keyOf: (s) => s.doubaoApiKey,
+        modelOf: (s) => s.doubaoModel,
+        // Seed models deep-think by default and bill the reasoning as
+        // output tokens — pointless for a fixed-schema extraction.
+        extraBody: const {
+          'thinking': {'type': 'disabled'}
+        },
+        // Ark 404s both wrong ids AND not-yet-activated models; the
+        // versioned-ID rule makes this the most common Doubao failure.
+        notFoundHint: 'Doubao model not found — Ark needs the EXACT '
+            'versioned ID from its model list, and the model must be '
+            'activated (开通管理) in the Volcengine console.',
+        client: client);
+
+OpenAiCompatAnalyzer createGlmAnalyzer(AppSettings settings,
+        {http.Client? client}) =>
+    OpenAiCompatAnalyzer(settings,
+        endpoint: Uri.parse(
+            'https://open.bigmodel.cn/api/paas/v4/chat/completions'),
+        label: 'GLM',
+        keyOf: (s) => s.glmApiKey,
+        modelOf: (s) => s.glmModel,
+        // Zhipu's reference marks response_format TEXT-models-only; a
+        // vision call must not send it (prompt + fence-stripping parse
+        // carry the JSON contract, same as Anthropic).
+        supportsJsonMode: false,
+        extraBody: const {
+          'thinking': {'type': 'disabled'}
+        },
+        notFoundHint: 'GLM model not found — check the model name in '
+            'Settings (glm-4.6v family; older glm-4v IDs are retired).',
+        client: client);
+
 class MultiProviderAnalyzer implements AnalyzerService {
   MultiProviderAnalyzer(this._settings, {http.Client? client})
       : _gemini = createAnalyzer(_settings, client: client),
         _openai = OpenAiAnalyzer(_settings, client: client),
         _anthropic = AnthropicAnalyzer(_settings, client: client),
-        _server = ServerAnalyzer(_settings, client: client);
+        _server = ServerAnalyzer(_settings, client: client),
+        _qwen = createQwenAnalyzer(_settings, client: client),
+        _doubao = createDoubaoAnalyzer(_settings, client: client),
+        _glm = createGlmAnalyzer(_settings, client: client);
 
   final AppSettings _settings;
   final AnalyzerService _gemini;
   final OpenAiAnalyzer _openai;
   final AnthropicAnalyzer _anthropic;
   final ServerAnalyzer _server;
+  final OpenAiCompatAnalyzer _qwen;
+  final OpenAiCompatAnalyzer _doubao;
+  final OpenAiCompatAnalyzer _glm;
 
   AnalyzerService get _active => switch (_settings.provider) {
         AiProvider.gemini => _gemini,
         AiProvider.openai => _openai,
         AiProvider.anthropic => _anthropic,
         AiProvider.server => _server,
+        AiProvider.qwen => _qwen,
+        AiProvider.doubao => _doubao,
+        AiProvider.glm => _glm,
       };
 
   @override
@@ -558,6 +936,9 @@ class MultiProviderAnalyzer implements AnalyzerService {
 
   @override
   Future<String?> validateKey(String apiKey) => _active.validateKey(apiKey);
+
+  @override
+  Future<KeyProbe> probeKey(String apiKey) => _active.probeKey(apiKey);
 }
 
 /// Integration seam for di.dart — replaces the direct Gemini factory.

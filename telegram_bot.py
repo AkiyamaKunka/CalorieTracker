@@ -1326,6 +1326,13 @@ def analyze_food_photo_with_retries(
             return result
         log.warning("Claude analyzer unavailable/failed; falling back to Gemini.")
 
+    if client is None:
+        # No GEMINI_API_KEY configured — the fallback does not exist. Say
+        # so once per photo rather than throwing an AttributeError deep in
+        # the retry loop.
+        log.warning("No Gemini fallback configured (GEMINI_API_KEY unset).")
+        return None
+
     pause = _gemini_quota_pause()
     if pause:
         log.warning("Skipping Gemini photo analysis because daily quota pause is active.")
@@ -1500,7 +1507,13 @@ def _authorized_api_request() -> bool:
     if not ANDROID_API_KEY:
         return False
     provided = request.headers.get("X-API-Key", "")
-    return hmac.compare_digest(str(provided), str(ANDROID_API_KEY))
+    # BYTES, not str: hmac.compare_digest raises TypeError on non-ASCII
+    # str arguments, and Werkzeug decodes headers as latin-1 — so a key
+    # pasted with a smart quote or an accented character made EVERY
+    # endpoint answer 500 (with a traceback) instead of 401, for the
+    # phone as well as for probes (review 2026-07-31).
+    return hmac.compare_digest(
+        str(provided).encode("utf-8"), str(ANDROID_API_KEY).encode("utf-8"))
 
 
 def _vpn_check_reliable_from_request(vpn_active: Optional[bool], vpn_check: str) -> bool:
@@ -4831,7 +4844,10 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         """
         if not _authorized_api_request():
             return jsonify({"error": "Unauthorized"}), 401
-        return jsonify({"ok": True, "analyzer": claude_analyzer.status_label()})
+        # "backends" lets the phone's Test connection diagnose a missing
+        # server-side plan key (GLM_PLAN_KEY / DOUBAO_PLAN_KEY) remotely.
+        return jsonify({"ok": True, "analyzer": claude_analyzer.status_label(),
+                        "backends": claude_analyzer.backend_status()})
 
     @app.route('/api/claude_auth/start', methods=['POST'])
     def api_claude_auth_start():
@@ -4889,12 +4905,13 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         if not _authorized_api_request():
             return jsonify({"error": "Unauthorized"}), 401
         prompt = None
+        backend = "claude"
         if request.is_json:
-            # The app's shape: {image_b64, dietary_profile}. The caller may
-            # NOT supply a whole prompt: the analysis prompt is composed
-            # HERE from the server's own shared/ copy plus a bounded profile
-            # appendix. A caller-authored prompt would be an instruction
-            # channel into the CLI (see analyze_food_photo's
+            # The app's shape: {image_b64, dietary_profile, backend?}. The
+            # caller may NOT supply a whole prompt: the analysis prompt is
+            # composed HERE from the server's own shared/ copy plus a
+            # bounded profile appendix. A caller-authored prompt would be
+            # an instruction channel into the CLI (see analyze_food_photo's
             # allow_file_fallback note), which is not worth a settings knob.
             payload = request.get_json(silent=True) or {}
             raw = payload.get("image_b64")
@@ -4909,6 +4926,7 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
                 if len(profile) > API_PROFILE_MAX_CHARS:
                     return jsonify({"error": "profile_too_large"}), 413
                 prompt = build_photo_prompt_with_profile(profile)
+            backend = payload.get("backend") or "claude"
         elif 'photo' in request.files:
             data = request.files['photo'].read()
         else:
@@ -4917,19 +4935,42 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
             return jsonify({"error": "no_image"}), 400
         if len(data) > API_ANALYZE_MAX_BYTES:
             return jsonify({"error": "image_too_large"}), 413
-        if not claude_analyzer.is_configured():
+        if backend not in claude_analyzer.SUBSCRIPTION_BACKENDS:
+            return jsonify({"error": "bad_backend"}), 400
+        if not claude_analyzer.backend_available(backend, for_photo=True):
+            # 503 keeps old-app compat for claude; the reason string tells
+            # a new app WHICH server-side knob is missing. LOGGED: a burst
+            # of these was invisible in the journal on 2026-07-31 and cost
+            # an hour of "why is my API broken".
+            reason = claude_analyzer.backend_status().get(backend)
+            log.warning(
+                f"analyze_photo refused: backend '{backend}' unavailable "
+                f"({reason}).")
             return jsonify({"error": "claude_unavailable",
-                            "reason": "analyzer not configured"}), 503
+                            "reason": reason}), 503
         # allow_file_fallback=False: never run a network-influenced prompt
         # on the Read-tool path.
-        analysis = claude_analyzer.analyze_food_photo(
-            data, prompt, allow_file_fallback=False)
+        try:
+            analysis = claude_analyzer.analyze_food_photo(
+                data, prompt, allow_file_fallback=False, backend=backend,
+                raise_on_busy=True)
+        except claude_analyzer.AnalyzerBusy:
+            # Another photo owns the single-flight CLI — seconds fix this.
+            return jsonify({"error": "claude_unavailable",
+                            "reason": "the analyzer is busy with another "
+                                      "photo",
+                            "retry": True}), 503
         if not analysis:
-            # Busy CLI (another photo owns it), timeout, or a junk reply.
-            # 503 tells the app "transient" so the photo stays eligible.
-            return jsonify({"error": "claude_unavailable"}), 503
+            # The run HAPPENED and failed: timeout, a reply that broke the
+            # is_food contract, or a blind GLM run. Retrying spends another
+            # full CLI run (up to 120 s of the subscription) on a request
+            # that already answered — say so, so the app stops at one.
+            return jsonify({"error": "claude_unavailable",
+                            "reason": "the analysis ran but produced no "
+                                      "usable result",
+                            "retry": False}), 503
         return jsonify({"ok": True, "analysis": analysis,
-                        "analyzed_by": "claude"})
+                        "analyzed_by": backend})
 
     @app.route('/api/text_intent', methods=['POST'])
     def api_text_intent():
@@ -4944,14 +4985,30 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
             return jsonify({"error": "no_prompt"}), 400
         if len(prompt) > API_TEXT_MAX_CHARS:
             return jsonify({"error": "prompt_too_large"}), 413
-        if not claude_analyzer.is_configured():
+        backend = payload.get("backend") or "claude"
+        if backend not in claude_analyzer.SUBSCRIPTION_BACKENDS:
+            return jsonify({"error": "bad_backend"}), 400
+        if not claude_analyzer.backend_available(backend):
+            reason = claude_analyzer.backend_status().get(backend)
+            log.warning(
+                f"text_intent refused: backend '{backend}' unavailable "
+                f"({reason}).")
             return jsonify({"error": "claude_unavailable",
-                            "reason": "analyzer not configured"}), 503
-        out = claude_analyzer.analyze_text_prompt(prompt)
+                            "reason": reason}), 503
+        try:
+            out = claude_analyzer.analyze_text_prompt(
+                prompt, backend=backend, raise_on_busy=True)
+        except claude_analyzer.AnalyzerBusy:
+            return jsonify({"error": "claude_unavailable",
+                            "reason": "the analyzer is busy",
+                            "retry": True}), 503
         if not out:
-            return jsonify({"error": "claude_unavailable"}), 503
+            return jsonify({"error": "claude_unavailable",
+                            "reason": "the analysis ran but produced no "
+                                      "usable result",
+                            "retry": False}), 503
         return jsonify({"ok": True, "result": out["result"],
-                        "analyzed_by": "claude"})
+                        "analyzed_by": backend})
 
     @app.route('/reconcile', methods=['POST'])
     def reconcile():
@@ -5879,22 +5936,32 @@ def main():
     log.info("🤖 CalorieTracker Bot (Corrections Mode)")
     log.info("=" * 50)
 
-    # Validate config
-    if not BOT_TOKEN:
+    # Validate config. What is REQUIRED depends on what this process is
+    # actually serving: with the chat bot retired (TELEGRAM_POLLING=0) the
+    # process exists to serve the phone's /api/* endpoints, and demanding
+    # a Telegram token or a Gemini key for that would mean a deleted
+    # credential takes the app's analysis down with it.
+    polling_enabled = parse_boolish(os.environ.get("TELEGRAM_POLLING", "1")) is not False
+
+    if polling_enabled and not BOT_TOKEN:
         log.error(
             "TELEGRAM_BOT_TOKEN not set. "
-            "Set it: export TELEGRAM_BOT_TOKEN='your-token'"
+            "Set it: export TELEGRAM_BOT_TOKEN='your-token' "
+            "(or set TELEGRAM_POLLING=0 to run the phone API only)"
         )
         sys.exit(1)
 
     if not GEMINI_API_KEY:
-        log.error(
-            "GEMINI_API_KEY not set. "
-            "Set it: export GEMINI_API_KEY='your-key'"
+        # A MISSING Gemini key only removes the fallback analyzer; the
+        # Claude/GLM/Doubao CLI path is independent. Refusing to boot
+        # would be worse than analyzing without a safety net.
+        log.warning(
+            "GEMINI_API_KEY not set — the Gemini fallback analyzer is "
+            "DISABLED. The subscription CLI path still works; photos it "
+            "cannot handle will fail instead of falling back."
         )
-        sys.exit(1)
 
-    if not ALLOWED_CHAT_ID:
+    if polling_enabled and not ALLOWED_CHAT_ID:
         log.error(
             "TELEGRAM_CHAT_ID not set or invalid. "
             "Set it to the numeric Telegram chat ID allowed to use this private bot."
@@ -5924,7 +5991,10 @@ def main():
     # must still count as a crash boot, or a boot-time crash loop restarts
     # forever without ever feeding the alert.
     _record_boot_and_maybe_alert(bot)
-    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    # None when the key is absent: every call site already treats a failed
+    # Gemini attempt as "fall back / report", so a missing client degrades
+    # to "no fallback" instead of crashing the process.
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
     # systemd stop sends SIGTERM; raising KeyboardInterrupt on the main thread
     # reuses the existing shutdown path, and the interpreter then joins the
@@ -5949,7 +6019,25 @@ def main():
     # Start Flask in a background thread
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False), daemon=True).start()
     log.info("🚀 Flask REST API started on port 5000")
-    
+
+    # API-ONLY mode: the phone app's /api/* endpoints and the Telegram
+    # chat bot share ONE process, so `systemctl stop` would take the app's
+    # photo analysis down with the chat interface. TELEGRAM_POLLING=off
+    # retires the chat half while the app keeps working. The loop still
+    # stamps progress: the watchdog kills a process whose stamp goes stale
+    # (WATCHDOG_HANG_THRESHOLD_SECONDS), and "idle on purpose" must not
+    # look like "hung".
+    if parse_boolish(os.environ.get("TELEGRAM_POLLING", "1")) is False:
+        log.info("Telegram polling is OFF (TELEGRAM_POLLING=0) — serving "
+                 "the phone API only. Chat commands will not be answered.")
+        try:
+            while True:
+                _stamp_progress()
+                time.sleep(30)
+        except KeyboardInterrupt:
+            log.info("Shutting down.")
+            return
+
     log.info("Bot is running! Listening for corrections and commands.")
     log.info("Press Ctrl+C to stop.\n")
 
@@ -5964,6 +6052,14 @@ def main():
             # their own stamps), so the clock stays fresh while healthy.
             _stamp_progress()
             maybe_warn_stale_android_heartbeat(bot)
+            # Sweep an abandoned `claude setup-token` consent: the app has
+            # no /cancel call, so "tapped Connect, closed the sheet" would
+            # otherwise leave a full Node process holding a PTY fd forever
+            # on this 1 GB VM. The reaper existed but nothing called it.
+            try:
+                claude_auth.reap_expired_session()
+            except Exception:
+                pass
 
             for update in updates:
                 update_id = update.get("update_id")

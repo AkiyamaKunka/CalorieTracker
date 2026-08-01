@@ -452,4 +452,128 @@ ON CONFLICT(chat_id, date) DO UPDATE SET
     }
     return jsonEncode(buildExportEnvelope(tables, _clock()));
   }
+
+  @override
+  Future<ImportSummary> importJson(String json) async {
+    final envelope = parseExportEnvelope(json); // throws FormatException
+    final tables = envelope.tables;
+    final added = <String, int>{};
+    final skipped = <String, int>{};
+
+    await _db.transaction((txn) async {
+      for (final table in kExportTables) {
+        final rows = tables[table];
+        if (rows == null) continue;
+        var a = 0, s = 0;
+        for (final raw in rows) {
+          final row = Map<String, Object?>.from(raw);
+          // The row's own id must NOT be reused: this DB has its own
+          // autoincrement sequence, and a colliding id would either fail
+          // or overwrite a real meal. meal_id references are dropped for
+          // the same reason (the ledger row still records the status).
+          row.remove('id');
+          if (table == 'photo_ingestions') row['meal_id'] = null;
+          if (await _importRowExists(txn, table, row)) {
+            s++;
+            continue;
+          }
+          try {
+            // OR IGNORE swallows EVERY constraint violation (NOT NULL
+            // included) and returns 0 instead of throwing — counting
+            // unconditionally would report rows that never landed, and
+            // this summary is the user's only evidence the transfer
+            // worked.
+            final rowId = await txn.insert(table, row,
+                conflictAlgorithm: ConflictAlgorithm.ignore);
+            if (rowId > 0) {
+              a++;
+            } else {
+              s++;
+            }
+          } catch (_) {
+            // A row whose shape does not fit this schema version is
+            // skipped, never fatal: a partial import beats none.
+            s++;
+          }
+        }
+        added[table] = a;
+        skipped[table] = s;
+      }
+    });
+    return ImportSummary(added, skipped, exportedAt: envelope.exportedAt);
+  }
+
+  /// Identity per table — the dedup rule that makes re-importing the same
+  /// file a no-op instead of doubling the user's calories.
+  Future<bool> _importRowExists(
+      DatabaseExecutor txn, String table, Map<String, Object?> row) async {
+    final (where, args) = switch (table) {
+      // A PHOTO meal's identity is its photo (chat+hash): editing its
+      // numbers must NOT make an older backup re-import it as a second
+      // meal. A PHOTOLESS meal has no such anchor, so it falls back to
+      // date+time+analysis — which is also what keeps two different
+      // same-minute text meals distinct.
+      'meals' => ((row['image_hash'] as String?)?.isNotEmpty ?? false)
+          ? (
+              'chat_id = ? AND image_hash = ?',
+              [row['chat_id'], row['image_hash']]
+            )
+          : (
+              'chat_id = ? AND date = ? AND time = ? AND '
+                  'IFNULL(image_hash, \'\') = \'\' AND analysis = ?',
+              [row['chat_id'], row['date'], row['time'], row['analysis']]
+            ),
+      'photo_ingestions' => (
+          'chat_id = ? AND image_hash = ?',
+          [row['chat_id'], row['image_hash']]
+        ),
+      'body_weight' => (
+          'chat_id = ? AND date = ?',
+          [row['chat_id'], row['date']]
+        ),
+      // NOT date alone: activities allows many rows per day (UNIQUE is
+      // chat_id+source+external_id, and manual rows carry a NULL
+      // external_id so each save inserts). Keying on the day would have
+      // collapsed a morning walk and an evening run into one.
+      // NOT date alone: activities allows many rows per day (UNIQUE is
+      // chat_id+source+external_id, and manual rows carry a NULL
+      // external_id so each save inserts). Keying on the day would have
+      // collapsed a morning walk and an evening run into one. logged_at
+      // is the per-row stamp that makes two same-day manual rows distinct.
+      'activities' => (
+          'chat_id = ? AND date = ? AND IFNULL(source, \'\') = ? AND '
+              'IFNULL(external_id, \'\') = ? AND '
+              'IFNULL(logged_at, \'\') = ? AND '
+              'IFNULL(active_calories, -1) = ? AND '
+              'IFNULL(distance_km, -1) = ? AND IFNULL(raw, \'\') = ?',
+          [
+            row['chat_id'],
+            row['date'],
+            row['source'] ?? '',
+            row['external_id'] ?? '',
+            row['logged_at'] ?? '',
+            // The NUMBERS too: two manual saves in the same second share a
+            // logged_at, and a walk is not a run.
+            row['active_calories'] ?? -1,
+            row['distance_km'] ?? -1,
+            row['raw'] ?? '',
+          ]
+        ),
+      'fitness_profile' => ('chat_id = ?', [row['chat_id']]),
+      'workouts' => (
+          'chat_id = ? AND date = ? AND logged_at = ? AND '
+              'IFNULL(workout_type, \'\') = ?',
+          [
+            row['chat_id'],
+            row['date'],
+            row['logged_at'],
+            row['workout_type'] ?? '',
+          ]
+        ),
+      _ => ('1 = 0', const <Object?>[]),
+    };
+    final hit = await txn.query(table,
+        columns: ['1'], where: where, whereArgs: args, limit: 1);
+    return hit.isNotEmpty;
+  }
 }

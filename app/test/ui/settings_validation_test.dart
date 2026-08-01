@@ -1,8 +1,8 @@
-/// Settings screen: live validateKey feedback states (loading → success /
-/// error) against a fake analyzer.
+/// Settings screen behavior: the ONE test action (diagnostics), key and
+/// model persistence, the server backend selector, and the Claude OAuth
+/// re-connect flow. The old 'Validate key' states are gone with the button
+/// (2026-07-31) — the diagnostics page answers strictly more.
 library;
-
-import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -15,74 +15,261 @@ Widget _wrap(Widget child) => MaterialApp(home: Scaffold(body: child));
 
 void main() {
   connectClaudeTests();
-  testWidgets('validate key shows loading then success', (tester) async {
-    final analyzer = FakeAnalyzer();
-    final completer = Completer<String?>();
-    analyzer.onValidateKey = (_) => completer.future;
-    final settings = FakeSettings(apiKey: '');
+  importExportTests();
 
+  testWidgets('ONE test action: the key field has no separate Validate — '
+      'it opens the diagnostics page', (tester) async {
+    // 'Validate key' ran the same analyzer.validateKey the diagnostics
+    // page runs as stage 3 of six, and its persist-on-success job became
+    // redundant when the field started persisting on type (2026-07-31).
+    tester.view.physicalSize = const Size(800, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final settings = FakeSettings(apiKey: 'k');
     await tester.pumpWidget(_wrap(SettingsScreen(
       settings: settings,
-      analyzer: analyzer,
+      analyzer: FakeAnalyzer(),
       dao: FakeDao(),
       requestPhotoPermission: () async => true,
     )));
+    expect(find.text('Test this provider'), findsOneWidget);
+    expect(find.byKey(const Key('diagnosticsTile')), findsNothing,
+        reason: 'the tile was a third door to the same page');
+    expect(find.text('Validate key'), findsNothing);
+    expect(find.text('Key OK'), findsNothing);
 
-    await tester.enterText(find.byKey(const Key('apiKeyField')), 'my-key');
-    await tester.tap(find.byKey(const Key('validateKeyButton')));
-    await tester.pump();
-
-    // Loading state while the future is pending.
-    expect(find.byKey(const Key('keyValidating')), findsOneWidget);
-    expect(find.byKey(const Key('keyValid')), findsNothing);
-
-    completer.complete(null); // null = key OK (contract validateKey)
+    await tester.tap(find.byKey(const Key('testProviderButton')));
     await tester.pumpAndSettle();
+    expect(find.byKey(const Key('runDiagnostics')), findsOneWidget,
+        reason: 'the one action opens the page that answers everything');
+  });
 
-    expect(find.byKey(const Key('keyValid')), findsOneWidget);
-    expect(find.byKey(const Key('keyOkText')), findsOneWidget);
-    expect(analyzer.validatedKeys, ['my-key']);
-    // A valid key is persisted.
+  testWidgets('a typed key persists without any button', (tester) async {
+    final settings = FakeSettings(apiKey: '');
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: settings,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      requestPhotoPermission: () async => true,
+    )));
+    await tester.enterText(find.byKey(const Key('apiKeyField')), 'my-key');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
     expect(settings.apiKey, 'my-key');
   });
-
-  testWidgets('validate key shows the analyzer error', (tester) async {
-    final analyzer = FakeAnalyzer();
-    analyzer.onValidateKey = (_) async => 'API key not valid (403)';
-    final settings = FakeSettings(apiKey: '');
-
+  testWidgets('server backend selector shows for the server provider and '
+      'persists the choice', (tester) async {
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final settings = FakeSettings(apiKey: 'k')..provider = 'server';
     await tester.pumpWidget(_wrap(SettingsScreen(
       settings: settings,
-      analyzer: analyzer,
+      analyzer: FakeAnalyzer(),
       dao: FakeDao(),
       requestPhotoPermission: () async => true,
     )));
+    expect(find.byKey(const Key('serverBackendSelector')), findsOneWidget);
+    expect(settings.serverBackend, 'claude');
 
-    await tester.enterText(find.byKey(const Key('apiKeyField')), 'bad-key');
-    await tester.tap(find.byKey(const Key('validateKeyButton')));
+    await tester.tap(find.text('GLM'));
     await tester.pumpAndSettle();
+    expect(settings.serverBackend, 'glm',
+        reason: 'the tap must reach SettingsStore.update(serverBackend:)');
 
-    expect(find.byKey(const Key('keyInvalid')), findsOneWidget);
-    expect(find.text('API key not valid (403)'), findsOneWidget);
-    // A rejected key is NOT persisted.
-    expect(settings.apiKey, '');
+    await tester.tap(find.text('Doubao'));
+    await tester.pumpAndSettle();
+    expect(settings.serverBackend, 'doubao');
   });
 
-  testWidgets('empty key never calls the analyzer', (tester) async {
-    final analyzer = FakeAnalyzer();
-
+  testWidgets('no backend selector away from the server provider',
+      (tester) async {
+    final settings = FakeSettings(apiKey: 'k'); // gemini default
     await tester.pumpWidget(_wrap(SettingsScreen(
-      settings: FakeSettings(apiKey: ''),
-      analyzer: analyzer,
+      settings: settings,
+      analyzer: FakeAnalyzer(),
       dao: FakeDao(),
       requestPhotoPermission: () async => true,
     )));
+    expect(find.byKey(const Key('serverBackendSelector')), findsNothing);
+  });
 
-    await tester.tap(find.byKey(const Key('validateKeyButton')));
+  testWidgets('model is PICKED from a curated list, not typed', (tester) async {
+    final settings = FakeSettings(apiKey: 'k'); // gemini, curated default
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: settings,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      requestPhotoPermission: () async => true,
+    )));
+    expect(find.byKey(const Key('modelPicker')), findsOneWidget);
+    expect(find.byKey(const Key('modelField')), findsNothing,
+        reason: 'no raw text entry unless the user asks for Custom');
+
+    await tester.tap(find.byKey(const Key('modelPicker')));
+    await tester.pumpAndSettle();
+    await tester
+        .tap(find.text('gemini-2.5-pro — strongest, slower').last);
+    await tester.pumpAndSettle();
+    expect(settings.model, 'gemini-2.5-pro', reason: 'picking persists');
+
+    // The Custom row reveals the text field for unlisted models.
+    await tester.tap(find.byKey(const Key('modelPicker')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Custom — type a model name…').last);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('modelField')), findsOneWidget);
+  });
+
+  testWidgets('a stored unlisted model renders as Custom with the field '
+      'visible', (tester) async {
+    final settings =
+        FakeSettings(apiKey: 'k', model: 'gemini-exp-something-new');
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: settings,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      requestPhotoPermission: () async => true,
+    )));
+    expect(find.byKey(const Key('modelField')), findsOneWidget,
+        reason: 'an unlisted stored model must stay visible and editable');
+    expect(find.text('Custom — type a model name…'), findsOneWidget);
+  });
+
+  testWidgets('switching provider reloads BOTH the key and the model, and '
+      'remounts the picker', (tester) async {
+    // The dropdown's onChanged is the only place these three move
+    // together; nothing tested it, so a dropped line would have shown
+    // Gemini's key under Doubao (review 2026-07-31).
+    tester.view.physicalSize = const Size(800, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final settings = FakeSettings(
+      keys: {'gemini': 'gem-key', 'glm': 'glm-key'},
+      models: {'gemini': 'gemini-2.5-flash', 'glm': 'glm-4.6v-flash'},
+    );
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: settings,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      requestPhotoPermission: () async => true,
+    )));
+    expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('apiKeyField')))
+            .controller!
+            .text,
+        'gem-key');
+
+    await tester.tap(find.byKey(const Key('providerDropdown')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('Zhipu GLM').last);
     await tester.pumpAndSettle();
 
-    expect(analyzer.validatedKeys, isEmpty);
-    expect(find.byKey(const Key('keyInvalid')), findsOneWidget);
+    expect(settings.provider, 'glm');
+    expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('apiKeyField')))
+            .controller!
+            .text,
+        'glm-key',
+        reason: "the key field must show the NEW provider's key");
+    // The picker remounted onto the GLM list (its free flash default).
+    expect(find.textContaining('glm-4.6v-flash'), findsWidgets);
+    expect(find.byKey(const Key('modelField')), findsNothing,
+        reason: 'the GLM default IS curated — no custom field');
+  });
+
+  testWidgets('enabling the watcher without a usable key warns instead of '
+      'arming a switch that does nothing', (tester) async {
+    tester.view.physicalSize = const Size(800, 3000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final settings = FakeSettings(apiKey: '', watcherEnabled: false);
+    final intake = FakeIntake();
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: settings,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      photoIntake: intake,
+      requestPhotoPermission: () async => true,
+    )));
+    await tester.tap(find.byKey(const Key('watcherToggle')));
+    await tester.pumpAndSettle();
+
+    expect(settings.watcherEnabled, isTrue, reason: 'the toggle still arms');
+    expect(intake.started, isTrue);
+    expect(find.textContaining("won't be analyzed"), findsOneWidget);
+    expect(intake.backfillScans, 0,
+        reason: 'no key: reading photo bytes would be for nothing');
+  });
+
+  testWidgets('a quota pause gets its OWN warning wording', (tester) async {
+    tester.view.physicalSize = const Size(800, 3000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final paused = FakeSettings(apiKey: 'k')..isQuotaPaused = true;
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: paused,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      photoIntake: FakeIntake(),
+      requestPhotoPermission: () async => true,
+    )));
+    await tester.tap(find.byKey(const Key('watcherToggle')));
+    await tester.pumpAndSettle();
+    // The BANNER also says "daily quota" — assert the snackbar's own words.
+    expect(find.textContaining('new photos will wait'), findsOneWidget);
+  });
+
+  testWidgets('a healthy enable is silent and sweeps immediately',
+      (tester) async {
+    tester.view.physicalSize = const Size(800, 3000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final healthy = FakeSettings(apiKey: 'k');
+    final intake = FakeIntake();
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: healthy,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      photoIntake: intake,
+      requestPhotoPermission: () async => true,
+    )));
+    await tester.tap(find.byKey(const Key('watcherToggle')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining("won't be analyzed"), findsNothing);
+    expect(intake.backfillScans, 1,
+        reason: 'a healthy enable sweeps the window immediately');
+  });
+
+  testWidgets('first-run card shows only without a key, and the quota '
+      'banner only while paused', (tester) async {
+    final fresh = FakeSettings(apiKey: '');
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: fresh,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      requestPhotoPermission: () async => true,
+    )));
+    expect(find.byKey(const Key('firstRunCard')), findsOneWidget);
+    expect(find.textContaining('中国大陆用户'), findsOneWidget,
+        reason: 'the mainland steer is the point of the card');
+    expect(find.byKey(const Key('quotaPauseBanner')), findsNothing);
+    // The card must not still name a button that no longer exists.
+    expect(find.textContaining('Validate key'), findsNothing);
+
+    final paused = FakeSettings(apiKey: 'k')
+      ..isQuotaPaused = true
+      ..quotaPauseUntil = DateTime(2026, 7, 31, 23, 30);
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: paused,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      requestPhotoPermission: () async => true,
+    )));
+    expect(find.byKey(const Key('firstRunCard')), findsNothing);
+    expect(find.byKey(const Key('quotaPauseBanner')), findsOneWidget);
   });
 
   testWidgets('watcher toggle stays off when permission is denied',
@@ -130,7 +317,10 @@ Widget _serverWrap({
 void connectClaudeTests() {
   testWidgets('connect: opens the OFFICIAL url, collects code, completes',
       (tester) async {
-    final settings = FakeSettings()..provider = 'server';
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final settings = FakeSettings(apiKey: 'k')..provider = 'server';
     final opened = <Uri>[];
     final completed = <String>[];
     await tester.pumpWidget(_serverWrap(
@@ -167,7 +357,10 @@ void connectClaudeTests() {
 
   testWidgets('connect: start failure surfaces the reason, no dialog',
       (tester) async {
-    final settings = FakeSettings()..provider = 'server';
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final settings = FakeSettings(apiKey: 'k')..provider = 'server';
     await tester.pumpWidget(_serverWrap(
       settings: settings,
       start: () async => (url: null, error: 'the CLI did not produce a URL'),
@@ -182,7 +375,10 @@ void connectClaudeTests() {
 
   testWidgets('connect: cancelling the dialog completes nothing',
       (tester) async {
-    final settings = FakeSettings()..provider = 'server';
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final settings = FakeSettings(apiKey: 'k')..provider = 'server';
     var completions = 0;
     await tester.pumpWidget(_serverWrap(
       settings: settings,
@@ -211,5 +407,83 @@ void connectClaudeTests() {
       openUrl: (_) async => true,
     ));
     expect(find.byKey(const Key('connectClaudeButton')), findsNothing);
+  });
+}
+
+void importExportTests() {
+  testWidgets('import: a pasted export merges and reports what happened',
+      (tester) async {
+    tester.view.physicalSize = const Size(800, 3000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final dao = FakeDao();
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: FakeSettings(apiKey: 'k'),
+      analyzer: FakeAnalyzer(),
+      dao: dao,
+      requestPhotoPermission: () async => true,
+    )));
+    await tester.tap(find.byKey(const Key('importButton')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.byKey(const Key('importField')),
+        '{"format":"calorie_tracker_export","version":1,'
+        '"exported_at":"2026-07-30T10:00:00.000",'
+        '"tables":{"meals":[{"date":"2026-07-30"}]}}');
+    await tester.tap(find.byKey(const Key('importConfirm')));
+    await tester.pumpAndSettle();
+
+    expect(dao.imported, hasLength(1));
+    expect(find.textContaining('Imported 1 meal'), findsOneWidget);
+  });
+
+  testWidgets('import: a wrong file is REFUSED with a readable reason',
+      (tester) async {
+    tester.view.physicalSize = const Size(800, 3000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final dao = FakeDao();
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: FakeSettings(apiKey: 'k'),
+      analyzer: FakeAnalyzer(),
+      dao: dao,
+      requestPhotoPermission: () async => true,
+    )));
+    await tester.tap(find.byKey(const Key('importButton')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.byKey(const Key('importField')), 'my shopping list');
+    await tester.tap(find.byKey(const Key('importConfirm')));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('not JSON'), findsOneWidget);
+  });
+
+  testWidgets('import: cancelling after PASTING writes nothing', (tester) async {
+    // Cancelling an EMPTY dialog proves nothing (an unconditional import
+    // of '' would also leave dao.imported empty by throwing) — paste a
+    // valid payload first, so only the Cancel path can explain the
+    // silence (review 2026-07-31).
+    tester.view.physicalSize = const Size(800, 3000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final dao = FakeDao();
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: FakeSettings(apiKey: 'k'),
+      analyzer: FakeAnalyzer(),
+      dao: dao,
+      requestPhotoPermission: () async => true,
+    )));
+    await tester.tap(find.byKey(const Key('importButton')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.byKey(const Key('importField')),
+        '{"format":"calorie_tracker_export","version":1,'
+        '"tables":{"meals":[{"date":"2026-07-30"}]}}');
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(dao.imported, isEmpty,
+        reason: 'a pasted-but-cancelled payload must not be written');
+    expect(find.textContaining('Imported'), findsNothing);
   });
 }

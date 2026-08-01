@@ -1,9 +1,12 @@
 /// Add flow (FAB): pick a recent photo (grid → analyzing spinner → meal
 /// card, spec §2.3/§3/§6 pipeline with deliberate=true), or DESCRIBE a meal
 /// in free text (NlExecutor.describeMeal → estimate → the meal editor as a
-/// preview → insert). The describe path is new-meal ONLY; corrections and
-/// deletes stay on Today's chat box (handleText, spec §4).
+/// preview → insert), enter numbers manually, or FIX/delete a logged meal
+/// (FixMealScreen → handleText, spec §4). Since 2026-07-31 this sheet is
+/// the ONE owner of every meal action — the Today chat bar is gone.
 library;
+
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
@@ -11,6 +14,7 @@ import 'package:flutter/material.dart';
 import '../../core/contracts.dart';
 import '../../services/analyzer/normalize.dart' show makeMealThumb;
 import '../photo_pipeline.dart';
+import 'fix_meal_screen.dart';
 import 'meal_editor_screen.dart';
 import '../services.dart';
 
@@ -36,6 +40,26 @@ Future<void> openAddFlow(BuildContext context, UiServices services,
             subtitle: const Text('Say what you ate, in any language'),
             onTap: () => Navigator.of(ctx).pop('text'),
           ),
+          // The zero-dependency path: the other two options need a working
+          // AI key and spend a model call — with no key (first run), a
+          // quota pause, or offline, the + button was a dead end.
+          ListTile(
+            key: const Key('addManually'),
+            leading: const Icon(Icons.keyboard_alt_outlined),
+            title: const Text('Enter manually'),
+            subtitle: const Text('Type the numbers yourself — no AI'),
+            onTap: () => Navigator.of(ctx).pop('manual'),
+          ),
+          // Corrections lived in a chat bar pinned to Today until
+          // 2026-07-31 — the user's verdict: one button owns ALL meal
+          // actions, adding and fixing alike.
+          ListTile(
+            key: const Key('addFixMeal'),
+            leading: const Icon(Icons.build_outlined),
+            title: const Text('Fix or delete a meal'),
+            subtitle: const Text('"meal 2 was roast duck", "删除第一餐"'),
+            onTap: () => Navigator.of(ctx).pop('fix'),
+          ),
         ],
       ),
     ),
@@ -48,6 +72,13 @@ Future<void> openAddFlow(BuildContext context, UiServices services,
     await Navigator.of(context).push(MaterialPageRoute<void>(
         builder: (_) => AddTextScreen(
             executor: services.executor, dao: services.dao)));
+  } else if (choice == 'manual') {
+    // Defaults to today/now inside the editor (MealDraft.blank).
+    await Navigator.of(context).push(MaterialPageRoute<void>(
+        builder: (_) => MealEditorScreen(dao: services.dao)));
+  } else if (choice == 'fix') {
+    await Navigator.of(context).push(MaterialPageRoute<void>(
+        builder: (_) => FixMealScreen(executor: services.executor)));
   } else {
     return;
   }
@@ -64,21 +95,64 @@ class AddPhotoScreen extends StatefulWidget {
 }
 
 class _AddPhotoScreenState extends State<AddPhotoScreen> {
-  late Future<List<IntakePhoto>> _photos;
+  late Future<List<RecentAsset>> _assets;
   bool _analyzing = false;
+  bool _permissionDenied = false;
+  // Future-cached per asset: dedupes in-flight fetches across rebuilds
+  // (the same rule the coverage screen learned).
+  final Map<String, Future<Uint8List?>> _thumbs = {};
 
   @override
   void initState() {
     super.initState();
-    _photos = widget.services.picker.recentPhotos();
+    _assets = _load();
   }
 
-  Future<void> _analyze(IntakePhoto photo) async {
+  /// Ask for permission FIRST: the picker returns [] on denial, which
+  /// rendered as 'No recent photos found.' — indistinguishable from an
+  /// empty camera roll and, once the OS stops re-prompting, a permanent
+  /// dead end in the app's headline flow.
+  ///
+  /// LISTS assets only. The previous version read up to 30 ORIGINALS (25 MB
+  /// each) before showing anything and then decoded each 12 MP image
+  /// full-res into a 120 px cell — hundreds of MB resident, on a screen
+  /// that uses exactly one photo.
+  Future<List<RecentAsset>> _load() async {
+    final granted = await widget.services.requestPhotoPermission();
+    if (!mounted) return const [];
+    if (!granted) {
+      setState(() => _permissionDenied = true);
+      return const [];
+    }
+    return widget.services.picker.recentAssets();
+  }
+
+  Future<Uint8List?> _thumbFor(String assetId) => _thumbs.putIfAbsent(
+      assetId, () => widget.services.picker.thumbnail(assetId));
+
+  Future<void> _pick(RecentAsset asset) async {
+    // Guard BEFORE the async gap: onTap reads _analyzing from the last
+    // BUILD, so two taps in the same frame both pass that check and run
+    // two analyses — two model calls, two ledger reservations, for one
+    // meal (review 2026-07-31).
+    if (_analyzing) return;
     setState(() => _analyzing = true);
-    // User-picked → deliberate: reclaims failed/skipped/deleted ledger rows
-    // (spec §2.3 caller policies).
-    final deliberate = IntakePhoto(photo.bytes, photo.assetId, photo.fileName,
-        capturedAt: photo.capturedAt, deliberate: true);
+    // ORIGINAL bytes for THIS photo only — md5 identity (§6.2) needs the
+    // original, but only the chosen one.
+    final deliberate = await widget.services.picker.loadOriginal(asset);
+    if (!mounted) return;
+    if (deliberate == null) {
+      setState(() => _analyzing = false);
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('That photo could not be read (too large or '
+              'removed).')));
+      return;
+    }
+    await _analyze(deliberate);
+  }
+
+  Future<void> _analyze(IntakePhoto deliberate) async {
+    if (!_analyzing) setState(() => _analyzing = true);
     // Through the APP'S ONE pipeline (services.processPhoto → enqueue), not
     // a private instance: a second analyzer call concurrent with the
     // watcher self-inflicts rate limits and doubles resident photo bytes.
@@ -149,8 +223,8 @@ class _AddPhotoScreenState extends State<AddPhotoScreen> {
       appBar: AppBar(title: const Text('Recent photos')),
       body: Stack(
         children: [
-          FutureBuilder<List<IntakePhoto>>(
-            future: _photos,
+          FutureBuilder<List<RecentAsset>>(
+            future: _assets,
             builder: (context, snap) {
               if (snap.connectionState != ConnectionState.done) {
                 return const Center(child: CircularProgressIndicator());
@@ -162,20 +236,62 @@ class _AddPhotoScreenState extends State<AddPhotoScreen> {
                   child: Text('Could not load photos: ${snap.error}'),
                 ));
               }
-              final photos = snap.data ?? const [];
-              if (photos.isEmpty) {
+              final assets = snap.data ?? const <RecentAsset>[];
+              if (_permissionDenied) {
+                final open = widget.services.openSystemSettings;
+                return Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Text(
+                          "CalorieTracker isn't allowed to see your "
+                          'photos.',
+                          key: Key('photoPermissionDenied'),
+                          textAlign: TextAlign.center,
+                        ),
+                        if (open != null) ...[
+                          const SizedBox(height: 12),
+                          FilledButton.tonal(
+                            key: const Key('openSystemSettings'),
+                            onPressed: () => open(),
+                            child: const Text('Open system settings'),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                );
+              }
+              if (assets.isEmpty) {
                 return const Center(child: Text('No recent photos found.'));
               }
               return GridView.builder(
                 padding: const EdgeInsets.all(8),
                 gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                     crossAxisCount: 3, crossAxisSpacing: 4, mainAxisSpacing: 4),
-                itemCount: photos.length,
+                itemCount: assets.length,
                 itemBuilder: (context, i) => GestureDetector(
                   key: Key('recentPhoto$i'),
-                  onTap: _analyzing ? null : () => _analyze(photos[i]),
-                  child: Image.memory(photos[i].bytes,
-                      fit: BoxFit.cover, gaplessPlayback: true),
+                  onTap: _analyzing ? null : () => _pick(assets[i]),
+                  child: FutureBuilder<Uint8List?>(
+                    future: _thumbFor(assets[i].id),
+                    builder: (context, snap) {
+                      final bytes = snap.data;
+                      if (bytes == null || bytes.isEmpty) {
+                        return Container(
+                            color: Theme.of(context)
+                                .colorScheme
+                                .surfaceContainerHighest);
+                      }
+                      // cacheWidth: decode at cell size, not 12 MP.
+                      return Image.memory(bytes,
+                          fit: BoxFit.cover,
+                          cacheWidth: 320,
+                          gaplessPlayback: true);
+                    },
+                  ),
                 ),
               );
             },

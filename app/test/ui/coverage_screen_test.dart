@@ -91,7 +91,7 @@ void main() {
         },
         requestPhotoPermission: () async => true,
         initialLookbackDays: 2,
-        canAnalyze: false, // quota latch armed / no key
+        canAnalyze: () => false, // quota latch armed / no key
         library: library,
       ),
     ));
@@ -105,6 +105,60 @@ void main() {
     expect(processed, isEmpty);
     expect(dao.ledger['h9'], IngestionStatus.skipped,
         reason: 'the tombstone must survive a refused run');
+  });
+
+  testWidgets('quota latch arming MID-RUN stops the batch; later tombstones '
+      'survive', (tester) async {
+    // The 9dfd509 gate checked canAnalyze ONCE, before the loop — a bool
+    // captured when the screen was pushed. But the latch arms mid-batch:
+    // photo 1's daily-quota 429 sets the pause, and every photo pushed
+    // after that is reserved (reclaiming its 'skipped' tombstone), makes
+    // zero model calls, and is released — which DELETES the just-reclaimed
+    // row. A probe run erased 4 of 5 tombstones that way. The fix is a live
+    // re-check each iteration plus breaking on a retryable outcome.
+    library.assets = [
+      FakeAsset('b1', 'S1.jpg', DateTime(2026, 7, 26, 8), bytesOf(1)),
+      FakeAsset('b2', 'S2.jpg', DateTime(2026, 7, 26, 9), bytesOf(2)),
+      FakeAsset('b3', 'S3.jpg', DateTime(2026, 7, 26, 10), bytesOf(3)),
+    ];
+    dao.ledger['h1'] = IngestionStatus.skipped;
+    dao.ledger['h2'] = IngestionStatus.skipped;
+    dao.ledger['h3'] = IngestionStatus.skipped;
+    var paused = false;
+    await tester.pumpWidget(MaterialApp(
+      home: CoverageScreen(
+        auditor: auditor,
+        processPhoto: (photo) async {
+          processed.add(photo);
+          // Photo 1 exhausts the daily quota: the analyzer arms the latch
+          // and the pipeline releases the reservation — deleting the row
+          // reserve had just flipped to 'processing'.
+          paused = true;
+          dao.ledger.remove(await testHash(photo.bytes));
+          return const PhotoOutcome(
+              PhotoOutcomeKind.failed, 'quota', retryable: true);
+        },
+        requestPhotoPermission: () async => true,
+        initialLookbackDays: 2,
+        canAnalyze: () => !paused, // LIVE read, true at confirm time
+        library: library,
+      ),
+    ));
+    await tester.tap(find.byKey(const Key('runCoverageCheck')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('reanalyzeAllSkipped')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('confirmBulkAction')));
+    await tester.pumpAndSettle();
+
+    expect(processed, hasLength(1),
+        reason: 'photos 2 and 3 must never be reserved-and-released');
+    expect(dao.ledger['h2'], IngestionStatus.skipped,
+        reason: 'tombstone 2 survives the aborted run');
+    expect(dao.ledger['h3'], IngestionStatus.skipped,
+        reason: 'tombstone 3 survives the aborted run');
+    expect(find.textContaining('stopped after 1 of 3'), findsOneWidget);
+    expect(find.textContaining('not touched'), findsOneWidget);
   });
 
   testWidgets('cancelling the bulk confirmation spends nothing', (tester) async {

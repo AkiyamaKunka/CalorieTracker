@@ -7,6 +7,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:calorie_tracker/core/contracts.dart';
 import 'package:calorie_tracker/services/analyzer/provider_analyzers.dart';
 import 'package:calorie_tracker/services/settings/app_settings.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -80,6 +81,273 @@ void main() {
     // an instruction channel into a CLI whose image path enables Read.
     expect(body['dietary_profile'], 'Cantonese home cooking');
     expect(body.containsKey('prompt'), isFalse);
+    expect(body['backend'], 'claude',
+        reason: 'the default backend travels explicitly');
+  });
+
+  test('the chosen server backend rides every request', () async {
+    final s = await serverSettings();
+    await s.setServerBackend('glm');
+    final requests = <http.Request>[];
+    final analyzer = ServerAnalyzer(
+      s,
+      normalizer: (b) async => b,
+      client: MockClient((req) async {
+        requests.add(req);
+        return http.Response(
+            jsonEncode({
+              'ok': true,
+              'analysis': {'is_food': true, 'total_calories': 1},
+              'result': {'intent': 'x'},
+            }),
+            200);
+      }),
+    );
+    await analyzer.analyzePhoto(jpeg());
+    await analyzer.textIntent('hi');
+    expect(requests, hasLength(2),
+        reason: 'both call shapes must have been exercised');
+    for (final req in requests) {
+      expect(jsonDecode(req.body)['backend'], 'glm');
+    }
+  });
+
+  test('serverBackend PERSISTS across a reload and rejects unknown values',
+      () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final store = MemoryKeyStore();
+    final s = await AppSettings.load(prefs: prefs, keyStore: store);
+    expect(s.serverBackend, 'claude');
+    await s.setServerBackend('doubao');
+    // A FRESH load from the same prefs must see the choice — the earlier
+    // version of this test only re-read the in-memory field.
+    final reloaded = await AppSettings.load(prefs: prefs, keyStore: store);
+    expect(reloaded.serverBackend, 'doubao');
+    await s.setServerBackend('gpt'); // unknown → safe default
+    expect(s.serverBackend, 'claude');
+  });
+
+  test('validateKey surfaces a chosen backend that is not ready', () async {
+    final s = await serverSettings();
+    await s.setServerBackend('glm');
+    final analyzer = ServerAnalyzer(s, client: MockClient((_) async {
+      return http.Response(
+          jsonEncode({
+            'ok': true,
+            'analyzer': 'enabled',
+            'backends': {
+              'claude': 'enabled',
+              'glm': 'no key (GLM_PLAN_KEY)',
+              'doubao': 'ready',
+            },
+          }),
+          200);
+    }));
+    final msg = await analyzer.validateKey('upload-key');
+    expect(msg, contains('GLM_PLAN_KEY'),
+        reason: 'a missing server-side plan key must show at TEST time, '
+            'not as a 503 on tonight’s dinner photo');
+
+    await s.setServerBackend('doubao');
+    expect(await analyzer.validateKey('upload-key'), isNull,
+        reason: 'ready backend validates clean');
+
+    await s.setServerBackend('claude');
+    expect(await analyzer.validateKey('upload-key'), isNull);
+  });
+
+  test('validateKey WARNS about an old server when a vendor backend is '
+      'chosen (it would silently bill the Claude plan)', () async {
+    final s = await serverSettings();
+    await s.setServerBackend('glm');
+    final analyzer = ServerAnalyzer(s, client: MockClient((_) async {
+      return http.Response(jsonEncode({'ok': true, 'analyzer': 'enabled'}), 200);
+    }));
+    expect(await analyzer.validateKey('upload-key'),
+        contains('update the server'),
+        reason: 'a real auth_check reply with no backends map IS the '
+            'pre-upgrade server — the wrong payer must be said out loud');
+
+    await s.setServerBackend('claude');
+    expect(await analyzer.validateKey('upload-key'), isNull,
+        reason: 'claude backend on an old server is exactly right');
+  });
+
+  test('validateKey does not cry "could not reach" over odd 200 bodies',
+      () async {
+    // A JSON array / non-map backends previously threw TypeError into the
+    // generic catch → 'Could not reach …' about a server that ANSWERED.
+    final s = await serverSettings();
+    await s.setServerBackend('glm');
+    for (final body in ['[]', '"ok"', '{"backends": "yes"}']) {
+      final analyzer = ServerAnalyzer(s,
+          client: MockClient((_) async => http.Response(body, 200)));
+      final msg = await analyzer.validateKey('upload-key');
+      expect(msg, isNot(contains('Could not reach')), reason: body);
+    }
+  });
+
+  test('a 503 with a reason surfaces it VERBATIM — a refused backend must '
+      'not look like a network hiccup', () async {
+    // The 2026-07-31 incident: GLM selected, no plan key on the server —
+    // every request 503ed and the app said only 'network or service
+    // issue'. An hour of log archaeology later, this test.
+    final s = await serverSettings();
+    var calls = 0;
+    final analyzer = ServerAnalyzer(
+      s,
+      normalizer: (b) async => b,
+      sleep: (_) async {},
+      client: MockClient((_) async {
+        calls++;
+        return http.Response(
+            jsonEncode({
+              'error': 'claude_unavailable',
+              'reason': 'no key (GLM_PLAN_KEY)',
+            }),
+            503);
+      }),
+    );
+    final out = await analyzer.analyzePhoto(jpeg());
+    expect(out.retryable, isTrue, reason: 'config is fixable; keep photos');
+    expect(calls, 1,
+        reason: 'a 503 with no retry verdict must NOT spin — seconds '
+            'cannot add a plan key');
+    expect(out.error, contains('GLM_PLAN_KEY'),
+        reason: 'the server said exactly what is missing — repeat it');
+    // A bare 503 (busy CLI) keeps the generic transient message.
+    final busy = ServerAnalyzer(
+      s,
+      normalizer: (b) async => b,
+      client: MockClient((_) async =>
+          http.Response('{"error": "claude_unavailable"}', 503)),
+    );
+    final busyOut = await busy.analyzePhoto(jpeg());
+    expect(busyOut.retryable, isTrue);
+    expect(busyOut.error, isNot(contains('GLM_PLAN_KEY')));
+  });
+
+  test('a BUSY 503 retries in place; an already-answered 503 does NOT',
+      () async {
+    // The server now says which kind of 503 this is. Retrying a run that
+    // already happened spends another 120 s CLI run of the subscription
+    // for the same answer (review 2026-07-31).
+    final s = await serverSettings();
+    var calls = 0;
+    final terminal = ServerAnalyzer(
+      s,
+      normalizer: (b) async => b,
+      sleep: (_) async {},
+      client: MockClient((_) async {
+        calls++;
+        return http.Response(
+            jsonEncode({
+              'error': 'claude_unavailable',
+              'reason': 'the analysis ran but produced no usable result',
+              'retry': false,
+            }),
+            503);
+      }),
+    );
+    final terminalOut = await terminal.analyzePhoto(jpeg());
+    expect(calls, 1, reason: 'terminal 503 must not spend two more runs');
+    expect(terminalOut.retryable, isFalse,
+        reason: 'the run ALREADY answered — a watcher that keeps '
+            're-offering this photo re-spends a full CLI run every scan');
+
+    calls = 0;
+    final busy = ServerAnalyzer(
+      s,
+      normalizer: (b) async => b,
+      sleep: (_) async {},
+      client: MockClient((_) async {
+        calls++;
+        return http.Response(
+            jsonEncode({
+              'error': 'claude_unavailable',
+              'reason': 'the analyzer is busy with another photo',
+              'retry': true,
+            }),
+            503);
+      }),
+    );
+    final out = await busy.analyzePhoto(jpeg());
+    expect(calls, 3, reason: 'a busy CLI is exactly what retries are for');
+    expect(out.retryable, isTrue);
+  });
+
+  test('probeKey uses the FREE auth_check — never a CLI run — and keeps '
+      'the readiness verdicts', () async {
+    // The regression this pins (caught 2026-07-31, same day it shipped):
+    // switching diagnostics from validateKey to probeKey made the SERVER
+    // provider inherit the base probe, which posts a 'ping' prompt to
+    // /api/text_intent — a full CLI run under the owner's subscription
+    // whose prose reply then fails the JSON contract, so a healthy setup
+    // was reported as "The key was not accepted" and the remaining
+    // stages never ran.
+    final s = await serverSettings();
+    final paths = <String>[];
+    ServerAnalyzer make(String body, int status) => ServerAnalyzer(s,
+        normalizer: (b) async => b,
+        client: MockClient((req) async {
+          paths.add(req.url.path);
+          return http.Response(body, status);
+        }));
+
+    final ok = await make(
+            jsonEncode({'ok': true, 'backends': {'claude': 'enabled'}}), 200)
+        .probeKey('upload-key');
+    expect(paths, ['/api/auth_check'],
+        reason: 'the probe must not spend a model call');
+    expect(ok.result, KeyProbeResult.ok);
+
+    // A server-side config fact is NOT a rejected key.
+    paths.clear();
+    await s.setServerBackend('glm');
+    final notReady = await make(
+        jsonEncode({
+          'ok': true,
+          'backends': {'glm': 'no key (GLM_PLAN_KEY)'},
+        }),
+        200).probeKey('upload-key');
+    expect(notReady.result, isNot(KeyProbeResult.rejected),
+        reason: 'the upload key WAS accepted; the plan key is missing');
+    expect(notReady.message, contains('GLM_PLAN_KEY'));
+
+    // A genuinely rejected key still rejects.
+    paths.clear();
+    final bad = await make('{"error": "Unauthorized"}', 401)
+        .probeKey('upload-key');
+    expect(bad.result, KeyProbeResult.rejected);
+  });
+
+  test('a reply analyzed by the WRONG backend is refused, not logged',
+      () async {
+    final s = await serverSettings();
+    await s.setServerBackend('glm');
+    final analyzer = ServerAnalyzer(
+      s,
+      normalizer: (b) async => b,
+      client: MockClient((_) async => http.Response(
+          jsonEncode({
+            'ok': true,
+            'analysis': {'is_food': true, 'total_calories': 500},
+            'analyzed_by': 'claude', // pre-upgrade server: wrong payer
+          }),
+          200)),
+    );
+    final out = await analyzer.analyzePhoto(jpeg());
+    expect(out.analysis, isNull,
+        reason: 'accepting it would spend the Claude plan forever while '
+            'the user believes GLM pays');
+    expect(out.retryable, isFalse,
+        reason: 'a retry spends the wrong plan again');
+    expect(out.error, contains('update the server'));
+
+    await s.setServerBackend('claude');
+    final ok = await analyzer.analyzePhoto(jpeg());
+    expect(ok.isFood, isTrue, reason: 'matching payer sails through');
   });
 
   test('text intent hits /api/text_intent and unwraps result', () async {

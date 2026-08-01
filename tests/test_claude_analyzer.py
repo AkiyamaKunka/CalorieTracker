@@ -25,9 +25,12 @@ GOOD_ANALYSIS = {"is_food": True, "meal_description": "Latte", "total_calories":
                  "food_items": []}
 
 
-def _envelope(result_text, is_error=False):
-    return json.dumps({"type": "result", "subtype": "success",
-                       "is_error": is_error, "result": result_text})
+def _envelope(result_text, is_error=False, turns=None):
+    env = {"type": "result", "subtype": "success",
+           "is_error": is_error, "result": result_text}
+    if turns is not None:
+        env["num_turns"] = turns
+    return json.dumps(env)
 
 
 def _configure(monkeypatch, enabled="1", cli="/usr/local/bin/claude", dispatch=None):
@@ -1173,3 +1176,251 @@ def test_timeout_bounds_lock_hold_even_with_pipe_holding_grandchild(monkeypatch,
             except (ValueError, OSError):
                 pass
         worker.join(timeout=35)
+
+
+# ─── Subscription backends: glm / doubao ride the SAME CLI ──────────────
+
+def _configure_backend(monkeypatch, backend, key="sk-plan"):
+    _configure(monkeypatch)
+    # Hermetic: ambient developer env must not leak flags into the argv
+    # the assertions below inspect.
+    monkeypatch.delenv("CLAUDE_ANALYZER_EXTRA_FLAGS", raising=False)
+    monkeypatch.delenv("CLAUDE_ANALYZER_MODEL", raising=False)
+    monkeypatch.setenv(
+        {"glm": "GLM_PLAN_KEY", "doubao": "DOUBAO_PLAN_KEY"}[backend], key)
+    # Prove the scrub: these must NOT reach a vendor-plan child process.
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "anthropic-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-api-secret")
+
+
+def _capture_run(monkeypatch, stdout="", returncode=0, stderr=""):
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append({"cmd": cmd, "env": kwargs.get("env"),
+                      "input": kwargs.get("input")})
+        return SimpleNamespace(returncode=returncode, stdout=stdout,
+                               stderr=stderr)
+
+    monkeypatch.setattr(claude_analyzer.subprocess, "run", run)
+    return calls
+
+
+def test_doubao_photo_streams_with_plan_env_and_never_file_falls_back(
+        monkeypatch):
+    _configure_backend(monkeypatch, "doubao")
+    # Nonzero exit — for claude this would arm the file fallback; for
+    # doubao the fallback must NOT run (image support there is already the
+    # experiment; a Read-enabled retry adds exfiltration on top).
+    calls = _capture_run(monkeypatch, returncode=1)
+    out = claude_analyzer.analyze_food_photo(
+        b"jpeg", allow_file_fallback=True, backend="doubao")
+    assert out is None
+    assert len(calls) == 1
+    env = calls[0]["env"]
+    assert env["ANTHROPIC_BASE_URL"] == \
+        "https://ark.cn-beijing.volces.com/api/plan"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-plan"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+    # Stream shape: the image rides stdin, not a temp file.
+    assert "--input-format" in calls[0]["cmd"]
+
+
+def test_glm_photo_uses_the_official_vision_mcp(monkeypatch):
+    import stat
+    _configure_backend(monkeypatch, "glm")
+    monkeypatch.setenv("CLAUDE_ANALYZER_MODEL", "claude-opus-5")
+    captured = {}
+
+    def run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env")
+        captured["cwd"] = kwargs.get("cwd")
+        # The config temp file exists only DURING the run; read it here.
+        cfg = cmd[cmd.index("--mcp-config") + 1]
+        with open(cfg) as f:
+            captured["cfg"] = f.read()
+        captured["cfg_mode"] = stat.S_IMODE(os.stat(cfg).st_mode)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=_envelope(json.dumps(GOOD_ANALYSIS), turns=2),
+            stderr="")
+
+    monkeypatch.setattr(claude_analyzer.subprocess, "run", run)
+    out = claude_analyzer.analyze_food_photo(b"jpeg", backend="glm")
+    assert out == GOOD_ANALYSIS
+    cmd = captured["cmd"]
+    # The key must NEVER be an argv element (argv is world-readable via
+    # ps//proc for the whole run) — it lives in a 0600 temp file.
+    assert all("sk-plan" not in str(a) for a in cmd)
+    mcp = json.loads(captured["cfg"])
+    zai = mcp["mcpServers"]["zai"]
+    assert zai["args"] == ["-y", "@z_ai/mcp-server"]
+    assert zai["env"]["Z_AI_API_KEY"] == "sk-plan"
+    assert zai["env"]["Z_AI_MODE"] == "ZHIPU"
+    assert captured["cfg_mode"] == 0o600
+    cfg_path = cmd[cmd.index("--mcp-config") + 1]
+    assert not os.path.exists(cfg_path), "config temp file must be cleaned"
+    assert cmd[cmd.index("--allowedTools") + 1] == "mcp__zai"
+    flag_values = {cmd[i]: cmd[i + 1]
+                   for i in range(len(cmd) - 1) if cmd[i].startswith("--")}
+    assert "Read" not in flag_values.get("--allowedTools", ""), \
+        "Read must never be enabled on this path"
+    assert "--tools" not in cmd, "the no-tools text flag would kill the MCP"
+    # --allowedTools is an AUTO-APPROVE list, not a disable list: the
+    # built-ins stay reachable to a prompt carrying caller text (the app's
+    # dietary profile) unless they are named forbidden (review 2026-07-31).
+    denied = flag_values.get("--disallowedTools", "")
+    for tool in ("Read", "Glob", "Grep", "LS", "Bash", "Write"):
+        assert tool in denied, f"{tool} must be explicitly disallowed"
+    assert "--strict-mcp-config" in cmd
+    # And the run's cwd must NOT be the directory holding the plan key.
+    assert captured["cwd"] != os.path.dirname(cfg_path), \
+        "the working directory must not contain the mcp-config file"
+    # Anthropic model ids must not be pushed at a vendor plan.
+    assert "--model" not in cmd
+    env = captured["env"]
+    assert env["ANTHROPIC_BASE_URL"] == "https://open.bigmodel.cn/api/anthropic"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+
+
+def test_glm_photo_without_npx_spends_nothing(monkeypatch):
+    _configure_backend(monkeypatch, "glm")
+    cli = "/usr/local/bin/claude"
+    monkeypatch.setattr(
+        claude_analyzer.shutil, "which",
+        lambda name=None, *a, **k: None if name == "npx" else cli)
+    calls = _capture_run(monkeypatch)
+    assert claude_analyzer.analyze_food_photo(b"jpeg", backend="glm") is None
+    assert calls == []
+
+
+def test_vendor_backend_without_key_spends_nothing(monkeypatch):
+    _configure(monkeypatch)
+    monkeypatch.delenv("GLM_PLAN_KEY", raising=False)
+    monkeypatch.delenv("DOUBAO_PLAN_KEY", raising=False)
+    calls = _capture_run(monkeypatch)
+    assert claude_analyzer.analyze_food_photo(b"jpeg", backend="glm") is None
+    assert claude_analyzer.analyze_text_prompt("hi", backend="doubao") is None
+    assert calls == []
+
+
+def test_unknown_backend_is_refused_outright(monkeypatch):
+    _configure(monkeypatch)
+    calls = _capture_run(monkeypatch)
+    assert claude_analyzer.analyze_food_photo(b"jpeg", backend="gpt") is None
+    assert claude_analyzer.analyze_text_prompt("hi", backend="") is None
+    assert calls == []
+
+
+def test_text_intent_on_glm_uses_plan_env_but_plain_text_turn(monkeypatch):
+    _configure_backend(monkeypatch, "glm")
+    monkeypatch.setenv("CLAUDE_ANALYZER_MODEL", "claude-opus-5")
+    calls = _capture_run(
+        monkeypatch, stdout=_envelope(json.dumps({"intent": "x"})))
+    out = claude_analyzer.analyze_text_prompt("fix meal 2", backend="glm")
+    assert out == {"result": {"intent": "x"}}
+    cmd = calls[0]["cmd"]
+    assert "--mcp-config" not in cmd, "text turns need no vision MCP"
+    assert cmd[cmd.index("--tools") + 1] == ""
+    assert "--model" not in cmd
+    assert calls[0]["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-plan"
+
+
+def test_claude_backend_still_gets_the_model_override(monkeypatch):
+    _configure(monkeypatch)
+    monkeypatch.setenv("CLAUDE_ANALYZER_MODEL", "claude-opus-5")
+    calls = _capture_run(
+        monkeypatch, stdout=_envelope(json.dumps(GOOD_ANALYSIS)))
+    assert claude_analyzer.analyze_food_photo(b"jpeg") == GOOD_ANALYSIS
+    assert "--model" in calls[0]["cmd"]
+
+
+def test_backend_status_names_the_missing_knob(monkeypatch):
+    _configure(monkeypatch)
+    monkeypatch.delenv("GLM_PLAN_KEY", raising=False)
+    monkeypatch.setenv("DOUBAO_PLAN_KEY", "k")
+    status = claude_analyzer.backend_status()
+    assert status["claude"] == "enabled"
+    assert "GLM_PLAN_KEY" in status["glm"]
+    assert status["doubao"] == "ready"
+
+
+def test_doubao_never_file_falls_back_even_under_dispatch_file(monkeypatch):
+    # CLAUDE_ANALYZER_DISPATCH=file is the claude-backend rollback knob; a
+    # doubao run must ignore it — the Read-file path is both the untested
+    # image experiment AND the exfiltration surface.
+    _configure_backend(monkeypatch, "doubao")
+    monkeypatch.setenv("CLAUDE_ANALYZER_DISPATCH", "file")
+    calls = _capture_run(monkeypatch, returncode=1)
+    assert claude_analyzer.analyze_food_photo(
+        b"jpeg", backend="doubao") is None
+    assert len(calls) == 1
+    assert "--input-format" in calls[0]["cmd"], "stream shape, never file"
+    assert "--allowedTools" not in calls[0]["cmd"]
+
+
+def test_backend_paths_respect_the_single_flight_lock(monkeypatch):
+    _configure_backend(monkeypatch, "glm")
+    monkeypatch.setenv("DOUBAO_PLAN_KEY", "sk-plan")
+    calls = _capture_run(monkeypatch)
+    assert claude_analyzer._CLI_LOCK.acquire(blocking=False)
+    try:
+        # A contended CLI must decline instantly on EVERY backend — the
+        # vendor paths spawn the same memory-heavy Node process.
+        assert claude_analyzer.analyze_food_photo(
+            b"jpeg", backend="glm") is None
+        assert claude_analyzer.analyze_food_photo(
+            b"jpeg", backend="doubao") is None
+        assert claude_analyzer.analyze_text_prompt(
+            "hi", backend="glm") is None
+        assert calls == []
+    finally:
+        claude_analyzer._CLI_LOCK.release()
+
+
+def test_plan_key_never_reaches_log_output(monkeypatch, caplog):
+    # The GLM key is embedded in the --mcp-config argv JSON; a failing run
+    # logs stderr/stdout snippets — none of OUR log lines may carry argv.
+    _configure_backend(monkeypatch, "glm", key="sk-SECRET-PLAN")
+    calls = _capture_run(monkeypatch, returncode=1)
+    with caplog.at_level(logging.DEBUG, logger="claude_analyzer"):
+        assert claude_analyzer.analyze_food_photo(
+            b"jpeg", backend="glm") is None
+    assert calls, "the CLI must actually have been invoked"
+    assert "sk-SECRET-PLAN" not in caplog.text
+
+
+def test_glm_blind_run_without_tool_roundtrip_is_discarded(monkeypatch):
+    # If the zai MCP server dies after launch (npm registry unreachable),
+    # the CLI answers in ONE turn about an image the model never saw — and
+    # the prompt's "unclear → not food" rule makes that a contract-valid
+    # WRONG verdict. num_turns >= 2 is the proof a tool round-trip ran.
+    _configure_backend(monkeypatch, "glm")
+    _capture_run(monkeypatch,
+                 stdout=_envelope(json.dumps({"is_food": False}), turns=1))
+    assert claude_analyzer.analyze_food_photo(b"jpeg", backend="glm") is None
+    _capture_run(monkeypatch, stdout=_envelope(json.dumps(GOOD_ANALYSIS)))
+    assert claude_analyzer.analyze_food_photo(b"jpeg", backend="glm") is None
+    _capture_run(monkeypatch,
+                 stdout=_envelope(json.dumps(GOOD_ANALYSIS), turns=3))
+    assert claude_analyzer.analyze_food_photo(
+        b"jpeg", backend="glm") == GOOD_ANALYSIS
+
+
+def test_cli_echoed_plan_key_is_redacted_from_logs(monkeypatch, caplog):
+    # An older CLI that rejects --mcp-config as a file path echoes the
+    # VALUE into stderr — which _log_cli_exit snippets into the server
+    # log. The key must be scrubbed before the snippet is cut.
+    _configure_backend(monkeypatch, "glm", key="sk-SECRET-PLAN")
+    _capture_run(
+        monkeypatch, returncode=1,
+        stderr=("error: MCP config file not found: "
+                "{\"mcpServers\":{\"zai\":{\"env\":{\"Z_AI_API_KEY\":"
+                "\"sk-SECRET-PLAN\"}}}}"))
+    with caplog.at_level(logging.WARNING, logger="claude_analyzer"):
+        assert claude_analyzer.analyze_food_photo(
+            b"jpeg", backend="glm") is None
+    assert "sk-SECRET-PLAN" not in caplog.text
+    assert "redacted-plan-key" in caplog.text

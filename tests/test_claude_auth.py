@@ -213,3 +213,43 @@ def test_cancel_reports_whether_a_session_existed(
     client.post("/api/claude_auth/start", headers=h)
     assert client.post("/api/claude_auth/cancel",
                        headers=h).get_json()["cancelled"] is True
+
+
+def test_expired_sessions_are_reaped_not_just_reported(monkeypatch):
+    """An abandoned consent (the ordinary 'tapped Connect then closed the
+    sheet' path — the app never calls /cancel) used to leave a full Node
+    process holding a PTY fd forever on the 1 GB VM: the TTL was consulted
+    but nothing ever acted on it."""
+    killed = []
+    fake = SimpleNamespace(proc=SimpleNamespace(pid=4242), master=-1,
+                           url="https://claude.com/x", started_at=0.0)
+    # Far in the past on ANY monotonic clock (macOS reports uptime, which
+    # is small right after a reboot — 0.0 was not reliably "expired").
+    monkeypatch.setattr(claude_auth, "_session", {
+        "proc": fake.proc, "master": fake.master, "url": fake.url,
+        "started_at": -10_000.0,
+    })
+    monkeypatch.setattr(claude_auth, "_kill_session",
+                        lambda sess: killed.append(sess))
+    # monotonic() is far past started_at=0 in any real process.
+    assert claude_auth.session_active() is False
+    assert killed, "the expired session must be KILLED, not just reported"
+    assert claude_auth._session is None
+
+    # And the explicit sweep is idempotent.
+    killed.clear()
+    assert claude_auth.reap_expired_session() is False
+    assert killed == []
+
+
+def test_a_live_session_is_never_reaped(monkeypatch):
+    import time as _time
+    monkeypatch.setattr(claude_auth, "_session", {
+        "proc": SimpleNamespace(pid=1), "master": -1, "url": "u",
+        "started_at": _time.monotonic(),
+    })
+    killed = []
+    monkeypatch.setattr(claude_auth, "_kill_session",
+                        lambda sess: killed.append(sess))
+    assert claude_auth.session_active() is True
+    assert killed == []

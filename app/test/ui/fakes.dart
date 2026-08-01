@@ -6,6 +6,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:calorie_tracker/core/contracts.dart';
+import 'package:calorie_tracker/ui/photo_pipeline.dart';
 import 'package:calorie_tracker/ui/services.dart';
 
 import '../support/fake_meals_dao.dart';
@@ -29,7 +30,6 @@ class FakeAnalyzer implements AnalyzerService {
 
   /// Test hook: controls validateKey resolution. Default resolves null (OK).
   Future<String?> Function(String apiKey)? onValidateKey;
-  final List<String> validatedKeys = [];
 
   @override
   Future<AnalysisOutcome> analyzePhoto(Uint8List originalBytes) async {
@@ -42,9 +42,21 @@ class FakeAnalyzer implements AnalyzerService {
       nextTextIntent;
 
   @override
-  Future<String?> validateKey(String apiKey) {
-    validatedKeys.add(apiKey);
-    return onValidateKey?.call(apiKey) ?? Future.value(null);
+  Future<String?> validateKey(String apiKey) =>
+      onValidateKey?.call(apiKey) ?? Future.value(null);
+
+  /// Diagnostics-facing probe. Default derives from [onValidateKey] like
+  /// the contract's own default; [onProbeKey] overrides it for the cases
+  /// validateKey CANNOT express (out of credit vs rate-limited).
+  Future<KeyProbe> Function(String apiKey)? onProbeKey;
+
+  @override
+  Future<KeyProbe> probeKey(String apiKey) async {
+    if (onProbeKey != null) return onProbeKey!(apiKey);
+    final error = await validateKey(apiKey);
+    return error == null
+        ? const KeyProbe(KeyProbeResult.ok)
+        : KeyProbe(KeyProbeResult.rejected, message: error);
   }
 }
 
@@ -97,9 +109,17 @@ class FakeSettings implements SettingsStore {
   @override
   bool isQuotaPaused = false;
   @override
-  bool get canAnalyze => apiKey.trim().isNotEmpty && !isQuotaPaused;
+  DateTime? quotaPauseUntil;
   @override
-  String model;
+  bool get canAnalyze => apiKey.trim().isNotEmpty && !isQuotaPaused;
+  /// Provider-scoped MODELS too — the real store keeps one per provider,
+  /// and a shared field made provider-switch tests pass while production
+  /// would have shown Gemini's model under Doubao (review 2026-07-31).
+  final Map<String, String> modelsByProvider;
+
+  @override
+  String get model => modelsByProvider[provider] ?? '';
+  set model(String v) => modelsByProvider[provider] = v;
   @override
   int lookbackDays;
   @override
@@ -110,16 +130,30 @@ class FakeSettings implements SettingsStore {
   String dietaryProfile;
   @override
   String serverBaseUrl = '';
+  @override
+  String serverBackend = 'claude';
   int updateCalls = 0;
 
   FakeSettings({
     String apiKey = 'k',
-    this.model = 'gemini-2.5-flash',
+    String model = 'gemini-2.5-flash',
+    Map<String, String>? keys,
+    Map<String, String>? models,
     this.lookbackDays = 2,
     this.reportTime = '21:00',
     this.watcherEnabled = false,
     this.dietaryProfile = '',
-  }) : keysByProvider = {'gemini': apiKey};
+  })  : keysByProvider = keys ?? {'gemini': apiKey},
+        modelsByProvider = models ??
+            {
+              'gemini': model,
+              'openai': 'gpt-4o-mini',
+              'anthropic': 'claude-sonnet-5',
+              'qwen': 'qwen3-vl-flash',
+              'doubao': 'doubao-seed-2-0-mini-260428',
+              'glm': 'glm-4.6v-flash',
+              'server': 'server',
+            };
 
   @override
   Future<void> update({
@@ -131,6 +165,7 @@ class FakeSettings implements SettingsStore {
     bool? watcherEnabled,
     String? dietaryProfile,
     String? serverBaseUrl,
+    String? serverBackend,
   }) async {
     updateCalls++;
     if (apiKey != null) this.apiKey = apiKey;
@@ -141,13 +176,42 @@ class FakeSettings implements SettingsStore {
     if (watcherEnabled != null) this.watcherEnabled = watcherEnabled;
     if (dietaryProfile != null) this.dietaryProfile = dietaryProfile;
     if (serverBaseUrl != null) this.serverBaseUrl = serverBaseUrl;
+    if (serverBackend != null) this.serverBackend = serverBackend;
   }
 }
 
 class FakePicker implements RecentPhotoPicker {
   List<IntakePhoto> photos = const [];
+
+  /// Assets derive from [photos] so suites keep seeding one list.
+  /// [loadedOriginals] proves the grid reads ORIGINAL bytes for the tapped
+  /// photo ONLY.
+  final List<String> loadedOriginals = [];
+  final List<String> thumbnailed = [];
+
   @override
-  Future<List<IntakePhoto>> recentPhotos({int limit = 30}) async => photos;
+  Future<List<RecentAsset>> recentAssets({int limit = 30}) async => [
+        for (final p in photos.take(limit))
+          RecentAsset(p.assetId, p.fileName,
+              p.capturedAt ?? DateTime(2026, 7, 31)),
+      ];
+
+  @override
+  Future<Uint8List?> thumbnail(String assetId) async {
+    thumbnailed.add(assetId);
+    final match = photos.where((p) => p.assetId == assetId);
+    return match.isEmpty ? null : match.first.bytes;
+  }
+
+  @override
+  Future<IntakePhoto?> loadOriginal(RecentAsset asset) async {
+    loadedOriginals.add(asset.id);
+    final match = photos.where((p) => p.assetId == asset.id);
+    if (match.isEmpty) return null;
+    final p = match.first;
+    return IntakePhoto(p.bytes, p.assetId, p.fileName,
+        capturedAt: p.capturedAt, deliberate: true);
+  }
 }
 
 class FakeIntake implements PhotoIntake {
@@ -200,6 +264,7 @@ UiServices makeServices({
   FakePicker? picker,
   FakeIntake? intake,
   bool grantPhotoPermission = true,
+  Future<PhotoOutcome> Function(IntakePhoto photo)? processPhoto,
 }) =>
     UiServices(
       dao: dao ?? FakeDao(),
@@ -210,4 +275,5 @@ UiServices makeServices({
       photoIntake: intake ?? FakeIntake(),
       reports: FakeReports(),
       requestPhotoPermission: () async => grantPhotoPermission,
+      processPhoto: processPhoto,
     );

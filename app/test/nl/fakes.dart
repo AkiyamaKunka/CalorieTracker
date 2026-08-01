@@ -48,6 +48,10 @@ class FakeAnalyzer implements AnalyzerService {
 
   @override
   Future<String?> validateKey(String apiKey) async => null;
+
+  @override
+  Future<KeyProbe> probeKey(String apiKey) async =>
+      const KeyProbe(KeyProbeResult.ok);
 }
 
 class MemoryKeyStore implements SecureKeyStore {
@@ -62,6 +66,12 @@ class MemoryKeyStore implements SecureKeyStore {
 
 Future<AppSettings> testSettings() async {
   SharedPreferences.setMockInitialValues(const {});
-  return AppSettings.load(
+  final s = await AppSettings.load(
       prefs: await SharedPreferences.getInstance(), keyStore: MemoryKeyStore());
+  // A key must exist: the executor now refuses keyless requests with an
+  // actionable message BEFORE calling the analyzer, and these suites test
+  // the post-key behavior. test/nl/missing_key_test.dart owns the
+  // keyless path.
+  await s.setGeminiApiKey('test-key');
+  return s;
 }

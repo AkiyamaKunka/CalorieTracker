@@ -5,6 +5,7 @@
 library;
 
 import 'dart:async' show unawaited;
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show compute;
 
@@ -16,6 +17,7 @@ import '../services/analyzer/provider_analyzers.dart'
     show ServerAnalyzer, createMultiProviderAnalyzer;
 import '../services/nl/executor.dart';
 import '../services/photo/coverage.dart';
+import '../services/photo/filename_dates.dart' show deriveCapturedAt;
 import '../services/photo/photo_hash.dart' show originalBytesMd5;
 import '../services/photo/photo_library.dart';
 import '../services/photo/share_intake.dart';
@@ -95,6 +97,12 @@ class AppServices {
         onMealSaved: signalMealsChanged);
 
     final photoLibrary = PhotoManagerLibrary();
+    // PhotoManager, NOT permission_handler: on Android <=12 the latter's
+    // Permission.photos resolves to READ_MEDIA_IMAGES (SDK 33+ only) and
+    // auto-DENIES with no dialog, dead-ending both photo flows on the
+    // cheap end of the friend cohort. PhotoManager.requestPermissionExtend
+    // handles every version and reports limited vs full.
+    Future<bool> requestPhotos() => photoLibrary.requestPermission();
     final ui = UiServices(
       dao: dao,
       analyzer: analyzer,
@@ -102,8 +110,8 @@ class AppServices {
       photoIntake: photoIntake,
       reports: reports,
       settings: _AppSettingsStore(settings, notifier),
-      picker: _ShareIntakePicker(shareIntake),
-      requestPhotoPermission: _requestPhotosPermission,
+      picker: _ShareIntakePicker(photoLibrary),
+      requestPhotoPermission: requestPhotos,
       thumbs: MealThumbResolver(dao: dao, library: photoLibrary),
       coverage: CoverageAuditor(
           library: photoLibrary,
@@ -118,6 +126,9 @@ class AppServices {
       photoLibrary: photoLibrary,
       startClaudeAuth: serverAnalyzer.startClaudeAuth,
       completeClaudeAuth: serverAnalyzer.completeClaudeAuth,
+      openSystemSettings: () async {
+        await openAppSettings(); // permission_handler
+      },
     );
     pipeline.bind(photoIntake); // automated watch (deliberate=false)
     pipeline.bindStream(shareIntake.photos()); // share sheet (deliberate)
@@ -148,10 +159,15 @@ class AppServices {
   }
 }
 
-Future<bool> _requestPhotosPermission() async {
-  final status = await Permission.photos.request();
-  return status.isGranted || status.isLimited;
-}
+/// Test seam for the adapter below: it is the ONLY production code that
+/// maps the UI's provider-scoped apiKey/model onto AppSettings' seven
+/// slots, and every widget test uses a fake that merely SIMULATES that
+/// routing — so a real mis-route would have stayed green (review
+/// 2026-07-31). [notifier] is optional here; the daily-report reschedule
+/// is exercised by the report suite.
+SettingsStore createSettingsStore(AppSettings settings,
+        {ReportNotifier? notifier}) =>
+    _AppSettingsStore(settings, notifier ?? ReportNotifier(dailyBody: null));
 
 /// Adapts the persistent AppSettings onto the UI's SettingsStore, keeping
 /// the background job and the daily-report schedule in lockstep with edits.
@@ -169,6 +185,8 @@ class _AppSettingsStore implements SettingsStore {
   @override
   bool get isQuotaPaused => _s.isQuotaPaused;
   @override
+  DateTime? get quotaPauseUntil => _s.quotaPauseUntil;
+  @override
   String get model => _s.activeModel;
   @override
   int get lookbackDays => _s.lookbackDays;
@@ -180,6 +198,8 @@ class _AppSettingsStore implements SettingsStore {
   String get dietaryProfile => _s.dietaryProfile ?? '';
   @override
   String get serverBaseUrl => _s.serverBaseUrl;
+  @override
+  String get serverBackend => _s.serverBackend;
 
   @override
   Future<void> update({
@@ -191,6 +211,7 @@ class _AppSettingsStore implements SettingsStore {
     bool? watcherEnabled,
     String? dietaryProfile,
     String? serverBaseUrl,
+    String? serverBackend,
   }) async {
     if (provider != null) {
       await _s.setProvider(AiProvider.values
@@ -204,6 +225,9 @@ class _AppSettingsStore implements SettingsStore {
         AiProvider.openai => _s.setOpenaiApiKey(apiKey),
         AiProvider.anthropic => _s.setAnthropicApiKey(apiKey),
         AiProvider.server => _s.setServerApiKey(apiKey),
+        AiProvider.qwen => _s.setQwenApiKey(apiKey),
+        AiProvider.doubao => _s.setDoubaoApiKey(apiKey),
+        AiProvider.glm => _s.setGlmApiKey(apiKey),
       };
     }
     if (model != null) {
@@ -213,6 +237,9 @@ class _AppSettingsStore implements SettingsStore {
         AiProvider.anthropic => _s.setAnthropicModel(model),
         // The server chooses its own model; the field is hidden in the UI.
         AiProvider.server => Future<void>.value(),
+        AiProvider.qwen => _s.setQwenModel(model),
+        AiProvider.doubao => _s.setDoubaoModel(model),
+        AiProvider.glm => _s.setGlmModel(model),
       };
     }
     if (lookbackDays != null) {
@@ -233,16 +260,44 @@ class _AppSettingsStore implements SettingsStore {
     }
     if (dietaryProfile != null) await _s.setDietaryProfile(dietaryProfile);
     if (serverBaseUrl != null) await _s.setServerBaseUrl(serverBaseUrl);
+    if (serverBackend != null) await _s.setServerBackend(serverBackend);
   }
 }
 
-/// The Add-flow grid source: the photo module's pickFromRecent already
-/// returns ORIGINAL bytes with deliberate=true (spec §2.3/§6.2).
+/// The Add-flow grid source: list assets, thumbnail per visible cell,
+/// original bytes only for the photo the user taps.
 class _ShareIntakePicker implements RecentPhotoPicker {
-  final ShareIntake _share;
-  _ShareIntakePicker(this._share);
+  final PhotoLibrary _library;
+  _ShareIntakePicker(this._library);
 
   @override
-  Future<List<IntakePhoto>> recentPhotos({int limit = 30}) =>
-      _share.pickFromRecent(limit);
+  Future<List<RecentAsset>> recentAssets({int limit = 30}) async {
+    if (!await _library.requestPermission()) return const [];
+    final assets = await _library.recentImages(limit);
+    return [
+      for (final a in assets.take(limit))
+        RecentAsset(a.id, await a.fileName(), a.createDateTime),
+    ];
+  }
+
+  @override
+  Future<Uint8List?> thumbnail(String assetId) =>
+      _library.thumbnailByAssetId(assetId);
+
+  @override
+  Future<IntakePhoto?> loadOriginal(RecentAsset asset) async {
+    final bytes = await _library.originBytesByAssetId(asset.id);
+    if (bytes == null || bytes.isEmpty) return null;
+    // §8 25 MB cap, as every other intake path enforces: the eager
+    // pickFromRecent skipped oversize photos, and the lazy rewrite lost
+    // that guard — a 40 MP original would hit the analyzer's normalizer
+    // and the base64 upload on a phone that cannot afford either.
+    if (bytes.length > maxPhotoBytes) return null;
+    // §6.3 dating from the asset's own metadata, same rule the eager path
+    // applied; deliberate=true (user-picked, spec §2.3).
+    return IntakePhoto(bytes, asset.id, asset.fileName,
+        capturedAt: deriveCapturedAt(
+            fileName: asset.fileName, assetCreateDate: asset.createdAt),
+        deliberate: true);
+  }
 }

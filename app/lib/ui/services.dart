@@ -5,6 +5,8 @@
 /// di.dart so an integration-time signature drift is fixed in one file.
 library;
 
+import 'dart:typed_data';
+
 import '../core/contracts.dart';
 import '../services/photo/coverage.dart';
 import '../services/photo/photo_library.dart';
@@ -20,13 +22,18 @@ abstract class SettingsStore {
   String get apiKey;
 
   /// Active AI provider: 'gemini' | 'openai' | 'anthropic' | 'server'
-  /// (own server on the Claude subscription). String-typed so the UI seam
-  /// stays free of module imports (di adapts the enum).
+  /// (own server on the Claude subscription) | 'qwen' | 'doubao' | 'glm'
+  /// (the mainland-China providers). String-typed so the UI seam stays
+  /// free of module imports (di adapts the enum).
   String get provider;
 
   /// Spec §3.3 quota-pause latch: while true, analyses cannot succeed —
   /// backfill triggers skip the byte-reads entirely.
   bool get isQuotaPaused;
+
+  /// When the §3.3 latch lifts, or null when not paused — the Settings
+  /// banner shows the user WHY nothing is analyzing and until when.
+  DateTime? get quotaPauseUntil;
 
   /// See AppSettings.canAnalyze — key present for the ACTIVE provider and no
   /// quota latch. Screens gate byte-reading sweeps on this single predicate
@@ -41,6 +48,10 @@ abstract class SettingsStore {
   /// Base URL of the user's own server (AiProvider.server); '' when unset.
   String get serverBaseUrl;
 
+  /// Whose subscription pays on the server: 'claude' | 'glm' | 'doubao'
+  /// (AppSettings.serverBackends). Plan keys live in the server's .env.
+  String get serverBackend;
+
   Future<void> update({
     String? apiKey,
     String? provider,
@@ -50,6 +61,7 @@ abstract class SettingsStore {
     bool? watcherEnabled,
     String? dietaryProfile,
     String? serverBaseUrl,
+    String? serverBackend,
   });
 }
 
@@ -58,7 +70,22 @@ abstract class SettingsStore {
 /// deliberate=true (user-picked → reclaims failed/skipped/deleted ledger
 /// rows, spec §2.3 caller policies).
 abstract class RecentPhotoPicker {
-  Future<List<IntakePhoto>> recentPhotos({int limit = 30});
+  /// LIST the recent assets without reading their bytes, plus a per-asset
+  /// thumbnail fetch and an on-demand original. The eager recentPhotos()
+  /// this replaced pulled up to 30 ORIGINALS (25 MB each) into one list,
+  /// and the grid decoded every 12 MP image full-res for a ~120 px cell —
+  /// hundreds of MB resident on a screen that uses exactly one photo.
+  Future<List<RecentAsset>> recentAssets({int limit = 30});
+  Future<Uint8List?> thumbnail(String assetId);
+  Future<IntakePhoto?> loadOriginal(RecentAsset asset);
+}
+
+/// One camera-roll entry, bytes NOT read.
+class RecentAsset {
+  const RecentAsset(this.id, this.fileName, this.createdAt);
+  final String id;
+  final String fileName;
+  final DateTime createdAt;
 }
 
 /// Everything a screen may need, built once at startup (di.dart) or from
@@ -92,6 +119,11 @@ class UiServices {
   final Future<({String? url, String? error})> Function()? startClaudeAuth;
   final Future<String?> Function(String code)? completeClaudeAuth;
 
+  /// Opens the OS app-settings page (permission remediation: once the OS
+  /// stops re-showing the photo dialog, in-app re-requests are no-ops and
+  /// this is the ONLY way back). Null in tests hides the buttons.
+  final Future<void> Function()? openSystemSettings;
+
   const UiServices({
     required this.dao,
     required this.analyzer,
@@ -107,5 +139,6 @@ class UiServices {
     this.photoLibrary,
     this.startClaudeAuth,
     this.completeClaudeAuth,
+    this.openSystemSettings,
   });
 }

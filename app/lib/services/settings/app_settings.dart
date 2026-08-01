@@ -1,9 +1,9 @@
 /// User-editable settings + persistence (spec §8 knobs).
 ///
 /// Non-secret values live in shared_preferences; EVERY provider credential
-/// (Gemini, OpenAI, Anthropic, and the own-server upload key) lives in
-/// flutter_secure_storage (spec §8: "user-supplied, stored in secure
-/// storage").
+/// (Gemini, OpenAI, Anthropic, the own-server upload key, and the
+/// Qwen/Doubao/GLM keys) lives in flutter_secure_storage (spec §8:
+/// "user-supplied, stored in secure storage").
 /// The analyzer's daily-quota pause latch (spec §3.3) is persisted here too so
 /// it survives restarts. A simple [ChangeNotifier] so UI can listen.
 library;
@@ -43,7 +43,12 @@ class FlutterSecureKeyStore implements SecureKeyStore {
 /// which runs the Claude Code CLI under their Claude subscription — the
 /// analysis costs no API money. No credential for Anthropic ever reaches
 /// the phone: the device holds only this server's own upload key.
-enum AiProvider { gemini, openai, anthropic, server }
+/// `qwen`/`doubao`/`glm` are the mainland-China providers (Alibaba,
+/// ByteDance, Zhipu) — BYO key like OpenAI, all OpenAI-compatible APIs.
+/// They exist because the other four are unreachable from mainland China
+/// without a VPN; for those users a domestic provider is the only way the
+/// app works at all.
+enum AiProvider { gemini, openai, anthropic, server, qwen, doubao, glm }
 
 class AppSettings extends ChangeNotifier {
   AppSettings._(this._prefs, this._keys);
@@ -56,6 +61,9 @@ class AppSettings extends ChangeNotifier {
   static const String _kOpenaiKey = 'openai_api_key';
   static const String _kAnthropicKey = 'anthropic_api_key';
   static const String _kServerKey = 'server_api_key';
+  static const String _kQwenKey = 'qwen_api_key';
+  static const String _kDoubaoKey = 'doubao_api_key';
+  static const String _kGlmKey = 'glm_api_key';
 
   // shared_preferences keys.
   static const String _kModel = 'settings.model';
@@ -69,6 +77,10 @@ class AppSettings extends ChangeNotifier {
   static const String _kOpenaiModel = 'settings.openai_model';
   static const String _kAnthropicModel = 'settings.anthropic_model';
   static const String _kServerBaseUrl = 'settings.server_base_url';
+  static const String _kServerBackend = 'settings.server_backend';
+  static const String _kQwenModel = 'settings.qwen_model';
+  static const String _kDoubaoModel = 'settings.doubao_model';
+  static const String _kGlmModel = 'settings.glm_model';
 
   /// Spec §8: Gemini model default (config.py:26), from shared/.
   static const String defaultModel = SharedConstants.geminiModelDefault;
@@ -85,15 +97,32 @@ class AppSettings extends ChangeNotifier {
   /// Vision-capable, cost-sane defaults; user-editable like the Gemini one.
   static const String defaultOpenaiModel = 'gpt-4o-mini';
   static const String defaultAnthropicModel = 'claude-sonnet-5';
+  /// China-provider defaults, verified against provider docs 2026-07-29.
+  /// qwen3-vl-flash: ¥0.15/M input — a food photo costs well under a fen.
+  /// Doubao REQUIRES the exact versioned ID (undated names 404); the
+  /// seed-1.6/1.8 family is flagged retiring, so pin the 2.0 generation.
+  /// glm-4.6v-flash is Zhipu's PERMANENTLY FREE vision tier — the right
+  /// default for a personal tracker's few photos a day (stricter
+  /// concurrency caps than paid glm-4.6v, which the user can type in).
+  static const String defaultQwenModel = 'qwen3-vl-flash';
+  static const String defaultDoubaoModel = 'doubao-seed-2-0-mini-260428';
+  static const String defaultGlmModel = 'glm-4.6v-flash';
 
   String? _geminiApiKey;
   String? _openaiApiKey;
   String? _anthropicApiKey;
   String? _serverApiKey;
+  String? _qwenApiKey;
+  String? _doubaoApiKey;
+  String? _glmApiKey;
   String _serverBaseUrl = '';
+  String _serverBackend = 'claude';
   AiProvider _provider = AiProvider.gemini;
   String _openaiModel = defaultOpenaiModel;
   String _anthropicModel = defaultAnthropicModel;
+  String _qwenModel = defaultQwenModel;
+  String _doubaoModel = defaultDoubaoModel;
+  String _glmModel = defaultGlmModel;
   String _model = defaultModel;
   int _lookbackDays = defaultLookbackDays;
   String _reportTime = defaultReportTime;
@@ -114,7 +143,16 @@ class AppSettings extends ChangeNotifier {
     s._anthropicApiKey = (anKey == null || anKey.isEmpty) ? null : anKey;
     final svKey = (await k.read(_kServerKey))?.trim();
     s._serverApiKey = (svKey == null || svKey.isEmpty) ? null : svKey;
+    final qwKey = (await k.read(_kQwenKey))?.trim();
+    s._qwenApiKey = (qwKey == null || qwKey.isEmpty) ? null : qwKey;
+    final dbKey = (await k.read(_kDoubaoKey))?.trim();
+    s._doubaoApiKey = (dbKey == null || dbKey.isEmpty) ? null : dbKey;
+    final glKey = (await k.read(_kGlmKey))?.trim();
+    s._glmApiKey = (glKey == null || glKey.isEmpty) ? null : glKey;
     s._serverBaseUrl = (p.getString(_kServerBaseUrl) ?? '').trim();
+    final backend = (p.getString(_kServerBackend) ?? '').trim();
+    s._serverBackend =
+        serverBackends.contains(backend) ? backend : 'claude';
     s._provider = AiProvider.values.firstWhere(
         (v) => v.name == (p.getString(_kProvider) ?? ''),
         orElse: () => AiProvider.gemini);
@@ -124,6 +162,12 @@ class AppSettings extends ChangeNotifier {
     s._openaiModel = oaModel.isEmpty ? defaultOpenaiModel : oaModel;
     final anModel = (p.getString(_kAnthropicModel) ?? '').trim();
     s._anthropicModel = anModel.isEmpty ? defaultAnthropicModel : anModel;
+    final qwModel = (p.getString(_kQwenModel) ?? '').trim();
+    s._qwenModel = qwModel.isEmpty ? defaultQwenModel : qwModel;
+    final dbModel = (p.getString(_kDoubaoModel) ?? '').trim();
+    s._doubaoModel = dbModel.isEmpty ? defaultDoubaoModel : dbModel;
+    final glModel = (p.getString(_kGlmModel) ?? '').trim();
+    s._glmModel = glModel.isEmpty ? defaultGlmModel : glModel;
     s._lookbackDays = (p.getInt(_kLookbackDays) ?? defaultLookbackDays)
         .clamp(minLookbackDays, maxLookbackDays);
     final rt = p.getString(_kReportTime) ?? defaultReportTime;
@@ -188,8 +232,14 @@ class AppSettings extends ChangeNotifier {
 
   String? get openaiApiKey => _openaiApiKey;
   String? get anthropicApiKey => _anthropicApiKey;
+  String? get qwenApiKey => _qwenApiKey;
+  String? get doubaoApiKey => _doubaoApiKey;
+  String? get glmApiKey => _glmApiKey;
   String get openaiModel => _openaiModel;
   String get anthropicModel => _anthropicModel;
+  String get qwenModel => _qwenModel;
+  String get doubaoModel => _doubaoModel;
+  String get glmModel => _glmModel;
 
   /// The ACTIVE provider's key (what every "can analysis succeed" guard
   /// must check — a Gemini key does nothing when OpenAI is selected).
@@ -197,10 +247,25 @@ class AppSettings extends ChangeNotifier {
         AiProvider.gemini => _geminiApiKey,
         AiProvider.openai => _openaiApiKey,
         AiProvider.anthropic => _anthropicApiKey,
+        AiProvider.qwen => _qwenApiKey,
+        AiProvider.doubao => _doubaoApiKey,
+        AiProvider.glm => _glmApiKey,
         // The server path needs BOTH a URL and a key to be usable; the
         // guards treat a missing URL as "no key configured".
         AiProvider.server =>
           _serverBaseUrl.isEmpty ? null : _serverApiKey,
+      };
+
+  /// Human-readable name of the active provider — for user-facing
+  /// messages ("No Qwen key yet…"), NOT for wire values.
+  String get providerDisplayName => switch (_provider) {
+        AiProvider.gemini => 'Gemini',
+        AiProvider.openai => 'OpenAI',
+        AiProvider.anthropic => 'Anthropic',
+        AiProvider.server => 'your server',
+        AiProvider.qwen => 'Qwen',
+        AiProvider.doubao => 'Doubao',
+        AiProvider.glm => 'GLM',
       };
 
   /// The ACTIVE provider's model string.
@@ -208,6 +273,9 @@ class AppSettings extends ChangeNotifier {
         AiProvider.gemini => _model,
         AiProvider.openai => _openaiModel,
         AiProvider.anthropic => _anthropicModel,
+        AiProvider.qwen => _qwenModel,
+        AiProvider.doubao => _doubaoModel,
+        AiProvider.glm => _glmModel,
         // The server picks the model (CLAUDE_ANALYZER_MODEL on the VM);
         // the phone deliberately has no say, so nothing is user-editable.
         AiProvider.server => 'server (Claude subscription)',
@@ -220,6 +288,18 @@ class AppSettings extends ChangeNotifier {
   Future<void> setAnthropicApiKey(String? value) =>
       _setProviderKey(value, _kAnthropicKey, (v) => _anthropicApiKey = v,
           () => _anthropicApiKey, AiProvider.anthropic);
+
+  Future<void> setQwenApiKey(String? value) =>
+      _setProviderKey(value, _kQwenKey, (v) => _qwenApiKey = v,
+          () => _qwenApiKey, AiProvider.qwen);
+
+  Future<void> setDoubaoApiKey(String? value) =>
+      _setProviderKey(value, _kDoubaoKey, (v) => _doubaoApiKey = v,
+          () => _doubaoApiKey, AiProvider.doubao);
+
+  Future<void> setGlmApiKey(String? value) =>
+      _setProviderKey(value, _kGlmKey, (v) => _glmApiKey = v,
+          () => _glmApiKey, AiProvider.glm);
 
   /// The upload key for the user's own server (same X-API-Key the phone
   /// watcher uses). Secure storage — never shared_preferences.
@@ -240,6 +320,22 @@ class AppSettings extends ChangeNotifier {
     }
     _serverBaseUrl = v;
     await _prefs.setString(_kServerBaseUrl, v);
+    notifyListeners();
+  }
+
+  /// Wire values of /api/analyze_photo's `backend` field — whose
+  /// subscription pays on the SERVER: the Claude plan (default), Zhipu's
+  /// GLM Coding Plan, or Volcengine's Doubao Agent Plan. The plan keys are
+  /// server-side .env entries (GLM_PLAN_KEY / DOUBAO_PLAN_KEY); the phone
+  /// stores only which one to ask for.
+  static const List<String> serverBackends = ['claude', 'glm', 'doubao'];
+
+  String get serverBackend => _serverBackend;
+
+  Future<void> setServerBackend(String value) async {
+    final v = serverBackends.contains(value) ? value : 'claude';
+    _serverBackend = v;
+    await _prefs.setString(_kServerBackend, v);
     notifyListeners();
   }
 
@@ -278,6 +374,27 @@ class AppSettings extends ChangeNotifier {
     final v = value.trim();
     _anthropicModel = v.isEmpty ? defaultAnthropicModel : v;
     await _prefs.setString(_kAnthropicModel, _anthropicModel);
+    notifyListeners();
+  }
+
+  Future<void> setQwenModel(String value) async {
+    final v = value.trim();
+    _qwenModel = v.isEmpty ? defaultQwenModel : v;
+    await _prefs.setString(_kQwenModel, _qwenModel);
+    notifyListeners();
+  }
+
+  Future<void> setDoubaoModel(String value) async {
+    final v = value.trim();
+    _doubaoModel = v.isEmpty ? defaultDoubaoModel : v;
+    await _prefs.setString(_kDoubaoModel, _doubaoModel);
+    notifyListeners();
+  }
+
+  Future<void> setGlmModel(String value) async {
+    final v = value.trim();
+    _glmModel = v.isEmpty ? defaultGlmModel : v;
+    await _prefs.setString(_kGlmModel, _glmModel);
     notifyListeners();
   }
 

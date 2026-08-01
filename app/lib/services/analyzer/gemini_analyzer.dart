@@ -399,4 +399,37 @@ class GeminiAnalyzer implements AnalyzerService {
       return _userMessageFor(e.message);
     }
   }
+
+  @override
+  Future<KeyProbe> probeKey(String apiKey) async {
+    try {
+      await _post(
+        const [
+          {'text': 'ping'}
+        ],
+        apiKeyOverride: apiKey,
+        generationConfig: const {'maxOutputTokens': 1},
+      );
+      return const KeyProbe(KeyProbeResult.ok);
+    } on GeminiException catch (e) {
+      switch (classifyGeminiError(e.message)) {
+        // Gemini's free tier has no balance to run out of; the daily cap
+        // is the equivalent "the key is fine, you cannot spend now".
+        case GeminiErrorClass.dailyQuotaExhausted:
+          return KeyProbe(KeyProbeResult.outOfCredit,
+              message: _pausedMessage());
+        case GeminiErrorClass.quotaRateLimit:
+        case GeminiErrorClass.networkService:
+          // A DEADLINE/CONNECTION failure is a network problem, not a
+          // rejected key — do not send the user to regenerate a fine key.
+          return KeyProbe(KeyProbeResult.rateLimited,
+              message: _userMessageFor(e.message));
+        case GeminiErrorClass.auth:
+        case GeminiErrorClass.modelError:
+        case GeminiErrorClass.unknown:
+          return KeyProbe(KeyProbeResult.rejected,
+              message: _userMessageFor(e.message));
+      }
+    }
+  }
 }

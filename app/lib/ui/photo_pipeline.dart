@@ -7,14 +7,21 @@ library;
 
 import 'dart:async';
 
-import 'package:crypto/crypto.dart';
+import 'dart:typed_data';
+
 import 'package:flutter/foundation.dart' show compute;
 import 'package:intl/intl.dart';
 
 import '../core/coerce.dart';
 import '../core/contracts.dart';
 import '../services/analyzer/normalize.dart' show makeMealThumb;
+import '../services/photo/filename_dates.dart'
+    show exifCapturedAt, validateCapturedAt;
+import '../services/photo/photo_hash.dart' show originalBytesMd5;
 import 'format.dart';
+
+Future<String> _computeMd5(Uint8List bytes) =>
+    compute(originalBytesMd5, bytes);
 
 enum PhotoOutcomeKind { saved, skipped, failed, duplicate, alreadyTracked }
 
@@ -55,7 +62,12 @@ class PhotoPipeline {
       {required this.dao,
       required this.analyzer,
       this.notify,
-      this.onMealSaved});
+      this.onMealSaved,
+      Future<String> Function(Uint8List bytes)? hasher})
+      : _hash = hasher ?? _computeMd5;
+
+  /// Injectable so tests stay synchronous; production hashes on a worker.
+  final Future<String> Function(Uint8List bytes) _hash;
 
   /// Wire the watcher intake with BACKPRESSURE: the intake awaits each
   /// photo's turn through the same global FIFO the share stream uses, so
@@ -98,9 +110,21 @@ class PhotoPipeline {
   /// One photo through the full pipeline. Never throws.
   Future<PhotoOutcome> process(IntakePhoto photo) async {
     // Identity = md5 of ORIGINAL bytes, normalized (spec §6.2, §2.2).
-    final hash = normalizeImageHash(md5.convert(photo.bytes).toString());
+    // OFF the UI isolate: md5 over a 12-25 MB original is tens of ms of
+    // straight-line work, and an album burst runs this once per photo —
+    // visible jank while the user scrolls (the coverage auditor already
+    // hashes via compute for exactly this reason).
+    //
+    // INSIDE the try: compute() spawns an isolate and can fail on a
+    // low-RAM device, and process() is contractually non-throwing — a
+    // throw here would poison the shared _tail future and silently stop
+    // ALL later photos until an app restart.
+    // Non-final: the catch block reads it, and a hash failure leaves it
+    // empty (nothing was reserved under it, so nothing to mark).
+    var hash = '';
     var reserved = false;
     try {
+      hash = normalizeImageHash(await _hash(photo.bytes));
       // Pre-reservation 5-minute duplicate window — deliberate (user-facing)
       // path only, matching the server's chat-only check (spec §2.3).
       if (photo.deliberate && await dao.isDuplicatePhoto(hash)) {
@@ -152,7 +176,19 @@ class PhotoPipeline {
 
       // Backdating: a valid capturedAt (validated by the intake module,
       // spec §6.3) sets date/time; timestamp stays now (spec §2.2).
-      final when = photo.capturedAt ?? DateTime.now();
+      // When BOTH §6.3 sources failed (share-sheet photo, no timestamp in
+      // the filename), the JPEG's own EXIF shutter time is the last truth
+      // before intake-time dating — same validation window (§9 app-only,
+      // 2026-07-31). This is what keeps a 23:50 photo shared after
+      // midnight on YESTERDAY's total.
+      // validateCapturedAt is NOT optional here: EXIF is attacker- and
+      // junk-controlled (a 2015 stock photo, a camera with a dead clock,
+      // a forward-set date), and an unvalidated value writes a meal into
+      // a random month of the user's log where they will never find it.
+      final when = photo.capturedAt ??
+          validateCapturedAt(exifCapturedAt(photo.bytes),
+              now: DateTime.now()) ??
+          DateTime.now();
       final id = await dao.saveMeal(
         Meal(
           id: 0, // assigned by the DAO on insert
@@ -179,7 +215,10 @@ class PhotoPipeline {
           '${mealDescription(analysis)} — ~${displayTotalCalories(analysis)} kcal';
       notify?.call('Meal logged: $summary');
       onMealSaved?.call();
-      return PhotoOutcome(PhotoOutcomeKind.saved, 'Logged meal #$id: $summary',
+      // No row id in the copy: the chat flow numbers meals by LIST position
+      // ("meal 2 was roast duck"), so surfacing the SQLite id taught users
+      // a number that is guaranteed to miss.
+      return PhotoOutcome(PhotoOutcomeKind.saved, 'Meal logged: $summary',
           analysis: analysis);
     } catch (e) {
       // Containment: never rethrow (spec §6). Mark failed ONLY if we hold

@@ -17,15 +17,19 @@
 
 ## Overview
 
-CalorieTracker is a small automation system for personal food logging. It accepts food photos from mobile devices and Telegram, analyzes them with Google Gemini, saves the structured meal data in SQLite, and sends results plus daily reports back to Telegram.
+CalorieTracker is a personal food-logging system in two halves that share one behavioral spec:
+
+- **A server** — a Telegram bot plus a small Flask API. Photos arrive from Telegram or a phone, a vision model estimates the meal, SQLite keeps the record, and daily reports go back to Telegram.
+- **A Flutter app** (`app/`, iOS + Android) — the same pipeline entirely on-device: watch the camera roll, analyze, log, correct in natural language, no account required. It can also route analysis *through* your own server so a Claude/GLM/Doubao **subscription** pays instead of a metered API key.
 
 | Signal | What it means |
 | --- | --- |
-| Private by default | One allowed Telegram chat, local `.env`, local SQLite, ignored runtime data |
-| Mobile-first | Android Termux watcher, iOS Shortcut upload, direct Telegram photos |
-| Recoverable | Failed uploads are saved for retry instead of silently dropped |
-| Observable | `/status`, `/doctor`, `/gemini`, `/queue`, `/vpn`, `/report_status`, `/logs` |
-| Quota-aware | Gemini daily quota exhaustion pauses retries and asks the user what to do |
+| Private by default | One allowed Telegram chat, local `.env`, local SQLite, ignored runtime data. The app stores meals on the device; keys live in the platform keystore |
+| Bring your own model | Seven providers: Gemini, OpenAI, Anthropic, your own server, and — reachable from mainland China without a VPN — Alibaba Qwen, ByteDance Doubao, Zhipu GLM |
+| Mobile-first | Flutter app, Android Termux watcher, iOS Share Extension, direct Telegram photos |
+| Recoverable | Failed uploads are saved for retry instead of silently dropped; a photo is never analyzed twice (md5 reservation ledger) |
+| Observable | `/status`, `/doctor`, `/gemini`, `/queue`, `/vpn`, `/report_status`, `/logs` — and in the app, a **Test AI provider** page that names exactly which stage is broken |
+| Quota-aware | Daily-quota exhaustion pauses analysis instead of burning photos; out-of-credit is distinguished from a bad key |
 
 ## Architecture
 
@@ -355,12 +359,42 @@ python3 daily_report.py 2026-06-28
 
 When run without a date, `daily_report.py` resolves the target date from the last phone-reported timezone: at 23:00 local or later it reports on the current day; earlier in the day it catches up on the previous day instead. A date the scheduler already sent successfully is skipped (tracked in `logs/service_health.json`), so a machine that was asleep at report time delivers the missed report on its next run rather than dropping it. Schedule it around 23:30 local time with cron/systemd timers/launchd. Failures are recorded in the health ledger and alerted to Telegram.
 
+## The Flutter app
+
+`app/` is a full port of the bot's behavior to the device — see
+[app/README.md](app/README.md) for setup and
+[docs/APP_PORT_SPEC.md](docs/APP_PORT_SPEC.md) for the authoritative
+behavioral spec (prompts verbatim, same coercion rules, same image
+normalization). §9 of that document lists every deliberate app-only
+divergence.
+
+```bash
+cd app
+flutter pub get
+flutter test          # ~800 tests
+flutter run
+```
+
+Parity between the two halves is not aspirational: `shared/` holds the
+prompts and constants both sides compile from, and `shared/vectors/*.json`
+are golden cases replayed by **both** the pytest and the Dart suites, so a
+change that moves one side's behavior fails the other side's tests.
+
+Building the APK to hand to someone:
+
+```bash
+bash scripts/build_share_apk.sh   # --split-per-abi; ~21 MB arm64
+```
+
 ## Tests
 
 ```bash
-bash scripts/check_public_safety.sh
-python3 -m py_compile config.py telegram_bot.py daily_report.py android/upload_photo.py database.py meal_relay.py migrate_to_sqlite.py utils.py service_health.py
-python3 -m pytest -q
+bash scripts/check_public_safety.sh          # secrets/PII at HEAD
+PUBLIC_SAFETY_SCAN_HISTORY=1 \
+  bash scripts/check_public_safety.sh        # ...and in git history
+python3 -m pytest -q                         # ~1550 server tests
+(cd app && flutter analyze && flutter test)  # ~800 app tests
+python3 scripts/sync_shared.py --check       # server/app parity bindings
 ```
 
 ## Runtime Data
@@ -377,4 +411,23 @@ Ignored local data:
 - `*.wflow`
 - `__pycache__/`
 
-Keep backups of `meals.db`, `logs/failed_uploads/`, and reports separately if you care about the data.
+Keep backups of `meals.db`, `logs/failed_uploads/`, and reports separately if you care about the data. The app exports its own database to a JSON file (Settings → Export) and can merge one back (Settings → Import), which is how you move to a new phone.
+
+## Contributing
+
+This is a personal project published in the hope it is useful; issues and
+pull requests are welcome but may be answered slowly.
+
+Two rules matter more than style here:
+
+1. **Never commit a credential.** `scripts/check_public_safety.sh` runs at
+   HEAD by default and scans the full history with
+   `PUBLIC_SAFETY_SCAN_HISTORY=1`. Run the history scan before pushing
+   anywhere public — a key removed in a later commit is still published.
+2. **Server and app must stay in parity.** If you change a prompt or a
+   shared constant, change it in `shared/`, regenerate with
+   `python3 scripts/sync_shared.py`, and run both suites.
+
+## License
+
+[MIT](LICENSE).
