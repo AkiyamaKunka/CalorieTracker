@@ -431,3 +431,28 @@ def test_a_non_ascii_api_key_is_401_not_500(client, monkeypatch):
                             headers={"X-API-Key": "sécret"}).status_code == 200
     assert client.http.post("/api/auth_check",
                             headers={"X-API-Key": "wrong"}).status_code == 401
+
+
+def test_retiring_key_stays_valid_during_rotation(monkeypatch, client):
+    """A key rotation must never brick a phone that has not updated yet:
+    the RETIRING key is accepted alongside the new one until it is
+    removed from .env."""
+    import telegram_bot as tb
+
+    monkeypatch.setattr(tb, "ANDROID_API_KEY", "new-key")
+    monkeypatch.setattr(tb, "ANDROID_API_KEY_RETIRING", "old-key")
+    for key, expected in (("new-key", 200), ("old-key", 200),
+                          ("wrong", 401), ("", 401)):
+        resp = client.http.post("/api/auth_check", headers={"X-API-Key": key})
+        assert resp.status_code == expected, (key, resp.status_code)
+
+
+def test_no_retiring_key_means_single_key_only(monkeypatch, client):
+    import telegram_bot as tb
+
+    monkeypatch.setattr(tb, "ANDROID_API_KEY", "new-key")
+    monkeypatch.setattr(tb, "ANDROID_API_KEY_RETIRING", "")
+    assert client.http.post(
+        "/api/auth_check", headers={"X-API-Key": "new-key"}).status_code == 200
+    assert client.http.post(
+        "/api/auth_check", headers={"X-API-Key": "old-key"}).status_code == 401

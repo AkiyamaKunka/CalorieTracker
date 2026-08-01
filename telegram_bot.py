@@ -67,6 +67,7 @@ from config import (
     FOOD_DETECTION_PROMPT,
     DUPLICATE_WINDOW_MINUTES,
     ANDROID_API_KEY,
+    ANDROID_API_KEY_RETIRING,
     REPORTS_DIR,
     SUPPORTED_EXTENSIONS,
 )
@@ -1512,8 +1513,17 @@ def _authorized_api_request() -> bool:
     # pasted with a smart quote or an accented character made EVERY
     # endpoint answer 500 (with a traceback) instead of 401, for the
     # phone as well as for probes (review 2026-07-31).
-    return hmac.compare_digest(
-        str(provided).encode("utf-8"), str(ANDROID_API_KEY).encode("utf-8"))
+    #
+    # Rotation grace window: the retiring key stays valid so a key change
+    # never bricks a phone that has not been updated yet. Both checks run
+    # unconditionally (no early return on the first match) to keep the
+    # comparison count independent of which key matched.
+    provided_b = str(provided).encode("utf-8")
+    ok_current = hmac.compare_digest(
+        provided_b, str(ANDROID_API_KEY).encode("utf-8"))
+    ok_retiring = bool(ANDROID_API_KEY_RETIRING) and hmac.compare_digest(
+        provided_b, str(ANDROID_API_KEY_RETIRING).encode("utf-8"))
+    return ok_current or ok_retiring
 
 
 def _vpn_check_reliable_from_request(vpn_active: Optional[bool], vpn_check: str) -> bool:

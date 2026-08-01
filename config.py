@@ -29,6 +29,10 @@ GEMINI_MODEL = _clean_env("GEMINI_MODEL", "gemini-2.5-flash")
 TELEGRAM_BOT_TOKEN = _clean_env("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = _clean_env("TELEGRAM_CHAT_ID")
 ANDROID_API_KEY = _clean_env("ANDROID_API_KEY")
+# Grace-window slot for key rotation: the OLD key stays accepted while
+# phones migrate to the new one. Remove from .env once every client has
+# the new key — a retiring key is still a valid credential.
+ANDROID_API_KEY_RETIRING = _clean_env("ANDROID_API_KEY_RETIRING")
 
 # ─── PushPlus WeChat Integration ─────────────────────────────────────
 # Token for PushPlus (http://www.pushplus.plus/)
