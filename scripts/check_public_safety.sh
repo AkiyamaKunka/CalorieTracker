@@ -34,4 +34,26 @@ if [ -n "$secret_matches" ]; then
   fail "secret-like values found in tracked files"
 fi
 
+# HISTORY, not just HEAD. A credential committed once and "scrubbed"
+# later is still public forever the moment the repo is — which is exactly
+# what happened here: a real Gemini key lived in config.py from the
+# initial commit until 3b89473 removed it (found 2026-08-01). This check
+# is opt-in (PUBLIC_SAFETY_SCAN_HISTORY=1) because a full-history grep is
+# slow; run it before ANY push to a public remote.
+if [ "${PUBLIC_SAFETY_SCAN_HISTORY:-}" = "1" ]; then
+  history_matches=$(
+    git rev-list --all | while read -r commit; do
+      git grep -I -l -E \
+        '(AIza[0-9A-Za-z_-]{30,}|sk-ant-api[0-9A-Za-z_-]{20,}|sk-proj-[0-9A-Za-z_-]{20,}|[0-9]{9,10}:AA[A-Za-z0-9_-]{30,})' \
+        "$commit" -- . ':!tests/*' ':!scripts/check_public_safety.sh' \
+        2>/dev/null | sed "s|^|$commit |"
+    done
+  )
+  if [ -n "$history_matches" ]; then
+    echo "$history_matches" >&2
+    fail "secret-like values found in git HISTORY (rewrite required before publishing)"
+  fi
+  echo "history scan clean"
+fi
+
 echo "public safety check passed"
