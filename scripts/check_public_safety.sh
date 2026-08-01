@@ -55,8 +55,8 @@ if [ "${PUBLIC_SAFETY_SCAN_HISTORY:-}" = "1" ]; then
       git grep -l -E \
         '(AIza[0-9A-Za-z_-]{30,}|sk-ant-api[0-9A-Za-z_-]{20,}|sk-ant-oat[0-9A-Za-z_-]{20,}|sk-proj-[0-9A-Za-z_-]{20,}|sk-[A-Za-z0-9]{32,}|[0-9]{9,10}:AA[A-Za-z0-9_-]{30,}|PUSHPLUS_TOKEN[\"'"'"' =:]+[0-9a-f]{32})' \
         "$commit" -- . ':!tests/*' ':!scripts/check_public_safety.sh' \
-        2>/dev/null | sed "s|^|$commit |"
-    done
+        2>/dev/null | sed "s|^|$commit |" || true
+    done || true
   )
   if [ -n "$history_matches" ]; then
     echo "$history_matches" >&2
