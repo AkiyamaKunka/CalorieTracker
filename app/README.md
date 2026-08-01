@@ -8,7 +8,7 @@ your own Gemini API key, stored in the platform secure keystore.
 
 Behavior is ported from the Python bot against [docs/APP_PORT_SPEC.md](../docs/APP_PORT_SPEC.md)
 (prompts verbatim, same coercion rules, same hardened NL-executor semantics,
-same image normalization: 1568px q85 JPEG). 235 Dart tests mirror the
+same image normalization: 1568px q85 JPEG). 801 Dart tests mirror the
 server suite's pinned behaviors, including the compound correction+delete
 shape that once crash-looped production.
 
@@ -33,7 +33,7 @@ shape that once crash-looped production.
 ```bash
 cd app
 flutter pub get
-flutter test                      # 235 tests
+flutter test                      # 801 tests
 flutter build apk --debug         # Android APK
 flutter build ios --simulator     # iOS (simulator)
 ```

@@ -1,436 +1,159 @@
-# CalorieTracker
+<div align="center">
 
-<p align="center">
-  <strong>Private-first calorie tracking from food photos.</strong><br>
-  Android, iPhone, and Telegram send photos. Gemini estimates the meal. SQLite keeps the record. Telegram stays the control room.
+# 🥗 CalorieTracker
+
+**Point your camera at food. Get calories, macros, and a searchable history — your data stays on your phone; only the photo being analyzed ever leaves it.**
+
+<p>
+  <a href="https://github.com/AkiyamaKunka/CalorieTracker/actions/workflows/python-tests.yml"><img alt="CI" src="https://github.com/AkiyamaKunka/CalorieTracker/actions/workflows/python-tests.yml/badge.svg"></a>
+  <img alt="Flutter" src="https://img.shields.io/badge/Flutter-iOS%20%2B%20Android-111111?style=flat-square&logo=flutter">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-f2f2f2?style=flat-square">
 </p>
 
-<p align="center">
-  <img alt="Python" src="https://img.shields.io/badge/Python-3.10%2B-111111?style=flat-square">
-  <img alt="Flask" src="https://img.shields.io/badge/Flask-upload%20API-f2f2f2?style=flat-square">
-  <img alt="Telegram" src="https://img.shields.io/badge/Telegram-Bot%20API-f2f2f2?style=flat-square">
-  <img alt="Gemini" src="https://img.shields.io/badge/Gemini-2.5%20Flash-ff6b3a?style=flat-square">
-  <img alt="SQLite" src="https://img.shields.io/badge/SQLite-local%20state-f2f2f2?style=flat-square">
-</p>
+*A Flutter app for iOS and Android — plus an optional self-hosted server that lets an existing AI subscription pay for analysis instead of metered API keys.*
+
+</div>
 
 ---
 
-## Overview
-
-CalorieTracker is a personal food-logging system in two halves that share one behavioral spec:
-
-- **A server** — a Telegram bot plus a small Flask API. Photos arrive from Telegram or a phone, a vision model estimates the meal, SQLite keeps the record, and daily reports go back to Telegram.
-- **A Flutter app** (`app/`, iOS + Android) — the same pipeline entirely on-device: watch the camera roll, analyze, log, correct in natural language, no account required. It can also route analysis *through* your own server so a Claude/GLM/Doubao **subscription** pays instead of a metered API key.
-
-| Signal | What it means |
-| --- | --- |
-| Private by default | One allowed Telegram chat, local `.env`, local SQLite, ignored runtime data. The app stores meals on the device; keys live in the platform keystore |
-| Bring your own model | Seven providers: Gemini, OpenAI, Anthropic, your own server, and — reachable from mainland China without a VPN — Alibaba Qwen, ByteDance Doubao, Zhipu GLM |
-| Mobile-first | Flutter app, Android Termux watcher, iOS Share Extension, direct Telegram photos |
-| Recoverable | Failed uploads are saved for retry instead of silently dropped; a photo is never analyzed twice (md5 reservation ledger) |
-| Observable | `/status`, `/doctor`, `/gemini`, `/queue`, `/vpn`, `/report_status`, `/logs` — and in the app, a **Test AI provider** page that names exactly which stage is broken |
-| Quota-aware | Daily-quota exhaustion pauses analysis instead of burning photos; out-of-credit is distinguished from a bad key |
-
-## Architecture
+Take a photo of your meal — or just let the app watch your camera roll — and an AI vision model identifies the food and estimates calories, protein, carbs, and fat. Meals land in a local log you can browse, chart, edit, and correct in plain language (*"the noodles were actually roast duck rice"*, *"删除第一餐"*). No account, no analytics, no cloud database. Works in mainland China without a VPN, and there is a completely free way to run it (Zhipu GLM's default vision model costs nothing).
 
 ```mermaid
 flowchart LR
-    Android["Android Termux<br>watcher + queue"] --> Upload["Flask upload API<br>/ping /reconcile /upload"]
-    IOS["iOS Shortcut<br>multipart upload"] --> Upload
-    User["Telegram user<br>photos + commands"] --> Bot["Telegram bot<br>long polling"]
-
-    Upload --> Guard["Photo hash<br>reservation guard"]
-    Bot --> Guard
-    Guard --> Gemini["Gemini 2.5 Flash<br>vision + correction parsing"]
-    Gemini --> DB["SQLite<br>meals + health state"]
-    Bot --> DB
-    DB --> Report["Daily report<br>local-time summary"]
-    Report --> User
-    Upload --> Failed["Failed upload store<br>retry or delete later"]
-    Failed --> Bot
-    Bot --> Ops["Operations commands<br>debug + recovery"]
-    Ops --> User
-
-    classDef base fill:#f2f2f2,stroke:#d9d9d9,color:#111111;
-    classDef accent fill:#fff1ea,stroke:#ff6b3a,color:#111111;
-    classDef state fill:#ffffff,stroke:#b7bdc7,color:#111111;
-    class Android,IOS,User base;
-    class Upload,Bot,Gemini accent;
-    class Guard,DB,Report,Failed,Ops state;
+    subgraph Phone["📱 Your phone"]
+        direction TB
+        Intake["Camera-roll watcher<br/>share sheet · photo picker<br/>text description · manual entry"]
+        Pipeline["Photo pipeline<br/>normalize → dedup ledger → analyze"]
+        DB[("Local SQLite<br/>meals · photos · history")]
+        UI["Today · History · charts<br/>plain-language corrections"]
+    end
+    Provider["AI provider of your choice<br/>Gemini · OpenAI · Claude<br/>Qwen · Doubao · GLM"]
+    Server["Optional: your own server<br/>subscription-billed analysis"]
+    Intake --> Pipeline
+    Pipeline <--> Provider
+    Pipeline <-.-> Server
+    Pipeline --> DB --> UI
 ```
 
-## Technical Framework
+*Everything stays on your phone except the single photo being analyzed.*
 
-| Layer | Technology | Responsibility |
-| --- | --- | --- |
-| Bot interface | Telegram Bot API, long polling | User commands, corrections, photo feedback, operational alerts |
-| Upload API | Flask | Authenticated phone uploads, heartbeat pings, Android reconciliation |
-| AI analysis | Google Gemini 2.5 Flash (default) + optional Claude-first analyzer | Food detection, calorie and macro estimation, correction parsing; photo analysis can run Claude-first via the Claude Code CLI on a Claude subscription, with Gemini as automatic fallback |
-| Persistence | SQLite | Meals, hashes, correction state, Android heartbeat, photo ingestion guard, fitness data (weight, workouts, activities, profile) |
-| Mobile clients | Android Termux, iOS Shortcuts | Camera automation, VPN evidence headers, offline queueing |
-| Scheduling | systemd or launchd | Always-on bot service and local-time daily reports |
-| Reliability | Failed-upload store, quota circuit breaker, `/doctor` checks | Recovery from quota, network, duplicate, and report failures |
-| Security | `.env`, `ANDROID_API_KEY`, private chat allowlist | Keep secrets local and restrict uploads/commands to the owner |
+## Features
 
-## Core Features
+**Photo → meal log, automatically.** Turn on *Watch camera roll* and every food photo you take logs itself — no need to open the app after each meal. Dedup is guaranteed: a photo is never analyzed (or billed) twice, even across restarts, double-taps on share, or a 200-photo backlog.
 
-- Food photo analysis with Google Gemini (native JSON output; photos are downscaled on the phone and again server-side before each call, so quota and bandwidth aren't spent on 25MB camera files). Beverages count as loggable food — a latte gets calories, plain water doesn't.
-- Optional Claude-first analysis: with `CLAUDE_ANALYZER_ENABLED=1` and a `claude setup-token` credential, photos are analyzed through the Claude Code CLI on a Claude subscription (no per-token API cost); any failure — usage window, timeout, bad output — falls back to Gemini automatically, so the default path never degrades.
-- Backfilled photos land on the day they were **taken**, not uploaded: clients declare `captured_at` (Android derives it from the camera filename; iOS sends the photo's Creation Date header) and the server validates it before dating the meal.
-- iOS uploads may send the image as a raw request body (`Request Body: File` in Shortcuts) — the server accepts both multipart and raw-image POSTs, working around an iOS bug where Form file fields silently coerce to text.
-- Calories, protein, carbs, fat, meal source, photo hash, and correction state in SQLite.
-- Reports flag meals whose item calories contradict their total and likely duplicates; the daily report includes a 7-day average and `/today` shows your typical-day intake.
-- Uploads from Telegram photos, Android Termux, and iOS Shortcuts.
-- Natural-language meal corrections and deletions in Telegram (deletions ask for inline confirmation before touching data).
-- Meals are dated in the phone's reported timezone, so a midnight snack lands on the right day even when the server runs in UTC.
-- Daily Telegram reports with missed-day catch-up, plus optional PushPlus/WeChat forwarding.
-- Saved failed uploads with user-controlled retry or delete.
-- Graceful shutdown, plus a startup sweep that recovers uploads stranded mid-analysis by a crash.
-- Runtime health written to `logs/service_health.json`.
-- Duplicate protection through a photo-hash reservation guard.
-- Fitness tracking: daily weigh-ins, diet modes with macro targets (keto / high-protein / balanced), Daniels-VDOT run planning, and manual or Garmin activity logging with a net-calorie line in daily reports.
+**Corrections in your own words.** *"Lunch was about 650 kcal"*, *"the second meal had no rice"*, *"删掉昨天的宵夜"* — the app updates or deletes meals from plain language, in any language your model reads, and always confirms before deleting. Describing a brand-new meal in text works the same way.
 
-## Repository Safety
+**Today, History, and honest charts.** Today shows running totals and a comparison against your *typical day* (a median, so under-logged days don't drag it down). History covers 30 days — and days where nothing was logged appear dimmed as *"no meals logged"* instead of silently vanishing, so a broken watcher looks broken. Meal detail draws a per-macro energy split (4/4/9 kcal per gram), live-updating as you edit.
 
-This app is meant for a private deployment. Never commit `.env`, phone config, exported Shortcuts, logs, reports, DB files, or personal dietary profiles.
+**Seven AI providers — three reachable from mainland China without a VPN.** Keys are yours, entered once, stored in the platform secure keystore; switching providers takes effect on the next photo. For scale: a month of meal photos on a pay-per-call provider typically costs well under a dollar, and the GLM route is free.
 
-Before publishing publicly, read [SECURITY.md](SECURITY.md). If this repo ever had secrets in git history, publish from a fresh clean export or rewrite history and rotate the exposed credentials.
+| Provider | Vision | From mainland China | Cost model |
+|---|:---:|:---:|---|
+| Google Gemini | ✅ | VPN needed | free tier (daily cap handled gracefully) |
+| OpenAI | ✅ | VPN needed | pay per call |
+| Anthropic Claude | ✅ | VPN needed | pay per call |
+| Alibaba Qwen 通义千问 | ✅ | ✅ direct | pay per call, inexpensive |
+| ByteDance Doubao 豆包 | ✅ | ✅ direct | pay per call |
+| Zhipu GLM 智谱 | ✅ | ✅ direct | **default vision model is free** |
+| Your own server (self-hosted) | ✅ | ✅ | your Claude / GLM / Doubao subscription — [see below](#subscription-powered-analysis-optional-self-hosted) |
+
+**A diagnostics page that names the actual problem.** *Test AI provider* runs six staged checks — configuration, endpoint reachability, authentication & account credit, text round-trip, photo round-trip, quota state — and each failure states what is wrong and what to do about it: an out-of-credit account is not a "wrong key", an unreachable Gemini suggests a domestic provider, a rate limit says *wait* while a dead balance says *recharge*.
+
+**Privacy.** Meals, photos, and thumbnails live in SQLite on the device. The only network traffic is the photo you chose to analyze, going to the provider you chose. Export writes a JSON file you own; import merges it back (device moves are two taps), never destructively.
+
+**Small details.** Share-sheet photos are dated by the JPEG's own EXIF shutter time (validated — junk dates rejected), so a 23:50 dinner shared after midnight lands on *yesterday's* total. Every meal keeps a thumbnail even after you clean your gallery. Manual entry works offline with no key at all. Material 3, light and dark.
+
+## Getting started
+
+**Not a developer?** There's no app-store listing yet: Android users install a pre-built APK handed to them by whoever builds it (see below); installing on an iPhone currently requires a Mac with Xcode. If that's not you, this repo is one to watch rather than install today.
+
+**Developers** need Flutter (Dart SDK ≥ 3.12.2):
 
 ```bash
-bash scripts/check_public_safety.sh
-```
-
-## Requirements
-
-| Required | Optional |
-| --- | --- |
-| Python 3.10+ | GCP/Linux VM with `systemd` |
-| Google Gemini API key | PushPlus token/topic for WeChat forwarding |
-| Telegram bot token | Reverse proxy, HTTPS, or VPN for phone uploads |
-| | Claude Code CLI + `claude setup-token` credential for Claude-first photo analysis (`CLAUDE_ANALYZER_ENABLED=1`) |
-| Numeric Telegram chat ID | Android Termux and iOS Shortcuts clients |
-| Long random `ANDROID_API_KEY` | Personal `dietary_profile.txt` |
-
-## Setup
-
-```bash
-git clone <your-repo-url> ~/CalorieTracker
-cd ~/CalorieTracker
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-```
-
-Install at `~/CalorieTracker`: runtime data (`meals.db`, `logs/`, `reports/`, `dietary_profile.txt`) is always read from and written under `~/CalorieTracker`, regardless of where the scripts are launched from.
-
-Edit `.env`:
-
-```env
-GEMINI_API_KEY=replace-with-google-ai-studio-key
-GEMINI_MODEL=gemini-2.5-flash
-TELEGRAM_BOT_TOKEN=replace-with-botfather-token
-TELEGRAM_CHAT_ID=replace-with-your-numeric-chat-id
-ANDROID_API_KEY=replace-with-random-upload-api-key
-PUSHPLUS_TOKEN=
-PUSHPLUS_TOPIC=
-VPN_OFF_COUNTRY_CODES=CN
-VPN_REMOTE_CIDRS=
-VPN_OFF_REMOTE_CIDRS=
-```
-
-Generate the upload key:
-
-```bash
-python3 -c "import secrets; print(secrets.token_urlsafe(32))"
-```
-
-Optional dietary context:
-
-```bash
-cp dietary_profile.example.txt dietary_profile.txt
-```
-
-`dietary_profile.txt` is ignored by git.
-
-## Run Locally
-
-```bash
-source venv/bin/activate
-python3 telegram_bot.py
-```
-
-The bot starts Telegram long polling and a Flask upload API on `0.0.0.0:5000`.
-
-| Endpoint | Purpose |
-| --- | --- |
-| `POST /ping` | Phone heartbeat and VPN evidence |
-| `POST /reconcile` | Android asks which local photo hashes are missing |
-| `POST /upload` | Android/iOS multipart photo upload |
-
-All phone API requests must include:
-
-```http
-X-API-Key: <ANDROID_API_KEY>
-```
-
-<details>
-<summary><strong>Production with systemd</strong></summary>
-
-Example service:
-
-```ini
-[Unit]
-Description=CalorieTracker Telegram Bot and Upload API
-After=network.target
-
-[Service]
-User=ubuntu
-WorkingDirectory=/home/ubuntu/CalorieTracker
-EnvironmentFile=/home/ubuntu/CalorieTracker/.env
-Environment="PATH=/home/ubuntu/CalorieTracker/venv/bin"
-ExecStart=/home/ubuntu/CalorieTracker/venv/bin/python3 telegram_bot.py
-Restart=always
-RestartSec=5
-# Type=notify requires the bot's READY=1 (sent before the boot sweep, so a
-# slow sweep cannot trip the start timeout); WatchdogSec restarts a hung —
-# not just dead — bot. A dedicated heartbeat thread pets WATCHDOG=1 every
-# ~30s for as long as the bot's shared progress clock is fresh (stamped by
-# the poll loop, long retries/downloads, and backoff sleeps), so slow-but-
-# healthy work is never killed and only a true multi-minute hang starves
-# the pets.
-Type=notify
-WatchdogSec=120
-# Boot can legitimately send Telegram messages before the first poll
-# (crash-loop alert, stranded-upload sweep summary); give READY=1 headroom
-# beyond the default 90s.
-TimeoutStartSec=180
-# Graceful stops join in-flight photo analyses (up to the analyzer's 120s
-# timeout); outlast that before systemd escalates to SIGKILL.
-TimeoutStopSec=180
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable it:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable caloriebot.service
-sudo systemctl start caloriebot.service
-sudo systemctl status caloriebot.service
-```
-
-If phones cannot reach port `5000`, put the service behind a reverse proxy, VPN, firewall rule, or port-forward. Prefer HTTPS or VPN for real deployments because plain HTTP exposes upload metadata and the upload key to the network path.
-
-</details>
-
-## Mobile Uploads
-
-### Android
-
-Android uses Termux.
-
-1. Install Termux and Termux:API.
-2. Copy `android/upload_photo.py` and `android/android_watcher.sh` to the phone.
-3. Copy `android/calorie_tracker_upload.example.json` to `~/.calorie_tracker_upload.json`.
-4. Edit the JSON with your server URL and `ANDROID_API_KEY`.
-5. Set permissions:
-
-```bash
-chmod 600 ~/.calorie_tracker_upload.json
-```
-
-Example config:
-
-```json
-{
-  "ANDROID_API_KEY": "same-random-value-as-server",
-  "SERVER_URLS": [
-    "https://your-domain.example",
-    "http://YOUR_SERVER_IP:5000"
-  ]
-}
-```
-
-Run:
-
-```bash
-termux-wake-lock
-python3 ~/upload_photo.py --ping
-nohup bash ~/android_watcher.sh >> ~/watcher.log 2>&1 &
-```
-
-Useful manual commands:
-
-```bash
-python3 ~/upload_photo.py --ping
-python3 ~/upload_photo.py --sync
-python3 ~/upload_photo.py /storage/emulated/0/DCIM/Camera/example.jpg
-```
-
-Or automate install and restarts with the bundled installer: put `upload_photo.py` and `android_watcher.sh` in `/sdcard/Download`, copy `android/install_and_start.sh` to the phone, and run:
-
-```bash
-bash install_and_start.sh
-```
-
-It verifies the source files before stopping the running watcher, preserves the offline upload queue across reinstalls, and restarts everything under a wake lock.
-
-One-tap control (optional, no typing in Termux): install the free [Termux:Widget](https://f-droid.org/packages/com.termux.widget/) add-on, copy the repo's `android/shortcuts/` folder to `/sdcard/Download/shortcuts` before running the installer (it places them in `~/.shortcuts`), then add the Termux widget to your home screen. You get ▶️ start, 🔴 stop, 📊 status (including offline-queue depth), 🔄 sync-now, and 🔁 update buttons. A double-tap on start is harmless — the watcher's lock makes it a no-op.
-
-With USB debugging enabled, updating the phone is two steps: `adb push android/upload_photo.py android/android_watcher.sh android/install_and_start.sh /sdcard/Download/ && adb push android/shortcuts /sdcard/Download/shortcuts` from the dev machine, then tap 🔁 update on the phone (it runs the installer, which pre-flights the payload before touching the running watcher).
-
-Watcher behavior worth knowing: new photos are marked as handled after a successful upload or safe offline queueing; a photo that fails three consecutive attempts is recorded anyway (with a loud log line) so it cannot wedge the loop, and photos already on the phone at watcher startup are skipped rather than uploaded as a backlog — the nightly sync covers both cases (photos newer than `SEED_FRESH_MINUTES`, default 15, upload immediately instead). Partially-written camera files are skipped until their size stabilizes (a file that never stabilizes — e.g. a permanently unreadable or 0-byte file — is recorded after a few attempts so it can't wedge the loop, with the nightly sync still able to recover it if it later becomes readable), and photos the server permanently rejects are quarantined in `~/.offline_queue/rejected/`. The nightly `--sync` reconciles today's and yesterday's photos (including HEIC) against the server. Idle polling is mtime-gated (one `stat` per 5s tick when nothing changed), `watcher.log` rotates at 1MB, and daily housekeeping prunes history entries for deleted photos.
-
-If Pillow is installed in Termux (`pip install pillow`, optional), photos are recompressed to ≤1600px JPEG before upload — a 10–25MB camera shot becomes a few hundred KB on cellular — while dedup still keys on the original file's hash. Without Pillow (or for undecodable HEIC), originals upload unchanged.
-
-If your camera saves somewhere other than `DCIM/Camera`, set `CAMERA_DIR` (or `CALORIE_CAMERA_DIR`) in the environment for both the watcher and manual runs. Advanced env-only knobs: `PING_INTERVAL_SECONDS` (heartbeat, default 900), `SEED_FRESH_MINUTES`, `CALORIE_HOUSEKEEP_POLLS`, `CALORIE_RECOMPRESS_MAX_EDGE` (0 disables recompression) / `CALORIE_RECOMPRESS_JPEG_QUALITY`, `CALORIE_TRACKER_SERVER_URLS`, `CALORIE_TRACKER_ANDROID_CONFIG`, `QUEUE_BATCH_LIMIT`, `QUEUE_LOCK_STALE_SECONDS`, `SYNC_LOOKBACK_DAYS`, `ANDROID_VPN_ACTIVE`.
-
-### iPhone
-
-Use the logic in [ios/shortcut_upload_to_gcp.md](ios/shortcut_upload_to_gcp.md).
-
-Required request shape:
-
-| Field | Value |
-| --- | --- |
-| URL | `https://your-domain.example/upload` or `http://YOUR_SERVER_IP/upload` |
-| Method | `POST` |
-| Body | `Request Body: File` with the (converted-to-JPEG) photo — recommended; iOS silently breaks Form file fields. Multipart form field `photo` also works. |
-| `X-API-Key` | Same `ANDROID_API_KEY` |
-| `X-Client-Platform` | `iOS` |
-| `X-Device-Name` | `iPhone` |
-| `X-VPN-Required` | `true` |
-| `X-Captured-At` | Optional: photo Creation Date as `yyyy-MM-dd HH:mm:ss`, so delayed uploads date to the capture day |
-
-Do not commit exported `.shortcut` or `.wflow` files.
-
-## Failure Modes
-
-What happens when parts of the pipeline are down:
-
-| Scenario | Behavior |
-| --- | --- |
-| Photo taken while the server is unreachable (Android) | Queued in `~/.offline_queue`; drained automatically after the next successful heartbeat. Photos the server permanently rejects are quarantined in `~/.offline_queue/rejected/` instead of blocking the queue. |
-| Uploader crashes on a photo | Retried on the next polls up to 3 attempts, then recorded with a loud log line; the nightly sync can still recover it. |
-| Photo taken just before starting the watcher | Uploaded by the first polls — startup seeding skips photos newer than `SEED_FRESH_MINUTES` (default 15). Older backlog is not mass-uploaded. |
-| Photo taken while the watcher was stopped | Recovered automatically: the watcher runs a catch-up `--sync` 30s after every start (with Termux:Boot, that means right after reboot), plus the nightly 23:00 sync. The window covers `SYNC_LOOKBACK_DAYS` (default 2, up to 30 for long outages). |
-| Server crashes mid-analysis | On restart, staged uploads move to the failed store (recover with `/retry_failed`) and orphaned in-flight reservations are released so retries aren't misreported as duplicates. |
-| Phone stops reaching the server | The bot warns you in Telegram once the heartbeat is older than `HEARTBEAT_STALE_WARNING_HOURS` (default 2h). |
-| Gemini daily quota exhausted | 12h circuit breaker; failed uploads are kept with keep/discard buttons instead of being dropped. |
-| Machine asleep at report time | The next `daily_report.py` run catches up on the missed day (deduped via the health ledger). |
-| iOS upload fails | Not retried — the Shortcut is best-effort, one photo per camera close, with no queue or sync. Re-open the Camera or send the photo via Telegram. |
-
-## VPN Detection
-
-The server records VPN evidence from client headers and remote IP geolocation. By default, `VPN_OFF_COUNTRY_CODES=CN`, so non-China exit IPs are treated as VPN-looking traffic. This avoids warnings when a VPN switches between multiple exit countries.
-
-Use these only when needed:
-
-- `VPN_REMOTE_CIDRS` for known VPN provider ranges
-- `VPN_OFF_REMOTE_CIDRS` for known direct/non-VPN ranges
-- `/vpn` in Telegram to inspect the latest evidence
-
-The upload API trusts the direct peer IP and ignores `X-Forwarded-For`. If you ever put a reverse proxy in front of it, set `TRUSTED_PROXY_ENABLED=1` so the forwarded address is honored.
-
-## Telegram Commands
-
-Run `/commands` for the full menu.
-
-| Area | Commands |
-| --- | --- |
-| Tracking | `/today`, `/meals`, `/recent`, `/history` |
-| Fitness | `/weight 72.5`, `/diet balanced`, `/macros today`, `/workout legs`, `/train`, `/activity 450 8000 5`, `/train_run 5k 19:57`, `/plan`, `/profile` |
-| Health | `/status`, `/doctor`, `/gemini`, `/android`, `/vpn` |
-| Uploads | `/queue`, `/failed`, `/retry_failed latest`, `/retry_all_failed 3`, `/clear_failed latest confirm` |
-| Reports | `/report today`, `/report_status`, `/reports` |
-| Debug | `/logs 30`, `/config`, `/stats` |
-
-## Daily Reports
-
-Manual:
-
-```bash
-python3 daily_report.py
-python3 daily_report.py 2026-06-28
-```
-
-When run without a date, `daily_report.py` resolves the target date from the last phone-reported timezone: at 23:00 local or later it reports on the current day; earlier in the day it catches up on the previous day instead. A date the scheduler already sent successfully is skipped (tracked in `logs/service_health.json`), so a machine that was asleep at report time delivers the missed report on its next run rather than dropping it. Schedule it around 23:30 local time with cron/systemd timers/launchd. Failures are recorded in the health ledger and alerted to Telegram.
-
-## The Flutter app
-
-`app/` is a full port of the bot's behavior to the device — see
-[app/README.md](app/README.md) for setup and
-[docs/APP_PORT_SPEC.md](docs/APP_PORT_SPEC.md) for the authoritative
-behavioral spec (prompts verbatim, same coercion rules, same image
-normalization). §9 of that document lists every deliberate app-only
-divergence.
-
-```bash
-cd app
+git clone https://github.com/AkiyamaKunka/CalorieTracker.git
+cd CalorieTracker/app
 flutter pub get
-flutter test          # ~800 tests
 flutter run
 ```
 
-Parity between the two halves is not aspirational: `shared/` holds the
-prompts and constants both sides compile from, and `shared/vectors/*.json`
-are golden cases replayed by **both** the pytest and the Dart suites, so a
-change that moves one side's behavior fails the other side's tests.
+Then in **Settings**: pick a provider, paste your API key, and optionally enable *Watch camera roll*. Zero-cost start: create a GLM key at open.bigmodel.cn — its default vision model is free — and you're logging meals in two minutes. On iOS, open `ios/Runner.xcworkspace` once in Xcode to set your signing team.
 
-Building the APK to hand to someone:
+Building the shareable APK (from the repo root):
 
 ```bash
-bash scripts/build_share_apk.sh   # --split-per-abi; ~21 MB arm64
+bash scripts/build_share_apk.sh   # → ~21 MB arm64 APK in ~/Desktop/CalorieTracker-share/
 ```
 
-## Tests
+## Subscription-powered analysis (optional, self-hosted)
+
+*Skip this unless you already pay for a Claude, GLM Coding Plan, or Doubao Agent Plan subscription and are comfortable running a small server.*
+
+The companion server turns a flat-rate subscription into the app's analysis backend: the phone posts the photo to your machine, which runs the analysis through the Claude Code CLI under your plan — no per-call API spend. Check your plan's acceptable-use terms before routing app traffic through it.
+
+The security shape is deliberate:
+
+- Plan credentials live only in the server's `.env` — the phone holds one upload key and nothing else. An APK is a shipping container; nothing subscription-shaped is ever baked into it.
+- The phone cannot supply the analysis prompt — the server composes its own (the phone may add only a bounded dietary-profile appendix). A caller-authored prompt would be an instruction channel into a CLI.
+- Replies carry an `analyzed_by` receipt and the app refuses a mismatch, so the wrong plan can never silently pay.
+- When the subscription token expires, the app drives the server's official OAuth re-connect from the phone — the secret never travels.
+
+Setup, operations, and the app-facing API are documented in **[docs/SERVER.md](docs/SERVER.md)**.
+
+## For engineers
+
+The part of this codebase most worth reviewing is how **two full implementations of the same product are kept behaviorally identical** — a Python server and a Dart app, no shared runtime code:
+
+1. **A spec with line-number citations.** [docs/APP_PORT_SPEC.md](docs/APP_PORT_SPEC.md) extracts every behavioral rule from the production Python with `file:line` evidence, and §9 is a table of *deliberate* divergences — each row says what differs, why, and which test pins it.
+2. **Shared constants and prompts, generated for both runtimes.** [shared/](shared/) holds 20 behavior constants (normalization size, dedup windows, validation bounds…) and the prompts verbatim; `scripts/sync_shared.py --check` is a drift gate run in CI.
+3. **248 golden vectors, replayed by both suites.** Python is the oracle: its real functions generate [shared/vectors/](shared/vectors/) (coercion of hostile model output, capture-time dating, NL normalization, report formulas…), and the Dart suite must match byte-for-byte — including NaN/Infinity and expected-throw cases. Cross-language drift is a failing test, not a field bug.
+
+Other things a reviewer will find:
+
+- **A provider conformance matrix** ([provider_feedback_matrix_test.dart](app/test/analyzer/provider_feedback_matrix_test.dart)): seven providers tested against a shared vocabulary of eight failure classes (auth, rate limit, billing, model-not-found, overloaded, content filter, junk reply, daily quota), with 39 fixtures that are *verbatim wire bodies* from the real endpoints. "Out of money" alone arrives as five different shapes — OpenAI `429 insufficient_quota`, GLM `429` code 1113, Doubao `403 AccountOverdueError`, Qwen `400 Arrearage`, Anthropic `400` credit-balance — all mapped to one user-facing verdict: *recharge, don't regenerate the key*.
+- **A photo pipeline built around one identity.** md5 of the original bytes drives a five-state reservation ledger (`processing / saved / skipped / failed / deleted`): reserve-before-analyze, meal-insert + `saved` in one transaction, tombstones so deleted meals never resurrect, and a strict/deliberate split — the automated watcher never reclaims a failed row, a human re-add may. All intake is serialized through one FIFO tail: one photo's bytes resident at a time, no self-inflicted rate limits.
+- **A capture-dating chain with a trust boundary.** Filename timestamp → library asset date → EXIF `DateTimeOriginal` → intake time; every candidate passes the same validation window (reject > 1 h future, > 45 days old) because EXIF is attacker-controlled junk until proven otherwise.
+- **Test discipline.** Both full suites (currently 801 Dart + 1557 Python tests) run in CI on every push — and the suites are reviewed for their *capacity to fail*: several were rewritten after being caught passing while broken.
+
+## The Telegram bot (the original interface, kept as a backup)
+
+CalorieTracker began as a Telegram bot, and that whole path still works if chat is your preferred interface — or your fallback when the phone is out of reach:
+
+- Send a food photo to the bot in chat — same analysis pipeline, same dedup ledger, same database.
+- Correct or delete meals conversationally, with confirmation before any delete.
+- Daily calorie/macro reports pushed to Telegram, plus ops commands (`/status`, `/doctor`, `/retry_failed`).
+
+One process serves both the bot and the app's API; `TELEGRAM_POLLING=0` retires the chat half while the phone keeps working. See **[docs/SERVER.md](docs/SERVER.md)**.
+
+## Testing
 
 ```bash
-bash scripts/check_public_safety.sh          # secrets/PII at HEAD
-PUBLIC_SAFETY_SCAN_HISTORY=1 \
-  bash scripts/check_public_safety.sh        # ...and in git history
-python3 -m pytest -q                         # ~1550 server tests
-(cd app && flutter analyze && flutter test)  # ~800 app tests
-python3 scripts/sync_shared.py --check       # server/app parity bindings
+python3 -m pytest -q                         # server suite
+(cd app && flutter analyze && flutter test)  # app suite
+python3 scripts/sync_shared.py --check       # server↔app parity bindings
+bash scripts/check_public_safety.sh          # secrets/PII gate (PUBLIC_SAFETY_SCAN_HISTORY=1 scans full git history)
 ```
 
-## Runtime Data
+CI runs all of the above on every push: the Python suite on 3.9 and 3.10 with `ruff` and a coverage floor, the Flutter suite, the parity drift gate, and the safety gate.
 
-Ignored local data:
+## Project layout
 
-- `.env`
-- `logs/`
-- `reports/`
-- `outputs/`
-- `*.db`
-- `dietary_profile.txt`
-- `*.shortcut`
-- `*.wflow`
-- `__pycache__/`
-
-Keep backups of `meals.db`, `logs/failed_uploads/`, and reports separately if you care about the data. The app exports its own database to a JSON file (Settings → Export) and can merge one back (Settings → Import), which is how you move to a new phone.
+```
+app/                    Flutter app (iOS + Android) — start here
+shared/                 constants, prompts, and golden vectors both sides compile from
+docs/APP_PORT_SPEC.md   the behavioral spec that keeps server and app identical
+docs/SERVER.md          running the server: subscription analysis, Telegram bot, app API
+telegram_bot.py         the server: Flask API for the app + Telegram interface
+scripts/                parity sync, vector generation, APK build, safety gate
+tests/                  Python suite   ·   app/test/   Dart suite
+```
 
 ## Contributing
 
-This is a personal project published in the hope it is useful; issues and
-pull requests are welcome but may be answered slowly.
+Issues and PRs welcome. Two rules matter more than style:
 
-Two rules matter more than style here:
-
-1. **Never commit a credential.** `scripts/check_public_safety.sh` runs at
-   HEAD by default and scans the full history with
-   `PUBLIC_SAFETY_SCAN_HISTORY=1`. Run the history scan before pushing —
-   this repo is public, and a key removed in a later commit is still
-   published. (The repo's own pre-publication story: three credentials
-   survived a "scrub" commit in history and were caught by a 37-agent
-   audit; the published history is a `git filter-repo` rewrite.)
-2. **Server and app must stay in parity.** If you change a prompt or a
-   shared constant, change it in `shared/`, regenerate with
-   `python3 scripts/sync_shared.py`, and run both suites.
+1. **Never commit a credential.** Run `bash scripts/check_public_safety.sh` before pushing — with `PUBLIC_SAFETY_SCAN_HISTORY=1` it scans full git history, including binary blobs. The published history was deliberately rewritten so that no credential exists anywhere in it; keep it that way.
+2. **Server and app must stay in parity.** Change behavior in `shared/`, regenerate with `python3 scripts/sync_shared.py`, and run both suites.
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE) © 2026 AkiyamaKunka

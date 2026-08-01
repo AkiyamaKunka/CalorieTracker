@@ -1,4 +1,4 @@
-name: Python Tests
+name: Tests
 
 on: [push, pull_request]
 
@@ -41,3 +41,28 @@ jobs:
     - name: Test with pytest
       run: |
         pytest tests/ -v --cov=. --cov-report=term-missing --cov-fail-under=78
+
+  flutter:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: subosito/flutter-action@v2
+      with:
+        channel: stable
+        cache: true
+
+    - name: Pub get
+      working-directory: app
+      run: flutter pub get
+
+    - name: Analyze
+      working-directory: app
+      run: flutter analyze
+
+    - name: Test
+      working-directory: app
+      run: flutter test
+
+    - name: Parity bindings in sync
+      run: python3 scripts/sync_shared.py --check
