@@ -13,7 +13,6 @@ import os
 import stat
 import sys
 import textwrap
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest

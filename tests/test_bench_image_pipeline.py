@@ -10,6 +10,11 @@ import sys
 from pathlib import Path
 
 import pytest
+
+# The bench harness needs numpy; it is a dev tool, not a server
+# dependency, so a machine without it SKIPS these smoke tests instead of
+# failing collection (this took CI down on 2026-08-01).
+np = pytest.importorskip("numpy")
 from PIL import Image
 
 REPO = Path(__file__).resolve().parent.parent
