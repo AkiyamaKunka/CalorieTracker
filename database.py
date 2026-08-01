@@ -1,3 +1,4 @@
+import math
 import sqlite3
 import json
 import re
@@ -551,11 +552,16 @@ def get_meal_stats(chat_id: int) -> Dict:
     Degrades, never crashes: a sqlite3 build without JSON1 or a stored
     analysis that strict JSON parsing rejects (json.dumps emits bare
     Infinity/NaN literals) raises OperationalError, and the helper falls
-    back to the get_meals + Python reduction.
+    back to the get_meals + Python reduction. SQLite >= 3.42 parses JSON5,
+    which ACCEPTS those bare literals — there the SQL path succeeds with a
+    non-finite sum instead of raising, so the result is checked and routed
+    to the same fallback.
     """
     start_date, end_date = "1970-01-01", user_local_today().isoformat()
     try:
         stats = _get_meal_stats_sql(chat_id, start_date, end_date)
+        if not math.isfinite(stats.get("total_calories") or 0):
+            stats = _get_meal_stats_python(chat_id, start_date, end_date)
     except sqlite3.OperationalError:
         stats = _get_meal_stats_python(chat_id, start_date, end_date)
     stats["avg_calories_per_active_day"] = (

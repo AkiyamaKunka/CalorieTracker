@@ -420,7 +420,10 @@ def _captured_at_from_filename(name):
         captured = datetime.strptime(match.group(1) + match.group(2), "%Y%m%d%H%M%S")
     except ValueError:
         return None
-    return captured.strftime("%Y-%m-%d %H:%M:%S")
+    # isoformat, NOT strftime("%Y-..."): glibc renders year 1 as "1"
+    # while macOS renders "0001", so the shared vectors disagreed with
+    # Linux CI. isoformat pads the year identically on every platform.
+    return captured.isoformat(sep=" ", timespec="seconds")
 
 
 def _upload_photo_status(file_path):
