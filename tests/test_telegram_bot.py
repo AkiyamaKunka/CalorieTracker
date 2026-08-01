@@ -6139,3 +6139,29 @@ def test_polling_defaults_to_on(monkeypatch):
     import telegram_bot as tb
     monkeypatch.delenv("TELEGRAM_POLLING", raising=False)
     assert tb.parse_boolish(os.environ.get("TELEGRAM_POLLING", "1")) is True
+
+
+def test_missing_gemini_key_disables_the_fallback_without_crashing(monkeypatch):
+    """Deleting the Gemini key must cost the FALLBACK, not the process.
+
+    The server's reason to exist now is the phone's /api/* endpoints
+    (Claude/GLM/Doubao CLI); demanding a Gemini key for that would mean a
+    revoked credential takes the app's analysis down with it.
+    """
+    import telegram_bot as tb
+
+    monkeypatch.setattr(tb.claude_analyzer, "is_configured", lambda: False)
+    out = tb.analyze_food_photo_with_retries(None, b"jpegbytes")
+    assert out is None, "no client, no fallback — but no exception either"
+
+
+def test_gemini_fallback_still_runs_when_a_client_exists(monkeypatch):
+    import telegram_bot as tb
+
+    monkeypatch.setattr(tb.claude_analyzer, "is_configured", lambda: False)
+    monkeypatch.setattr(tb, "_gemini_quota_pause", lambda: None)
+    monkeypatch.setattr(tb, "_analyze_food_photo_once",
+                        lambda *a, **kw: {"is_food": True})
+    monkeypatch.setattr(tb, "_record_gemini_health", lambda *a, **kw: None)
+    out = tb.analyze_food_photo_with_retries(object(), b"jpegbytes")
+    assert out == {"is_food": True}

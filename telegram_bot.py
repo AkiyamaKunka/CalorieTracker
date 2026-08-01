@@ -1326,6 +1326,13 @@ def analyze_food_photo_with_retries(
             return result
         log.warning("Claude analyzer unavailable/failed; falling back to Gemini.")
 
+    if client is None:
+        # No GEMINI_API_KEY configured — the fallback does not exist. Say
+        # so once per photo rather than throwing an AttributeError deep in
+        # the retry loop.
+        log.warning("No Gemini fallback configured (GEMINI_API_KEY unset).")
+        return None
+
     pause = _gemini_quota_pause()
     if pause:
         log.warning("Skipping Gemini photo analysis because daily quota pause is active.")
@@ -5929,22 +5936,32 @@ def main():
     log.info("🤖 CalorieTracker Bot (Corrections Mode)")
     log.info("=" * 50)
 
-    # Validate config
-    if not BOT_TOKEN:
+    # Validate config. What is REQUIRED depends on what this process is
+    # actually serving: with the chat bot retired (TELEGRAM_POLLING=0) the
+    # process exists to serve the phone's /api/* endpoints, and demanding
+    # a Telegram token or a Gemini key for that would mean a deleted
+    # credential takes the app's analysis down with it.
+    polling_enabled = parse_boolish(os.environ.get("TELEGRAM_POLLING", "1")) is not False
+
+    if polling_enabled and not BOT_TOKEN:
         log.error(
             "TELEGRAM_BOT_TOKEN not set. "
-            "Set it: export TELEGRAM_BOT_TOKEN='your-token'"
+            "Set it: export TELEGRAM_BOT_TOKEN='your-token' "
+            "(or set TELEGRAM_POLLING=0 to run the phone API only)"
         )
         sys.exit(1)
 
     if not GEMINI_API_KEY:
-        log.error(
-            "GEMINI_API_KEY not set. "
-            "Set it: export GEMINI_API_KEY='your-key'"
+        # A MISSING Gemini key only removes the fallback analyzer; the
+        # Claude/GLM/Doubao CLI path is independent. Refusing to boot
+        # would be worse than analyzing without a safety net.
+        log.warning(
+            "GEMINI_API_KEY not set — the Gemini fallback analyzer is "
+            "DISABLED. The subscription CLI path still works; photos it "
+            "cannot handle will fail instead of falling back."
         )
-        sys.exit(1)
 
-    if not ALLOWED_CHAT_ID:
+    if polling_enabled and not ALLOWED_CHAT_ID:
         log.error(
             "TELEGRAM_CHAT_ID not set or invalid. "
             "Set it to the numeric Telegram chat ID allowed to use this private bot."
@@ -5974,7 +5991,10 @@ def main():
     # must still count as a crash boot, or a boot-time crash loop restarts
     # forever without ever feeding the alert.
     _record_boot_and_maybe_alert(bot)
-    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    # None when the key is absent: every call site already treats a failed
+    # Gemini attempt as "fall back / report", so a missing client degrades
+    # to "no fallback" instead of crashing the process.
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
     # systemd stop sends SIGTERM; raising KeyboardInterrupt on the main thread
     # reuses the existing shutdown path, and the interpreter then joins the
