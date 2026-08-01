@@ -1100,18 +1100,20 @@ def test_get_meal_stats_survives_json_sqlite_cannot_parse(monkeypatch):
              json.dumps({"is_food": True, "total_calories": float("inf")})))
         conn.commit()
 
-    # Strict-JSON SQLite raises on the bare Infinity literal; SQLite
-    # >= 3.42 parses JSON5, accepts it, and returns a non-finite sum
-    # instead. Both are "sqlite cannot be trusted here" — the public
-    # helper must reroute to the Python reduction either way.
+    # Three sqlite generations, three behaviors, one contract:
+    # - strict-JSON builds (< 3.42) raise OperationalError on the bare
+    #   Infinity literal -> get_meal_stats falls back to Python;
+    # - JSON5 builds parse it, and the in-SQL safe_number clamp
+    #   (|v| < 1e9) zeroes the non-finite value -> SQL is already right;
+    # - if a non-finite ever leaked past the clamp, get_meal_stats's
+    #   isfinite guard reroutes to Python.
     try:
         raw = database._get_meal_stats_sql(chat_id, "1970-01-01", today_str)
     except sqlite3.OperationalError:
         pass  # strict-JSON build: the documented raise
     else:
-        assert not math.isfinite(raw["total_calories"]), (
-            "if SQL neither raises nor yields the non-finite sum, this "
-            "test's premise is gone — investigate")
+        assert raw["total_calories"] == 640 or not math.isfinite(
+            raw["total_calories"])
 
     # ...and the public helper still answers, via the Python reduction.
     assert database.get_meal_stats(chat_id) == {
