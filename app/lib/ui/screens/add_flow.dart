@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 import '../../core/contracts.dart';
 import '../../services/analyzer/normalize.dart' show makeMealThumb;
 import '../photo_pipeline.dart';
+import '../widgets/grouped.dart';
 import 'fix_meal_screen.dart';
 import 'meal_editor_screen.dart';
 import '../services.dart';
@@ -21,45 +22,77 @@ import '../services.dart';
 /// Entry point wired to the FAB. [onChanged] refreshes the Today screen.
 Future<void> openAddFlow(BuildContext context, UiServices services,
     {Future<void> Function()? onChanged}) async {
+  // Native-ized in loop cycle 2 (interaction lens #1): drag handle, a
+  // title, and the same grouped-row language as Settings — the sheet is
+  // the app's single logging entry point and looked stock-Material.
   final choice = await showModalBottomSheet<String>(
     context: context,
+    showDragHandle: true,
+    useSafeArea: true,
+    backgroundColor: groupedBackground(Theme.of(context).colorScheme),
     builder: (ctx) => SafeArea(
+      top: false,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          ListTile(
-            key: const Key('addFromPhotos'),
-            leading: const Icon(Icons.photo_library_outlined),
-            title: const Text('From recent photos'),
-            onTap: () => Navigator.of(ctx).pop('photos'),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text('Log a meal',
+                  style: Theme.of(ctx)
+                      .textTheme
+                      .titleLarge
+                      ?.copyWith(fontWeight: FontWeight.w600)),
+            ),
           ),
-          ListTile(
-            key: const Key('addFromText'),
-            leading: const Icon(Icons.edit_note),
-            title: const Text('Describe a meal'),
-            subtitle: const Text('Say what you ate, in any language'),
-            onTap: () => Navigator.of(ctx).pop('text'),
-          ),
-          // The zero-dependency path: the other two options need a working
-          // AI key and spend a model call — with no key (first run), a
-          // quota pause, or offline, the + button was a dead end.
-          ListTile(
-            key: const Key('addManually'),
-            leading: const Icon(Icons.keyboard_alt_outlined),
-            title: const Text('Enter manually'),
-            subtitle: const Text('Type the numbers yourself — no AI'),
-            onTap: () => Navigator.of(ctx).pop('manual'),
+          GroupedSection(
+            children: [
+              GroupedRow(
+                key: const Key('addFromPhotos'),
+                icon: Icons.photo_library_outlined,
+                iconColor: Theme.of(ctx).colorScheme.primary,
+                title: 'From recent photos',
+                onTap: () => Navigator.of(ctx).pop('photos'),
+              ),
+              GroupedRow(
+                key: const Key('addFromText'),
+                icon: Icons.edit_note,
+                iconColor: Theme.of(ctx).colorScheme.secondary,
+                title: 'Describe a meal',
+                value: 'any language',
+                onTap: () => Navigator.of(ctx).pop('text'),
+              ),
+              // The zero-dependency path: the other two options need a
+              // working AI key and spend a model call — with no key
+              // (first run), a quota pause, or offline, the + button was
+              // a dead end.
+              GroupedRow(
+                key: const Key('addManually'),
+                icon: Icons.keyboard_alt_outlined,
+                iconColor: Theme.of(ctx).colorScheme.tertiary,
+                title: 'Enter manually',
+                value: 'no AI',
+                onTap: () => Navigator.of(ctx).pop('manual'),
+              ),
+            ],
           ),
           // Corrections lived in a chat bar pinned to Today until
           // 2026-07-31 — the user's verdict: one button owns ALL meal
           // actions, adding and fixing alike.
-          ListTile(
-            key: const Key('addFixMeal'),
-            leading: const Icon(Icons.build_outlined),
-            title: const Text('Fix or delete a meal'),
-            subtitle: const Text('"meal 2 was roast duck", "删除第一餐"'),
-            onTap: () => Navigator.of(ctx).pop('fix'),
+          GroupedSection(
+            footer: '"meal 2 was roast duck" · "删除第一餐"',
+            children: [
+              GroupedRow(
+                key: const Key('addFixMeal'),
+                icon: Icons.build_outlined,
+                iconColor: Theme.of(ctx).colorScheme.error,
+                title: 'Fix or delete a meal',
+                onTap: () => Navigator.of(ctx).pop('fix'),
+              ),
+            ],
           ),
+          const SizedBox(height: 16),
         ],
       ),
     ),
