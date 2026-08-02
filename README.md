@@ -65,7 +65,7 @@ flowchart LR
 
 ## Getting started
 
-**Not a developer?** There's no app-store listing yet: Android users install a pre-built APK handed to them by whoever builds it (see below); installing on an iPhone currently requires a Mac with Xcode. If that's not you, this repo is one to watch rather than install today.
+**Android — just install it:** grab the APK from the [latest release](https://github.com/AkiyamaKunka/CalorieTracker/releases/latest), open it on your phone (allow "install unknown apps" if asked), then pick a provider and paste a key in Settings. **iPhone:** no prebuilt binary — sideloading requires a signature, so installing currently means building from source on a Mac with Xcode.
 
 **Developers** need Flutter (Dart SDK ≥ 3.12.2):
 
