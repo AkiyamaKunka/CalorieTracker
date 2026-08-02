@@ -18,6 +18,9 @@ only resume the saved garth session, which auto-refreshes.
 Config (read from the environment at call time):
     GARMIN_ENABLED    truthy (1/true/yes/on) to turn the pull on
     GARMIN_TOKEN_DIR  path to the pre-minted token directory
+    GARMIN_IS_CN      truthy for a Chinese-mainland account (garmin.cn /
+                      佳明 — a DIFFERENT backend, not a mirror; tokens minted
+                      against garmin.com do not work there and vice versa)
 """
 
 import logging
@@ -37,6 +40,7 @@ log = logging.getLogger("garmin")
 # ─── Config env var names ─────────────────────────────────────────
 GARMIN_ENABLED_ENV = "GARMIN_ENABLED"
 GARMIN_TOKEN_DIR_ENV = "GARMIN_TOKEN_DIR"
+GARMIN_IS_CN_ENV = "GARMIN_IS_CN"
 
 
 def _truthy(value) -> bool:
@@ -94,7 +98,13 @@ def fetch_daily_activity(date_str: str) -> Optional[DailyActivity]:
         return None
 
     try:
-        client = Garmin()
+        # is_cn selects the garmin.cn backend; garminconnect forwards it to
+        # garth's domain config. Constructor kwarg support has drifted across
+        # releases, so fall back to a bare client if the kwarg is rejected.
+        try:
+            client = Garmin(is_cn=_truthy(os.environ.get(GARMIN_IS_CN_ENV)))
+        except TypeError:
+            client = Garmin()
         # Token-only resume (garth). No email/password is ever passed here.
         login = _resolve(client, "login")
         if login is not None:

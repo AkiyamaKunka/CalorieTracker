@@ -426,3 +426,58 @@ def test_falsy_garmin_enabled_values_disable_the_pull(monkeypatch, value):
 
     assert garmin.is_configured() is False
     assert garmin.fetch_daily_activity("2026-07-13") is None
+
+
+def test_is_cn_flag_reaches_the_client(monkeypatch):
+    """GARMIN_IS_CN routes to the garmin.cn backend — a DIFFERENT service,
+    not a mirror; an international client silently finds no data there."""
+    import garmin as g
+
+    captured = {}
+
+    class FakeGarmin:
+        def __init__(self, is_cn=False):
+            captured["is_cn"] = is_cn
+
+        def login(self, tokendir):
+            captured["tokendir"] = tokendir
+
+        def get_stats(self, date):
+            return {"activeKilocalories": 512}
+
+        def get_activities_by_date(self, a, b):
+            return []
+
+    monkeypatch.setattr(g, "Garmin", FakeGarmin)
+    monkeypatch.setenv(g.GARMIN_ENABLED_ENV, "1")
+    monkeypatch.setenv(g.GARMIN_TOKEN_DIR_ENV, "/tmp/tokens")
+    monkeypatch.setenv(g.GARMIN_IS_CN_ENV, "1")
+
+    daily = g.fetch_daily_activity("2026-08-02")
+    assert captured["is_cn"] is True
+    assert daily is not None and daily.active_calories == 512
+
+
+def test_is_cn_kwarg_rejected_by_old_lib_falls_back(monkeypatch):
+    import garmin as g
+
+    class OldGarmin:
+        def __init__(self):  # no is_cn kwarg — pre-CN-support release
+            pass
+
+        def login(self, tokendir):
+            pass
+
+        def get_stats(self, date):
+            return {"activeKilocalories": 100}
+
+        def get_activities_by_date(self, a, b):
+            return []
+
+    monkeypatch.setattr(g, "Garmin", OldGarmin)
+    monkeypatch.setenv(g.GARMIN_ENABLED_ENV, "1")
+    monkeypatch.setenv(g.GARMIN_TOKEN_DIR_ENV, "/tmp/tokens")
+    monkeypatch.setenv(g.GARMIN_IS_CN_ENV, "1")
+
+    daily = g.fetch_daily_activity("2026-08-02")
+    assert daily is not None and daily.active_calories == 100
