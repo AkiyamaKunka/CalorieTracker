@@ -13,6 +13,14 @@ import 'fakes.dart';
 
 Widget _wrap(Widget child) => MaterialApp(home: Scaffold(body: child));
 
+/// The 2026-08-02 Apple restructure moved provider/key/model/server
+/// controls onto their own page (progressive disclosure): tests that
+/// exercise them walk through the root's AI Provider row first.
+Future<void> openProviderPage(WidgetTester tester) async {
+  await tester.tap(find.byKey(const Key('aiProviderRow')));
+  await tester.pumpAndSettle();
+}
+
 void main() {
   connectClaudeTests();
   importExportTests();
@@ -32,7 +40,8 @@ void main() {
       dao: FakeDao(),
       requestPhotoPermission: () async => true,
     )));
-    expect(find.text('Test this provider'), findsOneWidget);
+    await openProviderPage(tester);
+    expect(find.text('Test This Provider'), findsOneWidget);
     expect(find.byKey(const Key('diagnosticsTile')), findsNothing,
         reason: 'the tile was a third door to the same page');
     expect(find.text('Validate key'), findsNothing);
@@ -52,6 +61,7 @@ void main() {
       dao: FakeDao(),
       requestPhotoPermission: () async => true,
     )));
+    await openProviderPage(tester);
     await tester.enterText(find.byKey(const Key('apiKeyField')), 'my-key');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
@@ -69,6 +79,7 @@ void main() {
       dao: FakeDao(),
       requestPhotoPermission: () async => true,
     )));
+    await openProviderPage(tester);
     expect(find.byKey(const Key('serverBackendSelector')), findsOneWidget);
     expect(settings.serverBackend, 'claude');
 
@@ -91,10 +102,14 @@ void main() {
       dao: FakeDao(),
       requestPhotoPermission: () async => true,
     )));
+    await openProviderPage(tester);
     expect(find.byKey(const Key('serverBackendSelector')), findsNothing);
   });
 
   testWidgets('model is PICKED from a curated list, not typed', (tester) async {
+    tester.view.physicalSize = const Size(800, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
     final settings = FakeSettings(apiKey: 'k'); // gemini, curated default
     await tester.pumpWidget(_wrap(SettingsScreen(
       settings: settings,
@@ -102,10 +117,13 @@ void main() {
       dao: FakeDao(),
       requestPhotoPermission: () async => true,
     )));
+    await openProviderPage(tester);
     expect(find.byKey(const Key('modelPicker')), findsOneWidget);
     expect(find.byKey(const Key('modelField')), findsNothing,
         reason: 'no raw text entry unless the user asks for Custom');
 
+    await tester.ensureVisible(find.byKey(const Key('modelPicker')));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('modelPicker')));
     await tester.pumpAndSettle();
     await tester
@@ -131,6 +149,7 @@ void main() {
       dao: FakeDao(),
       requestPhotoPermission: () async => true,
     )));
+    await openProviderPage(tester);
     expect(find.byKey(const Key('modelField')), findsOneWidget,
         reason: 'an unlisted stored model must stay visible and editable');
     expect(find.text('Custom — type a model name…'), findsOneWidget);
@@ -154,6 +173,7 @@ void main() {
       dao: FakeDao(),
       requestPhotoPermission: () async => true,
     )));
+    await openProviderPage(tester);
     expect(
         tester
             .widget<TextField>(find.byKey(const Key('apiKeyField')))
@@ -161,9 +181,8 @@ void main() {
             .text,
         'gem-key');
 
-    await tester.tap(find.byKey(const Key('providerDropdown')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.textContaining('Zhipu GLM').last);
+    // The dropdown became an Apple checkmark list (2026-08-02).
+    await tester.tap(find.byKey(const Key('providerChoice-glm')));
     await tester.pumpAndSettle();
 
     expect(settings.provider, 'glm');
@@ -269,6 +288,9 @@ void main() {
       requestPhotoPermission: () async => true,
     )));
     expect(find.byKey(const Key('firstRunCard')), findsNothing);
+    // The banner moved WITH the provider controls to the AI Provider
+    // page; the root footer still states the pause in prose.
+    await openProviderPage(tester);
     expect(find.byKey(const Key('quotaPauseBanner')), findsOneWidget);
   });
 
@@ -337,6 +359,7 @@ void connectClaudeTests() {
       },
     ));
 
+    await openProviderPage(tester);
     await tester.tap(find.byKey(const Key('connectClaudeButton')));
     // Fixed pumps: the busy spinner animates while the dialog is up, so
     // pumpAndSettle would wait forever.
@@ -367,6 +390,7 @@ void connectClaudeTests() {
       complete: (_) async => fail('must not be called'),
       openUrl: (_) async => fail('must not be called'),
     ));
+    await openProviderPage(tester);
     await tester.tap(find.byKey(const Key('connectClaudeButton')));
     await tester.pumpAndSettle();
     expect(find.textContaining('did not produce'), findsOneWidget);
@@ -389,6 +413,7 @@ void connectClaudeTests() {
       },
       openUrl: (_) async => true,
     ));
+    await openProviderPage(tester);
     await tester.tap(find.byKey(const Key('connectClaudeButton')));
     await tester.pump(const Duration(milliseconds: 300));
     await tester.pump(const Duration(milliseconds: 300));

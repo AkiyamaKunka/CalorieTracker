@@ -5,6 +5,8 @@ library;
 import 'dart:async' show unawaited;
 import 'dart:io' show File;
 
+import 'package:flutter/cupertino.dart' show CupertinoPageTransitionsBuilder;
+
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:path_provider/path_provider.dart'
     show getApplicationDocumentsDirectory;
@@ -13,11 +15,24 @@ import 'package:flutter/material.dart';
 
 import 'screens/add_flow.dart';
 import 'screens/body_screen.dart';
+import 'widgets/grouped.dart' show cellBackground, groupedBackground;
 import 'screens/history_screen.dart';
+import 'screens/settings/provider_page.dart';
 import 'screens/settings_screen.dart';
 import 'screens/today_screen.dart';
 import 'refresh_signal.dart';
 import 'services.dart';
+
+class _AppleScrollBehavior extends MaterialScrollBehavior {
+  const _AppleScrollBehavior();
+  @override
+  ScrollPhysics getScrollPhysics(BuildContext context) =>
+      const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics());
+  @override
+  Widget buildOverscrollIndicator(
+          BuildContext context, Widget child, ScrollableDetails details) =>
+      child;
+}
 
 class CalorieTrackerApp extends StatelessWidget {
   final UiServices services;
@@ -47,17 +62,32 @@ class CalorieTrackerApp extends StatelessWidget {
               fontWeight: w,
               fontFeatures: const [FontFeature.tabularFigures()]);
       return base.copyWith(
+        // Apple's grouped inversion (the tell that a screen "reads iOS"):
+        // the PAGE is the deeper tone, cells float on it — never
+        // white-on-white or gray-on-gray.
+        scaffoldBackgroundColor: groupedBackground(scheme),
         textTheme: text.copyWith(
           displaySmall: nums(text.displaySmall),
           headlineMedium: nums(text.headlineMedium),
           headlineSmall: nums(text.headlineSmall),
           titleLarge: text.titleLarge?.copyWith(fontWeight: FontWeight.w600),
         ),
+        // iOS push transition + swipe-back on BOTH platforms; scoped back
+        // to per-platform if the Android edge-swipe double-pop (#83087)
+        // ever bites the APK crowd.
+        pageTransitionsTheme: const PageTransitionsTheme(builders: {
+          TargetPlatform.android: CupertinoPageTransitionsBuilder(),
+          TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
+        }),
+        appBarTheme: AppBarTheme(
+          backgroundColor: groupedBackground(scheme),
+          scrolledUnderElevation: 0,
+        ),
         cardTheme: base.cardTheme.copyWith(
           elevation: 0,
-          color: scheme.surfaceContainerLow,
+          color: cellBackground(scheme),
           shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16)),
+              borderRadius: BorderRadius.circular(18)),
         ),
         floatingActionButtonTheme: FloatingActionButtonThemeData(
           elevation: 1,
@@ -75,6 +105,8 @@ class CalorieTrackerApp extends StatelessWidget {
     return MaterialApp(
       title: 'CalorieTracker',
       scaffoldMessengerKey: messengerKey,
+      // iOS scroll feel everywhere: bounce, no glow indicator.
+      scrollBehavior: const _AppleScrollBehavior(),
       theme: themed(Brightness.light),
       darkTheme: themed(Brightness.dark),
       themeMode: ThemeMode.system,
@@ -118,9 +150,26 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       unawaited(getApplicationDocumentsDirectory().then((dir) {
         final f = File('${dir.path}/ct_debug_tab');
         if (!f.existsSync() || !mounted) return;
-        final forced = int.tryParse(f.readAsStringSync().trim());
+        final raw = f.readAsStringSync().trim();
+        // '3p' = Settings tab + push the provider page (screenshot runs).
+        final push = raw.endsWith('p');
+        final forced = int.tryParse(push ? raw.substring(0, raw.length - 1) : raw);
         if (forced != null && forced >= 0 && forced <= 3) {
           setState(() => _index = forced);
+          if (push && forced == 3) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!mounted) return;
+              final s = widget.services;
+              Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => ProviderSettingsPage(
+                  settings: s.settings,
+                  analyzer: s.analyzer,
+                  startClaudeAuth: s.startClaudeAuth,
+                  completeClaudeAuth: s.completeClaudeAuth,
+                ),
+              ));
+            });
+          }
         }
       }, onError: (Object _) {}));
     }
@@ -173,9 +222,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final s = widget.services;
     return Scaffold(
-      appBar: AppBar(
-        title: Text(const ['Today', 'History', 'Body', 'Settings'][_index]),
-      ),
+      // No shared AppBar: each tab renders its own iOS-style large title
+      // that collapses as it scrolls (SliverAppBar.large).
       body: IndexedStack(
         index: _index,
         children: [

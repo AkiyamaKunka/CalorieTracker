@@ -146,6 +146,7 @@ class BodyScreenState extends State<BodyScreen> {
     }
     final empty = _weights.isEmpty && _measurements.isEmpty;
     return Scaffold(
+      backgroundColor: Colors.transparent,
       floatingActionButton: FloatingActionButton.extended(
         key: const Key('logBodyButton'),
         // The IndexedStack keeps Today's FAB alive at the same time; the
@@ -156,7 +157,10 @@ class BodyScreenState extends State<BodyScreen> {
         label: const Text('Log'),
       ),
       body: empty
-          ? Center(
+          ? CustomScrollView(slivers: [
+              const SliverAppBar.large(title: Text('Body')),
+              SliverFillRemaining(
+                  child: Center(
               child: Padding(
                 padding: const EdgeInsets.all(32),
                 child: Column(
@@ -180,10 +184,12 @@ class BodyScreenState extends State<BodyScreen> {
                   ],
                 ),
               ),
-            )
-          : ListView(
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
-              children: [
+            ))])
+          : CustomScrollView(slivers: [
+              const SliverAppBar.large(title: Text('Body')),
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
+                sliver: SliverList.list(children: [
                 if (_weights.isNotEmpty) _WeightCard(weights: _weights),
                 if (_measurements.isNotEmpty) ...[
                   const SizedBox(height: 12),
@@ -201,8 +207,9 @@ class BodyScreenState extends State<BodyScreen> {
                     onTap: () => _openSheet(date: date),
                     onDelete: () => _confirmDelete(date),
                   ),
-              ],
-            ),
+                ]),
+              ),
+            ]),
     );
   }
 }

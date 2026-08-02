@@ -129,30 +129,61 @@ class TodayScreenState extends State<TodayScreen> {
     );
   }
 
+  /// iOS-style collapsing large title above whatever [child] slivers show.
+  Widget _withTitle(BuildContext context, List<Widget> slivers,
+      {bool scrollable = true}) {
+    return CustomScrollView(
+      physics: scrollable
+          ? const AlwaysScrollableScrollPhysics()
+          : const NeverScrollableScrollPhysics(),
+      slivers: [
+        const SliverAppBar.large(title: Text('Today')),
+        ...slivers,
+      ],
+    );
+  }
+
   Widget _body(BuildContext context) {
-    if (_loading) return const Center(child: CircularProgressIndicator());
+    if (_loading) {
+      return _withTitle(context,
+          [const SliverFillRemaining(
+              child: Center(child: CircularProgressIndicator()))],
+          scrollable: false);
+    }
     if (_error != null) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(_error!, textAlign: TextAlign.center),
-              const SizedBox(height: 12),
-              FilledButton(onPressed: reload, child: const Text('Retry')),
-            ],
+      return _errorBody(context);
+    }
+    return _loadedBody(context);
+  }
+
+  Widget _errorBody(BuildContext context) {
+    return _withTitle(context, [
+      SliverFillRemaining(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(_error!, textAlign: TextAlign.center),
+                const SizedBox(height: 12),
+                FilledButton(onPressed: reload, child: const Text('Retry')),
+              ],
+            ),
           ),
         ),
-      );
-    }
+      ),
+    ]);
+  }
+
+  Widget _loadedBody(BuildContext context) {
     final foodMeals = _todayMeals.where(isFoodMeal).toList();
     return RefreshIndicator(
       onRefresh: reload,
-      child: ListView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.only(bottom: 96),
-        children: [
+      child: _withTitle(context, [
+        SliverPadding(
+          padding: const EdgeInsets.only(bottom: 96),
+          sliver: SliverList.list(children: [
           _totalsHeader(context, foodMeals),
           if (foodMeals.isEmpty)
             Padding(
@@ -186,8 +217,9 @@ class TodayScreenState extends State<TodayScreen> {
                 onTap: () => _editMeal(meal),
                 thumb: widget.thumbs?.thumbFor(meal),
               ),
-        ],
-      ),
+          ]),
+        ),
+      ]),
     );
   }
 

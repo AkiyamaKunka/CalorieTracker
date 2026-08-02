@@ -82,6 +82,12 @@ void main() {
     await tester.pumpWidget(CalorieTrackerApp(
         services: makeServices(settings: FakeSettings(apiKey: ''))));
     await tester.pumpAndSettle();
+    // The Apple restructure (2026-08-02) put the key field one disclosure
+    // deep: onboarding lands on Settings, whose welcome card points at the
+    // AI Provider row; the field lives on that page.
+    expect(find.byKey(const Key('firstRunCard')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('aiProviderRow')));
+    await tester.pumpAndSettle();
     expect(find.byKey(const Key('apiKeyField')), findsOneWidget);
   });
 }

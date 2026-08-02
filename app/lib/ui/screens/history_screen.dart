@@ -155,29 +155,56 @@ class HistoryScreenState extends State<HistoryScreen> {
     );
   }
 
+  Widget _withTitle(List<Widget> slivers, {bool scrollable = true}) {
+    return CustomScrollView(
+      physics: scrollable
+          ? const AlwaysScrollableScrollPhysics()
+          : const NeverScrollableScrollPhysics(),
+      slivers: [
+        const SliverAppBar.large(title: Text('History')),
+        ...slivers,
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    if (_loading) return const Center(child: CircularProgressIndicator());
+    if (_loading) {
+      return _withTitle(
+          [const SliverFillRemaining(
+              child: Center(child: CircularProgressIndicator()))],
+          scrollable: false);
+    }
     if (_error != null) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(_error!, textAlign: TextAlign.center),
-              const SizedBox(height: 12),
-              FilledButton(onPressed: reload, child: const Text('Retry')),
-            ],
+      return _withTitle([
+        SliverFillRemaining(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(_error!, textAlign: TextAlign.center),
+                  const SizedBox(height: 12),
+                  FilledButton(
+                      onPressed: reload, child: const Text('Retry')),
+                ],
+              ),
+            ),
           ),
         ),
-      );
+      ]);
     }
     if (_perDay.isEmpty) {
-      return Center(
-        // Empty copy per spec §5.3.
-        child: Text('No meals logged in the past ${widget.days} days.'),
-      );
+      return _withTitle([
+        SliverFillRemaining(
+          child: Center(
+            // Empty copy per spec §5.3.
+            child:
+                Text('No meals logged in the past ${widget.days} days.'),
+          ),
+        ),
+      ]);
     }
     // Interior GAP days are rendered too (dimmed, "no meals logged"):
     // a day the watcher missed used to simply vanish, and spotting it
@@ -211,9 +238,8 @@ class HistoryScreenState extends State<HistoryScreen> {
         .fold<num>(0, (a, b) => a > b ? a : b); // row magnitude track scale
     return RefreshIndicator(
       onRefresh: reload,
-      child: ListView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        children: [
+      child: _withTitle([
+        SliverList.list(children: [
           Padding(
             padding: const EdgeInsets.all(16),
             child: Column(
@@ -237,8 +263,8 @@ class HistoryScreenState extends State<HistoryScreen> {
           ),
           for (final date in dates)
             _dayRow(context, date),
-        ],
-      ),
+        ]),
+      ]),
     );
   }
 }
