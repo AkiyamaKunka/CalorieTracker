@@ -59,6 +59,8 @@ flowchart LR
 
 **A diagnostics page that names the actual problem.** *Test AI provider* runs six staged checks — configuration, endpoint reachability, authentication & account credit, text round-trip, photo round-trip, quota state — and each failure states what is wrong and what to do about it: an out-of-credit account is not a "wrong key", an unreachable Gemini suggests a domestic provider, a rate limit says *wait* while a dead balance says *recharge*.
 
+**Body tracking.** Weight history with an honest trend chart (logged by hand or just by telling the chat "I weigh 81.6 kg"), plus waist, chest and hip measurements — one tap to log, editable, exported with everything else.
+
 **Privacy.** Meals, photos, and thumbnails live in SQLite on the device. The only network traffic is the photo you chose to analyze, going to the provider you chose. Export writes a JSON file you own; import merges it back (device moves are two taps), never destructively.
 
 **Small details.** Share-sheet photos are dated by the JPEG's own EXIF shutter time (validated — junk dates rejected), so a 23:50 dinner shared after midnight lands on *yesterday's* total. Every meal keeps a thumbnail even after you clean your gallery. Manual entry works offline with no key at all. Material 3, light and dark.
@@ -90,6 +92,22 @@ bash scripts/build_share_apk.sh   # → ~21 MB arm64 APK in ~/Desktop/CalorieTra
 
 The companion server turns a flat-rate subscription into the app's analysis backend: the phone posts the photo to your machine, which runs the analysis through the Claude Code CLI under your plan — no per-call API spend. Check your plan's acceptable-use terms before routing app traffic through it.
 
+```mermaid
+sequenceDiagram
+    participant App as 📱 App<br/>(holds ONE upload key)
+    participant Server as 🖥 Your server<br/>(holds the plan keys)
+    participant CLI as Claude Code CLI
+    participant Plan as Claude / GLM / Doubao plan
+    App->>Server: photo + X-API-Key (+ backend choice)
+    Note over App,Server: no prompt from the caller —<br/>the server composes its own
+    Server->>CLI: single-flight run, plan credentials injected
+    CLI->>Plan: analysis under the flat-rate subscription
+    Plan-->>CLI: meal estimate
+    CLI-->>Server: JSON
+    Server-->>App: analysis + analyzed_by receipt
+    Note over App: refuses a receipt that names<br/>the wrong paying plan
+```
+
 The security shape is deliberate:
 
 - Plan credentials live only in the server's `.env` — the phone holds one upload key and nothing else. An APK is a shipping container; nothing subscription-shaped is ever baked into it.
@@ -107,12 +125,29 @@ The part of this codebase most worth reviewing is how **two full implementations
 2. **Shared constants and prompts, generated for both runtimes.** [shared/](shared/) holds 20 behavior constants (normalization size, dedup windows, validation bounds…) and the prompts verbatim; `scripts/sync_shared.py --check` is a drift gate run in CI.
 3. **248 golden vectors, replayed by both suites.** Python is the oracle: its real functions generate [shared/vectors/](shared/vectors/) (coercion of hostile model output, capture-time dating, NL normalization, report formulas…), and the Dart suite must match byte-for-byte — including NaN/Infinity and expected-throw cases. Cross-language drift is a failing test, not a field bug.
 
+```mermaid
+flowchart TB
+    Spec["docs/APP_PORT_SPEC.md<br/>every rule cites file:line · §9 lists deliberate divergences"]
+    Shared["shared/<br/>20 constants · prompts verbatim"]
+    Oracle["Python reference implementation"]
+    Vectors["shared/vectors/ — 248 golden cases<br/>generated FROM the real Python functions"]
+    GenPy["shared_generated.py"]
+    GenDart["shared_generated.dart"]
+    PyTests["pytest suite (1557)<br/>replays vectors + rebuilds them to diff"]
+    DartTests["Dart suite (821)<br/>replays the same cases byte-for-byte"]
+    Shared -- "sync_shared.py<br/>(--check gates CI)" --> GenPy & GenDart
+    Oracle -- generate_shared_vectors.py --> Vectors
+    Vectors --> PyTests & DartTests
+    Spec -.-> Oracle
+    Spec -.-> DartTests
+```
+
 Other things a reviewer will find:
 
 - **A provider conformance matrix** ([provider_feedback_matrix_test.dart](app/test/analyzer/provider_feedback_matrix_test.dart)): seven providers tested against a shared vocabulary of eight failure classes (auth, rate limit, billing, model-not-found, overloaded, content filter, junk reply, daily quota), with 39 fixtures that are *verbatim wire bodies* from the real endpoints. "Out of money" alone arrives as five different shapes — OpenAI `429 insufficient_quota`, GLM `429` code 1113, Doubao `403 AccountOverdueError`, Qwen `400 Arrearage`, Anthropic `400` credit-balance — all mapped to one user-facing verdict: *recharge, don't regenerate the key*.
 - **A photo pipeline built around one identity.** md5 of the original bytes drives a five-state reservation ledger (`processing / saved / skipped / failed / deleted`): reserve-before-analyze, meal-insert + `saved` in one transaction, tombstones so deleted meals never resurrect, and a strict/deliberate split — the automated watcher never reclaims a failed row, a human re-add may. All intake is serialized through one FIFO tail: one photo's bytes resident at a time, no self-inflicted rate limits.
 - **A capture-dating chain with a trust boundary.** Filename timestamp → library asset date → EXIF `DateTimeOriginal` → intake time; every candidate passes the same validation window (reject > 1 h future, > 45 days old) because EXIF is attacker-controlled junk until proven otherwise.
-- **Test discipline.** Both full suites (currently 801 Dart + 1557 Python tests) run in CI on every push — and the suites are reviewed for their *capacity to fail*: several were rewritten after being caught passing while broken.
+- **Test discipline.** Both full suites (currently 821 Dart + 1557 Python tests) run in CI on every push — and the suites are reviewed for their *capacity to fail*: several were rewritten after being caught passing while broken.
 
 ## The Telegram bot (the original interface, kept as a backup)
 
