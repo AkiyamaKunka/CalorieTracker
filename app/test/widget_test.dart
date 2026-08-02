@@ -88,6 +88,9 @@ void main() {
     expect(find.byKey(const Key('firstRunCard')), findsOneWidget);
     await tester.tap(find.byKey(const Key('aiProviderRow')));
     await tester.pumpAndSettle();
+    // v2 IA: the chooser splits API key vs Subscription onto own pages.
+    await tester.tap(find.byKey(const Key('apiKeyTypeRow')));
+    await tester.pumpAndSettle();
     expect(find.byKey(const Key('apiKeyField')), findsOneWidget);
   });
 }

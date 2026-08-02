@@ -21,6 +21,20 @@ Future<void> openProviderPage(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
+/// v2 IA (2026-08-02): each connection TYPE has its own page below the
+/// chooser — API-key controls and plan controls need one more hop.
+Future<void> openApiKeyPage(WidgetTester tester) async {
+  await openProviderPage(tester);
+  await tester.tap(find.byKey(const Key('apiKeyTypeRow')));
+  await tester.pumpAndSettle();
+}
+
+Future<void> openSubscriptionPage(WidgetTester tester) async {
+  await openProviderPage(tester);
+  await tester.tap(find.byKey(const Key('subscriptionTypeRow')));
+  await tester.pumpAndSettle();
+}
+
 void main() {
   connectClaudeTests();
   importExportTests();
@@ -61,7 +75,7 @@ void main() {
       dao: FakeDao(),
       requestPhotoPermission: () async => true,
     )));
-    await openProviderPage(tester);
+    await openApiKeyPage(tester);
     await tester.enterText(find.byKey(const Key('apiKeyField')), 'my-key');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
@@ -79,7 +93,7 @@ void main() {
       dao: FakeDao(),
       requestPhotoPermission: () async => true,
     )));
-    await openProviderPage(tester);
+    await openSubscriptionPage(tester);
     // The segmented control became the Subscription checklist (user-
     // designed two-type IA, 2026-08-02): picking a plan row selects both
     // the server provider AND the backend.
@@ -109,7 +123,7 @@ void main() {
       dao: FakeDao(),
       requestPhotoPermission: () async => true,
     )));
-    await openProviderPage(tester);
+    await openSubscriptionPage(tester);
     expect(find.byKey(const Key('serverBackendSelector')), findsNothing,
         reason: 'the segmented control is gone — plans are first-class rows');
     await tester.ensureVisible(find.byKey(const Key('planChoice-doubao')));
@@ -131,7 +145,7 @@ void main() {
       dao: FakeDao(),
       requestPhotoPermission: () async => true,
     )));
-    await openProviderPage(tester);
+    await openApiKeyPage(tester);
     expect(find.byKey(const Key('modelPicker')), findsOneWidget);
     expect(find.byKey(const Key('modelField')), findsNothing,
         reason: 'no raw text entry unless the user asks for Custom');
@@ -163,7 +177,7 @@ void main() {
       dao: FakeDao(),
       requestPhotoPermission: () async => true,
     )));
-    await openProviderPage(tester);
+    await openApiKeyPage(tester);
     expect(find.byKey(const Key('modelField')), findsOneWidget,
         reason: 'an unlisted stored model must stay visible and editable');
     expect(find.text('Custom — type a model name…'), findsOneWidget);
@@ -187,7 +201,7 @@ void main() {
       dao: FakeDao(),
       requestPhotoPermission: () async => true,
     )));
-    await openProviderPage(tester);
+    await openApiKeyPage(tester);
     expect(
         tester
             .widget<TextField>(find.byKey(const Key('apiKeyField')))
@@ -373,7 +387,7 @@ void connectClaudeTests() {
       },
     ));
 
-    await openProviderPage(tester);
+    await openSubscriptionPage(tester);
     await tester.tap(find.byKey(const Key('connectClaudeButton')));
     // Fixed pumps: the busy spinner animates while the dialog is up, so
     // pumpAndSettle would wait forever.
@@ -404,7 +418,7 @@ void connectClaudeTests() {
       complete: (_) async => fail('must not be called'),
       openUrl: (_) async => fail('must not be called'),
     ));
-    await openProviderPage(tester);
+    await openSubscriptionPage(tester);
     await tester.tap(find.byKey(const Key('connectClaudeButton')));
     await tester.pumpAndSettle();
     expect(find.textContaining('did not produce'), findsOneWidget);
@@ -427,7 +441,7 @@ void connectClaudeTests() {
       },
       openUrl: (_) async => true,
     ));
-    await openProviderPage(tester);
+    await openSubscriptionPage(tester);
     await tester.tap(find.byKey(const Key('connectClaudeButton')));
     await tester.pump(const Duration(milliseconds: 300));
     await tester.pump(const Duration(milliseconds: 300));
