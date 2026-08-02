@@ -15,18 +15,20 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show HapticFeedback;
 
-/// The grouped-page background: visibly deeper than the cells, which read
-/// as raised white(ish) islands — Apple's systemGroupedBackground role.
+/// Apple's ACTUAL neutral system values, not seed-derived: deriving these
+/// from the clay scheme tinted every page pink (user verdict 2026-08-02).
+/// Clay stays the ACCENT; surfaces are neutral — which is also exactly
+/// how Apple does it (systemGroupedBackground #F2F2F7 / #000000).
 Color groupedBackground(ColorScheme scheme) =>
     scheme.brightness == Brightness.dark
-        ? scheme.surfaceContainerLowest
-        : scheme.surfaceContainerHigh;
+        ? const Color(0xFF000000)
+        : const Color(0xFFF2F2F7);
 
-/// The cell background — Apple's secondarySystemGroupedBackground role.
+/// secondarySystemGroupedBackground: the cells (#FFFFFF / #1C1C1E).
 Color cellBackground(ColorScheme scheme) =>
     scheme.brightness == Brightness.dark
-        ? scheme.surfaceContainerLow
-        : scheme.surface;
+        ? const Color(0xFF1C1C1E)
+        : const Color(0xFFFFFFFF);
 
 /// One inset grouped section: optional header, rounded cell stack with
 /// hairline separators, optional footer.

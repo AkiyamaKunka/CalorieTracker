@@ -95,9 +95,11 @@ class CalorieTrackerApp extends StatelessWidget {
               borderRadius: BorderRadius.circular(18)),
         ),
         navigationBarTheme: NavigationBarThemeData(
-          // Default height (80): forcing 72 squeezed labels at large font
-          // scales (review) for a saving nobody asked for.
-          indicatorColor: scheme.secondaryContainer,
+          // Neutral cell surface (the scheme-derived tint kept the bar
+          // pink after the surfaces went Apple-neutral); clay survives
+          // only as the soft selection pill.
+          backgroundColor: cellBackground(scheme),
+          indicatorColor: scheme.primary.withValues(alpha: 0.14),
         ),
       );
     }
