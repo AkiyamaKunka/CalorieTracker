@@ -135,7 +135,7 @@ flowchart TB
     GenDart["shared_generated.dart"]
     PyTests["pytest suite (1557)<br/>replays vectors + rebuilds them to diff"]
     DartTests["Dart suite (821)<br/>replays the same cases byte-for-byte"]
-    Shared -- "sync_shared.py<br/>(--check gates CI)" --> GenPy & GenDart
+    Shared -- "sync_shared.py<br/>(drift gate in CI)" --> GenPy & GenDart
     Oracle -- generate_shared_vectors.py --> Vectors
     Vectors --> PyTests & DartTests
     Spec -.-> Oracle
