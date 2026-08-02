@@ -149,7 +149,7 @@ tests/                  Python suite   ·   app/test/   Dart suite
 
 ## Contributing
 
-Issues and PRs welcome. Two rules matter more than style:
+Issues and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for setup and expectations. Two rules matter more than style:
 
 1. **Never commit a credential.** Run `bash scripts/check_public_safety.sh` before pushing — with `PUBLIC_SAFETY_SCAN_HISTORY=1` it scans full git history, including binary blobs. The published history was deliberately rewritten so that no credential exists anywhere in it; keep it that way.
 2. **Server and app must stay in parity.** Change behavior in `shared/`, regenerate with `python3 scripts/sync_shared.py`, and run both suites.

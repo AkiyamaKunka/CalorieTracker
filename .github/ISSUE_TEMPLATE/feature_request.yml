@@ -1,0 +1,32 @@
+name: 💡 Feature request
+description: Propose an improvement or new capability
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the situation where the current app falls short — the problem is often more useful than the proposed solution.
+      placeholder: "I eat at a canteen where every dish is served in identical bowls, and the AI keeps..."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: true
+  - type: dropdown
+    id: half
+    attributes:
+      label: Which half does this touch?
+      description: Behavior changes usually have to land on BOTH sides (see CONTRIBUTING.md on parity).
+      options:
+        - App only
+        - Server only
+        - Both (shared behavior)
+        - Not sure
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Workarounds you've tried

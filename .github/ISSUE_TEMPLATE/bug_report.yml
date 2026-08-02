@@ -1,0 +1,67 @@
+name: 🐛 Bug report
+description: Something is broken in the app or the server
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report! One tip before you start: for anything
+        AI-analysis related, the app's **Settings → Test AI provider** page
+        usually names the exact failing stage — paste its verdict below and
+        you've done half the diagnosis already.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, what happened instead?
+      placeholder: |
+        1. Turned on "Watch camera roll"
+        2. Took a photo of lunch
+        3. Expected a meal to appear on Today — nothing did
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where?
+      options:
+        - App (Android)
+        - App (iOS)
+        - Self-hosted server / subscription analysis
+        - Telegram bot
+        - Build / tooling
+        - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: AI provider in use (if analysis-related)
+      options:
+        - Google Gemini
+        - OpenAI
+        - Anthropic Claude
+        - Alibaba Qwen
+        - ByteDance Doubao
+        - Zhipu GLM
+        - Own server (Claude plan)
+        - Own server (GLM Coding Plan)
+        - Own server (Doubao Agent Plan)
+        - Not analysis-related
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Test AI provider output
+      description: |
+        If analysis is involved — open Settings → Test AI provider → Run the
+        checks, and paste (or screenshot) the result. Never paste your API key.
+  - type: input
+    id: version
+    attributes:
+      label: App version / commit
+      placeholder: "1.1.0, or a commit SHA if you built from source"
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Logs, screenshots, device model, OS version. Please redact keys and personal data.
