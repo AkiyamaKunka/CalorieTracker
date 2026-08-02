@@ -32,15 +32,61 @@ Color cellBackground(ColorScheme scheme) =>
 
 /// One inset grouped section: optional header, rounded cell stack with
 /// hairline separators, optional footer.
+/// Shared cell geometry — ONE gutter, ONE radius everywhere.
+const double kGroupInset = 16;
+const double kCellRadius = 18;
+
+/// A standalone grouped cell (hero cards, meal cards): same geometry and
+/// background as a GroupedSection's cell stack, with an optional tap whose
+/// ripple always matches the cell radius.
+class GroupedCard extends StatelessWidget {
+  const GroupedCard({
+    super.key,
+    required this.child,
+    this.onTap,
+    this.margin = const EdgeInsets.fromLTRB(kGroupInset, 12, kGroupInset, 0),
+  });
+  final Widget child;
+  final VoidCallback? onTap;
+  final EdgeInsetsGeometry margin;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: margin,
+      child: Material(
+        color: cellBackground(scheme),
+        borderRadius: BorderRadius.circular(kCellRadius),
+        clipBehavior: Clip.antiAlias,
+        child: onTap == null
+            ? child
+            : InkWell(
+                onTap: () {
+                  HapticFeedback.selectionClick();
+                  onTap!();
+                },
+                child: child,
+              ),
+      ),
+    );
+  }
+}
+
 class GroupedSection extends StatelessWidget {
   const GroupedSection({
     super.key,
     this.header,
     this.footer,
+    this.separatorInset = 57,
     required this.children,
   });
 
   final String? header;
+
+  /// 57 aligns past an icon badge; rows WITHOUT badges pass 16 so the
+  /// hairline aligns with their text (Apple's rule: label-aligned).
+  final double separatorInset;
 
   /// Apple puts explanations UNDER the group, small and quiet — not inside
   /// rows and not as paragraphs between fields.
@@ -83,7 +129,7 @@ class GroupedSection extends StatelessWidget {
                       // Separator inset aligns with the label, past the
                       // icon badge (Apple's 60pt-with-icon rule
                       // approximated for our 16+29+12 leading).
-                      padding: const EdgeInsets.only(left: 57),
+                      padding: EdgeInsets.only(left: separatorInset),
                       child: Divider(
                           height: 1,
                           thickness: 0.33, // Apple hairline (1px @3x)

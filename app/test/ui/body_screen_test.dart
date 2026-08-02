@@ -146,12 +146,15 @@ void main() {
     expect(dao.measurementsByDate['2026-08-02']?.waistCm, 84);
   });
 
-  testWidgets('delete asks first, then removes both tables for the day',
-      (tester) async {
+  testWidgets('SWIPE to delete asks first, then removes both tables for '
+      'the day', (tester) async {
+    // The trailing delete button became swipe-to-delete (Apple idiom,
+    // polish loop cycle 1) — the confirm dialog still gates it.
     final dao = await pump(tester,
         weights: {'2026-08-02': 81.6},
         measurements: [const BodyMeasurements('2026-08-02', waistCm: 84)]);
-    await tester.tap(find.byIcon(Icons.delete_outline));
+    await tester.drag(
+        find.byKey(const Key('bodyDay2026-08-02')), const Offset(-500, 0));
     await tester.pumpAndSettle();
     expect(dao.weightsByDate, isNotEmpty, reason: 'nothing until confirmed');
     await tester.tap(find.byKey(const Key('confirmDeleteBodyDay')));
@@ -166,11 +169,15 @@ void main() {
     await pump(tester,
         weights: {'2026-07-28': 82.4, '2026-08-02': 81.6},
         measurements: [const BodyMeasurements('2026-08-02', waistCm: 84)]);
-    final rows = tester
-        .widgetList<ListTile>(find.byType(ListTile))
-        .map((t) => (t.title as Text).data)
-        .toList();
-    expect(rows, ['2026-08-02', '2026-07-28']);
+    // Rows are grouped cells now, ordered by their bodyDay keys.
+    expect(
+        tester
+            .getTopLeft(find.byKey(const Key('bodyDay2026-08-02')))
+            .dy,
+        lessThan(tester
+            .getTopLeft(find.byKey(const Key('bodyDay2026-07-28')))
+            .dy),
+        reason: 'newest first');
     expect(find.textContaining('W 84'), findsOneWidget);
   });
 }

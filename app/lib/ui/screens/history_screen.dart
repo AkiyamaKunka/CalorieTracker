@@ -7,6 +7,8 @@ import 'package:flutter/material.dart';
 import '../../core/contracts.dart';
 import '../format.dart';
 import '../meal_thumbs.dart';
+import '../widgets/grouped.dart'
+    show GroupedCard, cellBackground, kGroupInset;
 import '../widgets/macro_chart.dart';
 import 'day_detail_screen.dart';
 
@@ -236,33 +238,64 @@ class HistoryScreenState extends State<HistoryScreen> {
     final avg = (sum / _perDay.length).truncate();
     _maxDayKcal = _perDay.values
         .fold<num>(0, (a, b) => a > b ? a : b); // row magnitude track scale
+    final scheme = Theme.of(context).colorScheme;
     return RefreshIndicator(
       onRefresh: reload,
       child: _withTitle([
         SliverList.list(children: [
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Average: ~${formatKcal(avg)} kcal / day',
-                  key: const Key('historyAverage'),
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-                const SizedBox(height: 16),
-                // Bars in ascending date order with the average as a dashed
-                // reference; tapping a bar opens that day (same target as
-                // the rows below).
-                CalorieTrendChart(
-                  dayTotals: _perDay,
-                  onDayTap: (date) => _openDay(date),
-                ),
-              ],
+          GroupedCard(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Bars in ascending date order with the average as a
+                  // dashed reference; tapping a bar opens that day (same
+                  // target as the rows below).
+                  CalorieTrendChart(
+                    dayTotals: _perDay,
+                    onDayTap: (date) => _openDay(date),
+                  ),
+                  const SizedBox(height: 10),
+                  // Spec-pinned string + key; styled as the card's caption.
+                  Text(
+                    'Average: ~${formatKcal(avg)} kcal / day',
+                    key: const Key('historyAverage'),
+                    style: Theme.of(context)
+                        .textTheme
+                        .bodySmall
+                        ?.copyWith(color: scheme.onSurfaceVariant),
+                  ),
+                ],
+              ),
             ),
           ),
-          for (final date in dates)
-            _dayRow(context, date),
+          // Day rows as ONE inset grouped cell stack — the panel's top
+          // consistency finding: full-bleed ListTiles read as a different
+          // app than Settings, one tab away.
+          Padding(
+            padding: const EdgeInsets.fromLTRB(kGroupInset, 12, kGroupInset, 0),
+            child: Material(
+              color: cellBackground(scheme),
+              borderRadius: BorderRadius.circular(18),
+              clipBehavior: Clip.antiAlias,
+              child: Column(children: [
+                for (var i = 0; i < dates.length; i++) ...[
+                  if (i > 0)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 16),
+                      child: Divider(
+                          height: 1,
+                          thickness: 0.33,
+                          color: scheme.outlineVariant
+                              .withValues(alpha: 0.6)),
+                    ),
+                  _dayRow(context, dates[i]),
+                ],
+              ]),
+            ),
+          ),
+          const SizedBox(height: 32),
         ]),
       ]),
     );

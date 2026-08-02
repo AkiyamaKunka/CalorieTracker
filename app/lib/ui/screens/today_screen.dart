@@ -10,6 +10,7 @@ import '../../core/contracts.dart';
 import '../../services/garmin_client.dart';
 import '../format.dart';
 import '../widgets/calorie_ring.dart';
+import '../widgets/grouped.dart' show GroupedCard;
 import '../widgets/macro_chart.dart' show MacroPalette;
 import '../meal_thumbs.dart';
 import '../widgets/meal_card.dart';
@@ -122,7 +123,7 @@ class TodayScreenState extends State<TodayScreen> {
               key: const Key('addMealFab'),
               onPressed: onAdd,
               icon: const Icon(Icons.add),
-              label: const Text('Meals'),
+              label: const Text('Log'),
             ),
           ),
       ],
@@ -197,7 +198,7 @@ class TodayScreenState extends State<TodayScreen> {
                     const Text('No meals logged yet today.'),
                     const SizedBox(height: 8),
                     Text(
-                      'Tap "Meals" below to log one from a photo or a '
+                      'Tap "Log" below to add one from a photo or a '
                       'description — or turn on "Watch camera roll" in '
                       'Settings and new food photos log themselves.',
                       textAlign: TextAlign.center,
@@ -244,8 +245,7 @@ class TodayScreenState extends State<TodayScreen> {
     // Hero layout (research: MFP arithmetic × Apple ring — see
     // uiux_direction.md): ring answers "how am I doing", the rows beside it
     // show the arithmetic that produced the answer, macro trio beneath.
-    return Card(
-      margin: const EdgeInsets.all(12),
+    return GroupedCard(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
         child: Column(

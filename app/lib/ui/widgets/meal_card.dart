@@ -10,6 +10,7 @@ import '../../core/contracts.dart';
 import 'dart:typed_data';
 
 import '../format.dart';
+import 'grouped.dart' show GroupedCard;
 import 'macro_chart.dart' show MacroPalette;
 import 'meal_thumb.dart';
 
@@ -36,22 +37,23 @@ class MealCard extends StatelessWidget {
     final theme = Theme.of(context);
     final a = meal.analysis;
     final items = safeFoodItems(a); // spec §3.5: never iterate the raw field
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(16),
-        child: Padding(
+    return GroupedCard(
+      margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      onTap: onTap,
+      child: Padding(
           padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
-                if (thumb != null) ...[
+                // Photo meals only: for text/manual meals the old
+                // placeholder block read as a failed image load (panel,
+                // cycle 1) — the title owns the width instead.
+                if (thumb != null && meal.imageHash.isNotEmpty) ...[
                   MealThumbView(
                       thumb: thumb,
-                      isPhotoMeal: meal.imageHash.isNotEmpty),
+                      isPhotoMeal: true),
                   const SizedBox(width: 10),
                 ],
                 Expanded(
@@ -76,6 +78,13 @@ class MealCard extends StatelessWidget {
                   ),
                 const SizedBox(width: 8),
                 Text(meal.time, style: theme.textTheme.bodySmall),
+                if (onTap != null) ...[
+                  const SizedBox(width: 2),
+                  Icon(Icons.chevron_right,
+                      size: 16,
+                      color: theme.colorScheme.onSurfaceVariant
+                          .withValues(alpha: 0.6)),
+                ],
               ],
             ),
             const SizedBox(height: 8),
@@ -112,7 +121,6 @@ class MealCard extends StatelessWidget {
             ],
           ),
         ),
-      ),
     );
   }
 

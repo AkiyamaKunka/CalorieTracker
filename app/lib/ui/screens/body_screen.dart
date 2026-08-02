@@ -16,6 +16,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/contracts.dart';
 import '../../core/shared_generated.dart';
+import '../widgets/grouped.dart' show cellBackground;
 
 /// Chart + list window. A year keeps the page honest for lapsed loggers
 /// (a 90-day window would silently hide that the last entry is old).
@@ -109,7 +110,7 @@ class BodyScreenState extends State<BodyScreen> {
     if (saved == true) await reload();
   }
 
-  Future<void> _confirmDelete(String date) async {
+  Future<bool> _confirmDelete(String date) async {
     final hasWeight = _weightOn(date) != null;
     final hasMeasurements = _measurementsOn(date) != null;
     final what = [
@@ -132,10 +133,11 @@ class BodyScreenState extends State<BodyScreen> {
         ],
       ),
     );
-    if (ok != true) return;
+    if (ok != true) return false;
     if (hasWeight) await widget.dao.deleteBodyWeight(date);
     if (hasMeasurements) await widget.dao.deleteBodyMeasurements(date);
     await reload();
+    return true;
   }
 
   @override
@@ -196,17 +198,53 @@ class BodyScreenState extends State<BodyScreen> {
                   _MeasurementsCard(measurements: _measurements),
                 ],
                 const SizedBox(height: 20),
-                Text('History', style: theme.textTheme.titleMedium),
-                const SizedBox(height: 4),
-                for (final date in _dates)
-                  _HistoryRow(
-                    key: Key('bodyDay$date'),
-                    date: date,
-                    weight: _weightOn(date),
-                    measurements: _measurementsOn(date),
-                    onTap: () => _openSheet(date: date),
-                    onDelete: () => _confirmDelete(date),
-                  ),
+                Padding(
+                  padding: const EdgeInsets.only(left: 16, bottom: 7),
+                  child: Text('History',
+                      style: theme.textTheme.titleSmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                          fontWeight: FontWeight.w600)),
+                ),
+                Material(
+                  color: cellBackground(theme.colorScheme),
+                  borderRadius: BorderRadius.circular(18),
+                  clipBehavior: Clip.antiAlias,
+                  child: Column(children: [
+                    for (var i = 0; i < _dates.length; i++) ...[
+                      if (i > 0)
+                        Padding(
+                          padding: const EdgeInsets.only(left: 16),
+                          child: Divider(
+                              height: 1,
+                              thickness: 0.33,
+                              color: theme.colorScheme.outlineVariant
+                                  .withValues(alpha: 0.6)),
+                        ),
+                      // Swipe-to-delete (Apple's per-item idiom) replaced
+                      // the trailing delete button — the most un-iOS
+                      // element the panel found on any main tab.
+                      Dismissible(
+                        key: ValueKey('dismiss${_dates[i]}'),
+                        direction: DismissDirection.endToStart,
+                        background: Container(
+                          color: theme.colorScheme.error,
+                          alignment: Alignment.centerRight,
+                          padding: const EdgeInsets.only(right: 20),
+                          child: const Icon(Icons.delete,
+                              color: Colors.white),
+                        ),
+                        confirmDismiss: (_) => _confirmDelete(_dates[i]),
+                        child: _HistoryRow(
+                          key: Key('bodyDay${_dates[i]}'),
+                          date: _dates[i],
+                          weight: _weightOn(_dates[i]),
+                          measurements: _measurementsOn(_dates[i]),
+                          onTap: () => _openSheet(date: _dates[i]),
+                        ),
+                      ),
+                    ],
+                  ]),
+                ),
                 ]),
               ),
             ]),
@@ -227,6 +265,7 @@ class _WeightCard extends StatelessWidget {
     final previous = weights.length > 1 ? weights[weights.length - 2] : null;
     final delta = previous == null ? null : latest.kg - previous.kg;
     return Card(
+      margin: EdgeInsets.zero,
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -330,6 +369,7 @@ class _MeasurementsCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Card(
+      margin: EdgeInsets.zero,
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -409,13 +449,11 @@ class _HistoryRow extends StatelessWidget {
     required this.weight,
     required this.measurements,
     required this.onTap,
-    required this.onDelete,
   });
   final String date;
   final WeightEntry? weight;
   final BodyMeasurements? measurements;
   final VoidCallback onTap;
-  final VoidCallback onDelete;
 
   @override
   Widget build(BuildContext context) {
@@ -425,15 +463,29 @@ class _HistoryRow extends StatelessWidget {
       if (measurements?.chestCm != null) 'C ${_v(measurements!.chestCm!)}',
       if (measurements?.hipCm != null) 'H ${_v(measurements!.hipCm!)}',
     ];
-    return ListTile(
-      contentPadding: const EdgeInsets.only(left: 8, right: 0),
-      title: Text(date),
-      subtitle: Text(parts.join('  ·  ')),
+    final theme = Theme.of(context);
+    return InkWell(
       onTap: onTap,
-      trailing: IconButton(
-        icon: const Icon(Icons.delete_outline),
-        tooltip: 'Delete $date',
-        onPressed: onDelete,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        child: Row(children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(date, style: theme.textTheme.bodyLarge),
+                const SizedBox(height: 2),
+                Text(parts.join('  ·  '),
+                    style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant)),
+              ],
+            ),
+          ),
+          Icon(Icons.chevron_right,
+              size: 20,
+              color: theme.colorScheme.onSurfaceVariant
+                  .withValues(alpha: 0.6)),
+        ]),
       ),
     );
   }
