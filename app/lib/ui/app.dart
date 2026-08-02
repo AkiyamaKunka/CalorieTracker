@@ -3,6 +3,11 @@
 library;
 
 import 'dart:async' show unawaited;
+import 'dart:io' show File;
+
+import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:path_provider/path_provider.dart'
+    show getApplicationDocumentsDirectory;
 
 import 'package:flutter/material.dart';
 
@@ -56,7 +61,8 @@ class CalorieTrackerApp extends StatelessWidget {
               borderRadius: BorderRadius.circular(18)),
         ),
         navigationBarTheme: NavigationBarThemeData(
-          height: 72,
+          // Default height (80): forcing 72 squeezed labels at large font
+          // scales (review) for a saving nobody asked for.
           indicatorColor: scheme.secondaryContainer,
         ),
       );
@@ -98,6 +104,22 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     mealsChangedSignal.addListener(_onMealsChanged);
     // Onboarding: with no API key yet, land on Settings first.
     _index = widget.services.settings.apiKey.trim().isEmpty ? 3 : 0;
+    // Debug-only: headless simulator screenshot runs force a tab by
+    // dropping a one-byte file into the app's Documents dir (simctl has no
+    // tap injection; env forwarding and HOME-derived paths both proved
+    // unreliable). Async by necessity — a forced tab pops in a frame after
+    // first build, which screenshot runs don't care about. Inert in release
+    // builds and when the file is absent.
+    if (kDebugMode) {
+      unawaited(getApplicationDocumentsDirectory().then((dir) {
+        final f = File('${dir.path}/ct_debug_tab');
+        if (!f.existsSync() || !mounted) return;
+        final forced = int.tryParse(f.readAsStringSync().trim());
+        if (forced != null && forced >= 0 && forced <= 3) {
+          setState(() => _index = forced);
+        }
+      }, onError: (Object _) {}));
+    }
   }
 
   @override

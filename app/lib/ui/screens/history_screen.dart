@@ -71,6 +71,26 @@ class HistoryScreenState extends State<HistoryScreen> {
 
   num _maxDayKcal = 0;
 
+  /// Weekday span w600, remainder quiet — same string, richer weight.
+  Widget _dayTitle(BuildContext context, String date, {required bool dimmed}) {
+    final theme = Theme.of(context);
+    final text = friendlyHistoryDay(date);
+    final comma = text.indexOf(', ');
+    final dimColor = theme.colorScheme.onSurfaceVariant;
+    if (dimmed || comma < 0) {
+      return Text(text,
+          style: dimmed ? TextStyle(color: dimColor) : null);
+    }
+    return Text.rich(TextSpan(children: [
+      TextSpan(
+          text: text.substring(0, comma),
+          style: const TextStyle(fontWeight: FontWeight.w600)),
+      TextSpan(
+          text: text.substring(comma),
+          style: TextStyle(color: dimColor)),
+    ]));
+  }
+
   /// One day: value + a thin magnitude track beneath it (research: a
   /// number-only list hides the week's shape; MacroFactor/Cronometer put a
   /// visual scale in every row). Gap days stay dimmed text-only.
@@ -84,10 +104,9 @@ class HistoryScreenState extends State<HistoryScreen> {
     return ListTile(
       key: Key('historyDay$date'),
       dense: true,
-      title: Text(friendlyHistoryDay(date),
-          style: has
-              ? null
-              : TextStyle(color: theme.colorScheme.onSurfaceVariant)),
+      // Weekday emphasized, rest quiet (research: the week's rhythm should
+      // be scannable). String content unchanged — split, not reworded.
+      title: _dayTitle(context, date, dimmed: !has),
       subtitle: has
           ? Padding(
               padding: const EdgeInsets.only(top: 4),
@@ -99,11 +118,18 @@ class HistoryScreenState extends State<HistoryScreen> {
                     builder: (context, c) => Stack(children: [
                       Container(
                           width: c.maxWidth,
-                          color: theme.colorScheme.surfaceContainerHighest),
+                          // a11y-measured: surfaceContainerHighest is
+                          // <2:1 against the surface here; 20% onSurface
+                          // blend clears 3:1 in both themes.
+                          color: Color.alphaBlend(
+                              theme.colorScheme.onSurface
+                                  .withValues(alpha: 0.20),
+                              theme.colorScheme.surface)),
                       Container(
                           width: frac * c.maxWidth,
-                          color: theme.colorScheme.primary
-                              .withValues(alpha: 0.55)),
+                          // Full primary (was 55% alpha → 1.96:1 light):
+                          // also unifies the calories hue with the ring.
+                          color: theme.colorScheme.primary),
                     ]),
                   ),
                 ),
@@ -114,7 +140,9 @@ class HistoryScreenState extends State<HistoryScreen> {
         mainAxisSize: MainAxisSize.min,
         children: [
           has
-              ? Text('~${formatKcal(kcal!)} kcal')
+              ? Text('~${formatKcal(kcal!)} kcal',
+                  style: theme.textTheme.labelLarge?.copyWith(
+                      fontFeatures: const [FontFeature.tabularFigures()]))
               : Text('no meals logged',
                   style: theme.textTheme.bodySmall
                       ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),

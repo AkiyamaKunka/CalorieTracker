@@ -1,26 +1,30 @@
-/// The Today hero ring: eaten vs typical-day, headroom in the center.
+/// The Today hero ring: eaten vs the day's budget, remaining in the center.
 ///
 /// Research-derived (scratchpad/uiux_direction.md): every leading health app
-/// answers "how am I doing?" with ONE glanceable element — MFP's budget
-/// arithmetic, Apple's rings, Yazio's remaining-ring. Ours fuses the two
-/// best: a ring whose track is the user's own typical-day median (honestly
-/// derived, not goal-preached) and MFP's transparent arithmetic beside it.
+/// answers "how am I doing?" with ONE glanceable element, and MFP's 20-M-user
+/// muscle memory is the transparent arithmetic `budget − food + exercise =
+/// remaining`. Ours: budget = typical-day median + Garmin active burn, and
+/// the rows beside the ring VISIBLY produce the center number (review panel:
+/// arithmetic that doesn't reconcile is worse than no arithmetic).
 ///
 /// Design rules: single hue for the intake arc (primary — macros keep their
-/// own fixed hues elsewhere), NO shame state (over-typical renders in the
-/// same calm hue at full sweep with the "+over" stated in text; red guilt is
-/// the #1 researched complaint driver), hand-drawn painter (no packages).
+/// own fixed hues elsewhere), NO shame state (over renders in the same calm
+/// hue at full sweep, the "+over" stated in text; red guilt is the #1
+/// researched complaint driver), hand-drawn painter (no packages).
 library;
 
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../format.dart';
+
 class CalorieRing extends StatelessWidget {
   const CalorieRing({
     super.key,
     required this.eatenKcal,
     required this.typicalKcal,
+    this.burnKcal = 0,
     this.size = 132,
   });
 
@@ -29,27 +33,47 @@ class CalorieRing extends StatelessWidget {
   /// Null until ≥2 prior days have data (spec §5.1) — the ring then draws
   /// a neutral full track with the eaten number centered, no fraction.
   final num? typicalKcal;
+
+  /// Garmin active burn: EXTENDS the budget (MFP framing — exercise gives
+  /// calories back). Zero when absent; never shown as an operand elsewhere
+  /// without also being folded in here.
+  final num burnKcal;
   final double size;
+
+  /// One rounded integer per quantity: the ring, the rows and the caption
+  /// must never disagree by a rounding path (review panel: a card that
+  /// says both "+0 over" and "0 headroom" is lying twice).
+  int get _eaten => eatenKcal.round();
+  int? get _budget =>
+      typicalKcal == null ? null : (typicalKcal!.round() + burnKcal.round());
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final typical = typicalKcal;
-    final frac = (typical == null || typical <= 0)
+    final budget = _budget;
+    final frac = (budget == null || budget <= 0)
         ? null
-        : (eatenKcal / typical).clamp(0.0, 1.0).toDouble();
-    final over = typical != null && eatenKcal > typical;
-    final centerBig = typical == null
-        ? _kcal(eatenKcal)
+        : (_eaten / budget).clamp(0.0, 1.0).toDouble();
+    final over = budget != null && _eaten > budget;
+    final centerBig = budget == null
+        ? formatKcal(_eaten)
         : over
-            ? '+${_kcal(eatenKcal - typical)}'
-            : _kcal(typical - eatenKcal);
-    final centerSmall = typical == null
+            ? '+${formatKcal(_eaten - budget)}'
+            : formatKcal(budget - _eaten);
+    final centerSmall = budget == null
         ? 'kcal today'
         : over
-            ? 'over typical'
-            : 'headroom';
+            ? 'above typical' // matches the spec-pinned caption's wording
+            : burnKcal.round() > 0
+                ? 'left today'
+                : 'headroom';
+    final semantics = budget == null
+        ? '${formatKcal(_eaten)} kcal eaten today'
+        : over
+            ? '${formatKcal(_eaten - budget)} kcal above typical'
+            : '${formatKcal(budget - _eaten)} kcal left today, of a '
+                '${formatKcal(budget)} kcal typical day';
     return SizedBox(
       width: size,
       height: size,
@@ -57,35 +81,44 @@ class CalorieRing extends StatelessWidget {
         painter: _RingPainter(
           fraction: frac,
           arc: scheme.primary,
-          track: scheme.surfaceContainerHighest,
-          overGlyph: over,
+          // The track is the DENOMINATOR ("how much of a typical day") —
+          // a11y-measured: surfaceContainerHighest sits under 1.4:1 against
+          // the new card surface; a 20% onSurface blend clears 3:1 in both
+          // themes.
+          track: Color.alphaBlend(scheme.onSurface.withValues(alpha: 0.20),
+              scheme.surfaceContainerLow),
         ),
         child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(centerBig,
-                  key: const Key('ringCenterValue'),
-                  style: theme.textTheme.headlineMedium),
-              Text(centerSmall,
-                  style: theme.textTheme.labelSmall
-                      ?.copyWith(color: scheme.onSurfaceVariant)),
-            ],
+          // FittedBox: the ring is a fixed box; large system font scales
+          // (or 5-digit values) must shrink to fit, never clip the arc.
+          child: Semantics(
+            label: semantics,
+            excludeSemantics: true,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Padding(
+                padding: EdgeInsets.symmetric(horizontal: size * 0.14),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(centerBig,
+                        key: const Key('ringCenterValue'),
+                        maxLines: 1,
+                        softWrap: false,
+                        style: theme.textTheme.headlineMedium),
+                    Text(centerSmall,
+                        maxLines: 1,
+                        softWrap: false,
+                        style: theme.textTheme.labelSmall
+                            ?.copyWith(color: scheme.onSurfaceVariant)),
+                  ],
+                ),
+              ),
+            ),
           ),
         ),
       ),
     );
-  }
-
-  static String _kcal(num v) {
-    final r = v.round();
-    final s = r.abs().toString();
-    final b = StringBuffer();
-    for (var i = 0; i < s.length; i++) {
-      if (i > 0 && (s.length - i) % 3 == 0) b.write(',');
-      b.write(s[i]);
-    }
-    return '${r < 0 ? '-' : ''}$b';
   }
 }
 
@@ -94,13 +127,11 @@ class _RingPainter extends CustomPainter {
     required this.fraction,
     required this.arc,
     required this.track,
-    required this.overGlyph,
   });
 
   final double? fraction; // null → indeterminate day (no typical yet)
   final Color arc;
   final Color track;
-  final bool overGlyph;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -134,10 +165,7 @@ class _RingPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_RingPainter old) =>
-      old.fraction != fraction ||
-      old.arc != arc ||
-      old.track != track ||
-      old.overGlyph != overGlyph;
+      old.fraction != fraction || old.arc != arc || old.track != track;
 }
 
 /// One row of the transparent arithmetic beside the ring:
@@ -148,10 +176,14 @@ class ArithmeticRow extends StatelessWidget {
     required this.label,
     required this.value,
     required this.dot,
+    this.emphasized = false,
   });
   final String label;
   final String value;
   final Color dot;
+
+  /// The `=` result row: the number the ring's center restates.
+  final bool emphasized;
 
   @override
   Widget build(BuildContext context) {
@@ -168,12 +200,24 @@ class ArithmeticRow extends StatelessWidget {
           const SizedBox(width: 8),
           Expanded(
             child: Text(label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: theme.textTheme.bodySmall
                     ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
           ),
-          Text(value,
-              style: theme.textTheme.labelLarge?.copyWith(
-                  fontFeatures: const [FontFeature.tabularFigures()])),
+          // FittedBox: at narrow widths × large font scale the number wins
+          // over the label, shrinking instead of overflowing the row.
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Text(value,
+                maxLines: 1,
+                softWrap: false,
+                style: (emphasized
+                        ? theme.textTheme.titleSmall
+                        : theme.textTheme.labelLarge)
+                    ?.copyWith(
+                        fontFeatures: const [FontFeature.tabularFigures()])),
+          ),
         ],
       ),
     );
@@ -201,13 +245,20 @@ class MacroTrio extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Bars scale against the LARGEST of the three — relative composition,
-    // not targets (we don't preach macro goals; we show what happened).
-    final maxG = [proteinG, carbsG, fatG]
-        .fold<num>(0, (a, b) => math.max(a, b.clamp(0, double.infinity)));
-    Widget bar(String label, num g, Color color) {
-      final frac = maxG <= 0 ? 0.0 : (g / maxG).clamp(0.0, 1.0).toDouble();
-      final theme = Theme.of(context);
+    // Bars fill by CALORIE share (Atwater 4/4/9), matching the detail
+    // screen's macro bar — the codebase's own rule: a gram-proportional
+    // bar "would misstate what the meal is made of". Labels stay grams.
+    final pKcal = math.max(0, proteinG) * 4;
+    final cKcal = math.max(0, carbsG) * 4;
+    final fKcal = math.max(0, fatG) * 9;
+    final totalKcal = pKcal + cKcal + fKcal;
+    final theme = Theme.of(context);
+    final trackColor = Color.alphaBlend(
+        theme.colorScheme.onSurface.withValues(alpha: 0.20),
+        theme.colorScheme.surfaceContainerLow);
+    Widget bar(String label, num g, num kcal, Color color) {
+      final frac =
+          totalKcal <= 0 ? 0.0 : (kcal / totalKcal).clamp(0.0, 1.0).toDouble();
       return Expanded(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -222,9 +273,7 @@ class MacroTrio extends StatelessWidget {
                 height: 6,
                 child: LayoutBuilder(
                   builder: (context, c) => Stack(children: [
-                    Container(
-                        width: c.maxWidth,
-                        color: theme.colorScheme.surfaceContainerHighest),
+                    Container(width: c.maxWidth, color: trackColor),
                     Container(
                         width: math.max(frac * c.maxWidth, g > 0 ? 6.0 : 0.0),
                         color: color),
@@ -240,11 +289,11 @@ class MacroTrio extends StatelessWidget {
     return Row(
       key: const Key('macroTrio'),
       children: [
-        bar('P', proteinG, proteinColor),
+        bar('P', proteinG, pKcal, proteinColor),
         const SizedBox(width: 10),
-        bar('C', carbsG, carbsColor),
+        bar('C', carbsG, cKcal, carbsColor),
         const SizedBox(width: 10),
-        bar('F', fatG, fatColor),
+        bar('F', fatG, fKcal, fatColor),
       ],
     );
   }

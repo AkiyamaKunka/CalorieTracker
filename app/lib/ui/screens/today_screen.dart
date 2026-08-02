@@ -221,34 +221,57 @@ class TodayScreenState extends State<TodayScreen> {
           children: [
             Row(
               children: [
-                CalorieRing(eatenKcal: totals.cal, typicalKcal: typical),
+                CalorieRing(
+                    eatenKcal: totals.cal,
+                    typicalKcal: typical,
+                    burnKcal: burn),
                 const SizedBox(width: 16),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      // Demoted from headline (review: one hero numeral per
+                      // card — the ring's center). Key + string format stay.
                       Text('${formatKcal(totals.cal)} kcal',
                           key: const Key('todayTotalKcal'),
-                          style: theme.textTheme.headlineSmall),
+                          style: theme.textTheme.titleMedium),
                       Text(
                           '${totals.meals} meal${totals.meals == 1 ? '' : 's'} today',
                           style: theme.textTheme.bodySmall?.copyWith(
                               color: scheme.onSurfaceVariant)),
                       const SizedBox(height: 8),
-                      if (typical != null)
+                      // MFP's transparent arithmetic — and it RECONCILES:
+                      // typical + burn − eaten IS the ring's center number.
+                      if (typical != null) ...[
                         ArithmeticRow(
                             label: 'Typical',
                             value: '~${formatKcal(typical)}',
                             dot: scheme.outlineVariant),
-                      ArithmeticRow(
-                          label: 'Eaten',
-                          value: formatKcal(totals.cal),
-                          dot: scheme.primary),
-                      if (burn > 0)
+                        if (burn > 0)
+                          ArithmeticRow(
+                              label: 'Burn',
+                              value: '+${formatKcal(burn)}',
+                              dot: scheme.tertiary),
                         ArithmeticRow(
-                            label: 'Burn',
-                            value: '−${formatKcal(burn)}',
-                            dot: scheme.tertiary),
+                            label: 'Eaten',
+                            value: '−${formatKcal(totals.cal.round())}',
+                            dot: scheme.primary),
+                        ArithmeticRow(
+                            key: const Key('arithmeticResultRow'),
+                            label: totals.cal.round() >
+                                    typical + burn.round()
+                                ? '= Above typical'
+                                : '= Left',
+                            value: formatKcal(
+                                (typical + burn.round() - totals.cal.round())
+                                    .abs()),
+                            dot: Colors.transparent,
+                            emphasized: true),
+                      ] else
+                        ArithmeticRow(
+                            label: 'Eaten',
+                            value: formatKcal(totals.cal.round()),
+                            dot: scheme.primary),
                     ],
                   ),
                 ),

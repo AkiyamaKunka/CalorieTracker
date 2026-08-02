@@ -269,10 +269,14 @@ class CalorieTrendChart extends StatelessWidget {
                 values: values,
                 maxValue: maxV,
                 average: avg,
-                bar: MacroPalette.of(context).protein,
+                // primary, NOT protein blue: colour follows the ENTITY
+                // (this file's own header rule) — day-kcal is primary on
+                // the ring, the day rows, and here.
+                bar: theme.colorScheme.primary,
                 axis: theme.colorScheme.outlineVariant,
                 label: theme.colorScheme.onSurfaceVariant,
                 textDirection: Directionality.of(context),
+                textScaler: MediaQuery.textScalerOf(context),
               ),
             ),
           ),
@@ -297,6 +301,7 @@ class _TrendPainter extends CustomPainter {
     required this.axis,
     required this.label,
     required this.textDirection,
+    this.textScaler = TextScaler.noScaling,
   });
 
   final List<num> values;
@@ -306,11 +311,13 @@ class _TrendPainter extends CustomPainter {
   final Color axis;
   final Color label;
   final TextDirection textDirection;
+  final TextScaler textScaler;
 
   @override
   void paint(Canvas canvas, Size size) {
     if (values.isEmpty) return;
-    const labelBand = 16.0; // room for the value label above the tallest bar
+    // Label band scales with the system font so 2x text doesn't overlap bars.
+    final labelBand = 16.0 * textScaler.scale(1.0);
     final plotH = math.max(1.0, size.height - labelBand);
     // Headroom so the tallest bar never touches the label band.
     final scaleMax = math.max(1.0, maxValue.toDouble() * 1.12);
@@ -368,6 +375,7 @@ class _TrendPainter extends CustomPainter {
         style: TextStyle(fontSize: 10, color: label),
       ),
       textDirection: textDirection,
+      textScaler: textScaler,
     )..layout();
     final h = (value.toDouble() / scaleMax) * plotH;
     final cx = index * slot + slot / 2 - tp.width / 2;
@@ -383,5 +391,6 @@ class _TrendPainter extends CustomPainter {
       old.average != average ||
       old.bar != bar ||
       old.axis != axis ||
-      old.label != label;
+      old.label != label ||
+      old.textScaler != textScaler;
 }

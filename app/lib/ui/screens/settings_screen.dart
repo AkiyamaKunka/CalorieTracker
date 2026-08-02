@@ -748,6 +748,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             key: ValueKey('modelPicker-${widget.settings.provider}'),
             child: DropdownButtonFormField<String>(
               key: const Key('modelPicker'),
+              // isExpanded: the annotated labels ("… — fast, free-tier
+              // default") overflow a 390 pt phone width without it —
+              // caught by the simulator's debug overflow stripes.
+              isExpanded: true,
               initialValue: _customModel
                   ? _kCustomModel
                   : widget.settings.model,

@@ -40,7 +40,7 @@ class MealCard extends StatelessWidget {
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(16),
         child: Padding(
           padding: const EdgeInsets.all(12),
         child: Column(
@@ -121,10 +121,13 @@ class MealCard extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     // Identity never rests on colour ALONE (chart rule): the P/C/F letter
     // stays in the label; the tint is reinforcement.
+    // Tint alphas: a11y-measured — 0.14 was compliant but nearly invisible;
+    // 0.20 light / 0.25 dark actually reads while keeping >6:1 text headroom.
+    final dark = Theme.of(context).brightness == Brightness.dark;
     final bg = emphasized
         ? scheme.primaryContainer
         : tint != null
-            ? tint.withValues(alpha: 0.14)
+            ? tint.withValues(alpha: dark ? 0.25 : 0.20)
             : scheme.surfaceContainerHighest;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
@@ -132,7 +135,9 @@ class MealCard extends StatelessWidget {
         color: bg,
         borderRadius: BorderRadius.circular(12),
       ),
-      child: Text(label, style: Theme.of(context).textTheme.labelSmall),
+      child: Text(label,
+          style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: emphasized ? scheme.onPrimaryContainer : null)),
     );
   }
 }
