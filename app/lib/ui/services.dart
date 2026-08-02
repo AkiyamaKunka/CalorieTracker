@@ -8,6 +8,7 @@ library;
 import 'dart:typed_data';
 
 import '../core/contracts.dart';
+import '../services/garmin_client.dart';
 import '../services/photo/coverage.dart';
 import '../services/photo/photo_library.dart';
 import 'meal_thumbs.dart';
@@ -92,6 +93,9 @@ class RecentAsset {
 /// fakes in widget tests.
 class UiServices {
   final MealsDao dao;
+
+  /// Today's Garmin active-burn fetch via the user's server; null = off.
+  final GarminDailyFetch? garminDaily;
   final AnalyzerService analyzer;
   final NlExecutor executor;
   final PhotoIntake? photoIntake; // null in tests that never toggle the watcher
@@ -140,5 +144,6 @@ class UiServices {
     this.startClaudeAuth,
     this.completeClaudeAuth,
     this.openSystemSettings,
+    this.garminDaily,
   });
 }

@@ -54,6 +54,7 @@ except ImportError:
 
 import claude_analyzer
 import claude_auth
+import garmin
 import database
 import fitness_plan
 import nutrition
@@ -4816,6 +4817,12 @@ def build_photo_prompt_with_profile(profile: str) -> str:
 
 
 # ─── Flask REST API ───────────────────────────────────────────────
+
+# date -> (monotonic stamp, DailyActivity|None). Shared across requests;
+# single-threaded Flask dev server, so no lock needed.
+_garmin_cache: Dict[str, tuple] = {}
+
+
 def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
     """Build the phone upload/heartbeat API app (module-level for testability)."""
     app = Flask(__name__)
@@ -4858,6 +4865,47 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         # server-side plan key (GLM_PLAN_KEY / DOUBAO_PLAN_KEY) remotely.
         return jsonify({"ok": True, "analyzer": claude_analyzer.status_label(),
                         "backends": claude_analyzer.backend_status()})
+
+    @app.route('/api/garmin_daily', methods=['POST'])
+    def api_garmin_daily():
+        """One user-local day's Garmin summary for the app's energy-balance
+        line. Body: {"date": "YYYY-MM-DD"}.
+
+        Pure read — no meal row, no side effects. Cached per date for
+        10 minutes: Today re-fetches on every tab select, and each cold
+        fetch is a real network round-trip to Garmin. {"available": false}
+        covers every miss (unconfigured, network down, no data yet) — the
+        app renders the day unchanged, exactly like the report integrator.
+        """
+        if not _authorized_api_request():
+            return jsonify({"error": "Unauthorized"}), 401
+        if not garmin.is_configured():
+            return jsonify({"available": False, "reason": "not_configured"})
+        payload = request.get_json(silent=True) or {}
+        date_str = str(payload.get("date") or "").strip()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_str):
+            return jsonify({"error": "bad_date"}), 400
+        cached = _garmin_cache.get(date_str)
+        if cached is not None and time.monotonic() - cached[0] < 600:
+            daily = cached[1]
+        else:
+            daily = garmin.fetch_daily_activity(date_str)
+            # Cache misses too — a Garmin outage must not turn every tab
+            # select into a slow doomed network call.
+            _garmin_cache[date_str] = (time.monotonic(), daily)
+            if len(_garmin_cache) > 40:  # bound: the app only asks re: recent days
+                _garmin_cache.pop(next(iter(_garmin_cache)))
+        if daily is None:
+            return jsonify({"available": False, "reason": "no_data"})
+        return jsonify({
+            "available": True,
+            "date": date_str,
+            "active_calories": daily.active_calories,
+            "total_calories": daily.total_calories,
+            "steps": daily.steps,
+            "distance_m": daily.distance_m,
+            "activity_count": len(daily.activities),
+        })
 
     @app.route('/api/claude_auth/start', methods=['POST'])
     def api_claude_auth_start():

@@ -456,3 +456,73 @@ def test_no_retiring_key_means_single_key_only(monkeypatch, client):
         "/api/auth_check", headers={"X-API-Key": "new-key"}).status_code == 200
     assert client.http.post(
         "/api/auth_check", headers={"X-API-Key": "old-key"}).status_code == 401
+
+
+def test_garmin_daily_unconfigured_says_unavailable(monkeypatch, client):
+    import garmin as g
+    monkeypatch.delenv(g.GARMIN_ENABLED_ENV, raising=False)
+    resp = client.http.post("/api/garmin_daily",
+                            headers={"X-API-Key": "secret-key"},
+                            json={"date": "2026-08-02"})
+    assert resp.status_code == 200
+    assert resp.get_json() == {"available": False, "reason": "not_configured"}
+
+
+def test_garmin_daily_happy_path_and_cache(monkeypatch, client):
+    """One Garmin fetch serves repeat asks for 10 minutes — Today re-fetches
+    on every tab select, and each cold fetch is a real network trip."""
+    import garmin as g
+    import telegram_bot as tb
+
+    monkeypatch.setattr(g, "is_configured", lambda: True)
+    calls = []
+
+    def fake_fetch(date_str):
+        calls.append(date_str)
+        return g.DailyActivity(active_calories=512, total_calories=2100,
+                               steps=8000, distance_m=6200,
+                               activities=[{"activityName": "Run"}])
+
+    monkeypatch.setattr(g, "fetch_daily_activity", fake_fetch)
+    tb._garmin_cache.clear()
+
+    for _ in range(3):
+        resp = client.http.post("/api/garmin_daily",
+                                headers={"X-API-Key": "secret-key"},
+                                json={"date": "2026-08-02"})
+        body = resp.get_json()
+        assert body["available"] is True
+        assert body["active_calories"] == 512
+        assert body["activity_count"] == 1
+    assert calls == ["2026-08-02"], "second and third asks must hit the cache"
+
+
+def test_garmin_daily_failure_is_cached_too(monkeypatch, client):
+    """A Garmin outage must not turn every tab select into a slow doomed
+    network call."""
+    import garmin as g
+    import telegram_bot as tb
+
+    monkeypatch.setattr(g, "is_configured", lambda: True)
+    calls = []
+    monkeypatch.setattr(g, "fetch_daily_activity",
+                        lambda d: calls.append(d) or None)
+    tb._garmin_cache.clear()
+
+    for _ in range(2):
+        resp = client.http.post("/api/garmin_daily",
+                                headers={"X-API-Key": "secret-key"},
+                                json={"date": "2026-08-02"})
+        assert resp.get_json() == {"available": False, "reason": "no_data"}
+    assert calls == ["2026-08-02"]
+
+
+def test_garmin_daily_rejects_junk_dates_and_bad_keys(monkeypatch, client):
+    import garmin as g
+    monkeypatch.setattr(g, "is_configured", lambda: True)
+    assert client.http.post("/api/garmin_daily",
+                            headers={"X-API-Key": "secret-key"},
+                            json={"date": "8/2/2026"}).status_code == 400
+    assert client.http.post("/api/garmin_daily",
+                            headers={"X-API-Key": "wrong"},
+                            json={"date": "2026-08-02"}).status_code == 401

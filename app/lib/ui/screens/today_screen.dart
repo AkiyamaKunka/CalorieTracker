@@ -7,6 +7,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../core/contracts.dart';
+import '../../services/garmin_client.dart';
 import '../format.dart';
 import '../meal_thumbs.dart';
 import '../widgets/meal_card.dart';
@@ -22,12 +23,18 @@ class TodayScreen extends StatefulWidget {
   /// Opens the meals sheet (add / describe / manual / fix). Null (tests /
   /// other hosts) hides the button.
   final VoidCallback? onAdd;
+
+  /// Today's Garmin active burn, via the user's server (spec §9). Injected
+  /// (null = feature off): Today must not know how the server is reached,
+  /// only that a day may have an active-burn number.
+  final GarminDailyFetch? garminDaily;
   const TodayScreen(
       {super.key,
       required this.dao,
       required this.executor,
       this.thumbs,
-      this.onAdd});
+      this.onAdd,
+      this.garminDaily});
 
   @override
   State<TodayScreen> createState() => TodayScreenState();
@@ -38,6 +45,7 @@ class TodayScreenState extends State<TodayScreen> {
   String? _error;
   List<Meal> _todayMeals = const [];
   Map<String, num> _priorDayTotals = const {};
+  GarminDaily? _garmin;
 
   @override
   void initState() {
@@ -45,9 +53,21 @@ class TodayScreenState extends State<TodayScreen> {
     reload();
   }
 
+  /// Fire-and-forget: a cosmetic line must never delay the meal list. The
+  /// date guard drops a reply that arrives after midnight rolled the day.
+  void _refreshGarmin(String today) {
+    final fetch = widget.garminDaily;
+    if (fetch == null) return;
+    fetch(today).then((daily) {
+      if (!mounted || isoDate(DateTime.now()) != today) return;
+      setState(() => _garmin = daily);
+    }, onError: (Object _) {});
+  }
+
   Future<void> reload() async {
     final now = DateTime.now();
     final today = isoDate(now);
+    _refreshGarmin(today);
     try {
       final todayMeals =
           byMealClock(await widget.dao.mealsBetween(today, today));
@@ -204,6 +224,15 @@ class TodayScreenState extends State<TodayScreen> {
               Text(typicalLine,
                   key: const Key('typicalDayLine'),
                   style: theme.textTheme.bodySmall),
+            ],
+            if (_garmin != null && _garmin!.activeCalories > 0) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Active burn: ~${formatKcal(_garmin!.activeCalories)} kcal '
+                '(Garmin) · net ~${formatKcal(totals.cal - _garmin!.activeCalories)} kcal',
+                key: const Key('garminBurnLine'),
+                style: theme.textTheme.bodySmall,
+              ),
             ],
           ],
         ),

@@ -123,6 +123,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
               dao: s.dao,
               executor: s.executor,
               thumbs: s.thumbs,
+              garminDaily: s.garminDaily,
               // The + button lives INSIDE TodayScreen (above its chat box),
               // not as a Scaffold FAB — a Scaffold FAB floats exactly over
               // the chat box's send button.

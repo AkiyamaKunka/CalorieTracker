@@ -16,6 +16,7 @@ import '../data/meals_dao_impl.dart';
 import '../services/analyzer/provider_analyzers.dart'
     show ServerAnalyzer, createMultiProviderAnalyzer;
 import '../services/nl/executor.dart';
+import '../services/garmin_client.dart';
 import '../services/photo/coverage.dart';
 import '../services/photo/filename_dates.dart' show deriveCapturedAt;
 import '../services/photo/photo_hash.dart' show originalBytesMd5;
@@ -110,6 +111,7 @@ class AppServices {
       photoIntake: photoIntake,
       reports: reports,
       settings: _AppSettingsStore(settings, notifier),
+      garminDaily: makeGarminDailyFetch(settings),
       picker: _ShareIntakePicker(photoLibrary),
       requestPhotoPermission: requestPhotos,
       thumbs: MealThumbResolver(dao: dao, library: photoLibrary),
