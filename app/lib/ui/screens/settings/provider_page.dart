@@ -307,10 +307,13 @@ class _ProviderSettingsPageState extends State<ProviderSettingsPage> {
         if (_isServerProvider)
           GroupedSection(
             header: 'Your server',
-            footer: 'Which subscription the server analyses with: your '
-                'Claude plan, a GLM Coding Plan (¥49/mo), or a Doubao '
-                'Agent Plan (¥40/mo). The plan key lives on the server, '
-                'not the phone.',
+            footer: 'Your server is your own machine in the cloud (the '
+                'address above) — not this phone. It signs in to ONE '
+                'flat-rate subscription and analyses photos under it, so '
+                'each photo costs nothing extra: your Claude plan, a GLM '
+                'Coding Plan (¥49/mo), or a Doubao Agent Plan (¥40/mo). '
+                'The plan credentials stay on that machine; this phone '
+                'holds only the upload key.',
             children: [
               _cellField(TextField(
                 key: const Key('serverUrlField'),

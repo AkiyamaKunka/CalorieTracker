@@ -9,7 +9,14 @@ import 'package:flutter/material.dart';
 import '../../core/contracts.dart';
 import '../../services/garmin_client.dart';
 import '../format.dart';
+import 'dart:io' show File;
+import 'dart:ui' as ui show Image;
+
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
+
 import '../widgets/calorie_ring.dart';
+import '../widgets/day_report.dart';
 import '../widgets/grouped.dart' show GroupedCard;
 import '../widgets/macro_chart.dart' show MacroPalette;
 import '../meal_thumbs.dart';
@@ -138,10 +145,71 @@ class TodayScreenState extends State<TodayScreen> {
           ? const AlwaysScrollableScrollPhysics()
           : const NeverScrollableScrollPhysics(),
       slivers: [
-        const SliverAppBar.large(title: Text('Today')),
+        SliverAppBar.large(
+          title: const Text('Today'),
+          actions: [
+            // Report-to-my-coach (user request 2026-08-02): the whole day
+            // as ONE tall image, straight into the share sheet.
+            if (_todayMeals.where(isFoodMeal).isNotEmpty)
+              IconButton(
+                key: const Key('shareDayButton'),
+                icon: _sharing
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.ios_share),
+                tooltip: 'Share today as an image',
+                onPressed: _sharing ? null : _shareDay,
+              ),
+          ],
+        ),
         ...slivers,
       ],
     );
+  }
+
+  bool _sharing = false;
+
+  /// Render today as one tall PNG and open the system share sheet.
+  Future<void> _shareDay() async {
+    setState(() => _sharing = true);
+    final theme = Theme.of(context); // captured before any await
+    try {
+      final today = isoDate(DateTime.now());
+      final foodMeals = _todayMeals.where(isFoodMeal).toList();
+      // Pre-decode every thumbnail so the report paints in one frame.
+      final report = <ReportMeal>[];
+      for (final meal in foodMeals) {
+        ui.Image? thumb;
+        if (meal.imageHash.isNotEmpty) {
+          thumb = await decodeThumb(await widget.dao.mealThumb(meal.id));
+        }
+        report.add(ReportMeal(meal: meal, thumb: thumb));
+      }
+      final png = await renderDayReport(
+        date: today,
+        meals: report,
+        typicalKcal: typicalDayKcal(_priorDayTotals),
+        burnKcal: _garmin?.activeCalories ?? 0,
+        theme: theme,
+      );
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/intake_$today.png');
+      await file.writeAsBytes(png, flush: true);
+      if (!mounted) return;
+      await SharePlus.instance.share(ShareParams(
+        files: [XFile(file.path, mimeType: 'image/png')],
+        subject: 'Daily intake $today',
+      ));
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Could not build the image: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _sharing = false);
+    }
   }
 
   Widget _body(BuildContext context) {
