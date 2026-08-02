@@ -6,6 +6,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../services.dart' show SettingsStore;
+import '../../l10n.dart';
 import '../../widgets/grouped.dart';
 
 class ProfileSettingsPage extends StatefulWidget {
@@ -35,12 +36,10 @@ class _ProfileSettingsPageState extends State<ProfileSettingsPage> {
   @override
   Widget build(BuildContext context) {
     return GroupedPage(
-      title: 'Dietary Profile',
+      title: context.l10n.profilePageTitle,
       children: [
         GroupedSection(
-          footer: 'Preferences and cultural context the AI reads alongside '
-              'every photo — e.g. "vegetarian", "Cantonese home cooking, '
-              'light oil", "cutting, high protein". Saves as you type.',
+          footer: context.l10n.profileFooter,
           children: [
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
@@ -50,9 +49,8 @@ class _ProfileSettingsPageState extends State<ProfileSettingsPage> {
                 maxLines: 5,
                 onChanged: (v) =>
                     widget.settings.update(dietaryProfile: v),
-                decoration: const InputDecoration(
-                  hintText: 'Nothing yet — the AI assumes no special '
-                      'preferences.',
+                decoration: InputDecoration(
+                  hintText: context.l10n.profileHint,
                   border: InputBorder.none,
                 ),
               ),

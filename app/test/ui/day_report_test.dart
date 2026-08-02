@@ -5,6 +5,7 @@
 import 'dart:typed_data';
 
 import 'package:calorie_tracker/core/contracts.dart';
+import 'package:calorie_tracker/ui/l10n.dart';
 import 'package:calorie_tracker/ui/screens/today_screen.dart';
 import 'package:calorie_tracker/ui/widgets/day_report.dart';
 import 'package:flutter/material.dart';
@@ -86,6 +87,48 @@ void main() {
       expect(png.sublist(0, 8),
           Uint8List.fromList([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]));
     });
+  });
+
+  testWidgets('a zh user\'s coach gets a zh report (detached-tree locale)',
+      (tester) async {
+    // The card renders OUTSIDE the app's widget tree, so it can't inherit
+    // the app locale — renderDayReport must build its own Localizations
+    // scope. Rendering must not throw AND the card must show zh strings.
+    await tester.runAsync(() async {
+      final png = await renderDayReport(
+        date: '2026-08-02',
+        meals: [
+          ReportMeal(meal: _meal(1, '8:05 AM', 'Soy milk and youtiao', 380)),
+        ],
+        typicalKcal: 2020,
+        locale: const Locale('zh'),
+      );
+      expect(png.sublist(0, 8),
+          Uint8List.fromList([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]));
+    });
+    // Content contract, checked where text is findable: the same card
+    // under a zh app scope.
+    tester.view.physicalSize = const Size(420, 3000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(MaterialApp(
+      locale: const Locale('zh'),
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: SingleChildScrollView(
+        child: DayReportCard(
+          date: '2026-08-02',
+          meals: [
+            ReportMeal(
+                meal: _meal(1, '8:05 AM', 'Soy milk and youtiao', 380)),
+          ],
+          typicalKcal: 2020,
+        ),
+      ),
+    ));
+    expect(find.text('今日饮食'), findsOneWidget);
+    expect(find.text('380 千卡'), findsOneWidget);
+    expect(find.text('由 CalorieTracker 记录'), findsOneWidget);
   });
 
   testWidgets('the share button appears only when meals exist',

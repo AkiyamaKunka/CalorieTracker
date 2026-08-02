@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 import '../../core/contracts.dart';
 import '../../services/analyzer/normalize.dart' show makeMealThumb;
 import '../photo_pipeline.dart';
+import '../l10n.dart';
 import '../widgets/grouped.dart';
 import 'fix_meal_screen.dart';
 import 'meal_editor_screen.dart';
@@ -39,7 +40,7 @@ Future<void> openAddFlow(BuildContext context, UiServices services,
             padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
             child: Align(
               alignment: Alignment.centerLeft,
-              child: Text('Log a meal',
+              child: Text(context.l10n.addSheetTitle,
                   style: Theme.of(ctx)
                       .textTheme
                       .titleLarge
@@ -52,15 +53,15 @@ Future<void> openAddFlow(BuildContext context, UiServices services,
                 key: const Key('addFromPhotos'),
                 icon: Icons.photo_library_outlined,
                 iconColor: Theme.of(ctx).colorScheme.primary,
-                title: 'From recent photos',
+                title: ctx.l10n.addFromPhotos,
                 onTap: () => Navigator.of(ctx).pop('photos'),
               ),
               GroupedRow(
                 key: const Key('addFromText'),
                 icon: Icons.edit_note,
                 iconColor: Theme.of(ctx).colorScheme.secondary,
-                title: 'Describe a meal',
-                value: 'any language',
+                title: ctx.l10n.addDescribe,
+                value: ctx.l10n.addDescribeNote,
                 onTap: () => Navigator.of(ctx).pop('text'),
               ),
               // The zero-dependency path: the other two options need a
@@ -71,8 +72,8 @@ Future<void> openAddFlow(BuildContext context, UiServices services,
                 key: const Key('addManually'),
                 icon: Icons.keyboard_alt_outlined,
                 iconColor: Theme.of(ctx).colorScheme.tertiary,
-                title: 'Enter manually',
-                value: 'no AI',
+                title: ctx.l10n.addManual,
+                value: ctx.l10n.addManualNote,
                 onTap: () => Navigator.of(ctx).pop('manual'),
               ),
             ],
@@ -81,13 +82,13 @@ Future<void> openAddFlow(BuildContext context, UiServices services,
           // 2026-07-31 — the user's verdict: one button owns ALL meal
           // actions, adding and fixing alike.
           GroupedSection(
-            footer: '"meal 2 was roast duck" · "删除第一餐"',
+            footer: ctx.l10n.addFixFooter,
             children: [
               GroupedRow(
                 key: const Key('addFixMeal'),
                 icon: Icons.build_outlined,
                 iconColor: Theme.of(ctx).colorScheme.error,
-                title: 'Fix or delete a meal',
+                title: ctx.l10n.addFix,
                 onTap: () => Navigator.of(ctx).pop('fix'),
               ),
             ],
@@ -298,7 +299,8 @@ class _AddPhotoScreenState extends State<AddPhotoScreen> {
                 );
               }
               if (assets.isEmpty) {
-                return const Center(child: Text('No recent photos found.'));
+                return Center(
+                    child: Text(context.l10n.addNoPhotos));
               }
               return Column(children: [
                 // Portion accuracy is the model's weakest link, and a scale
@@ -315,8 +317,7 @@ class _AddPhotoScreenState extends State<AddPhotoScreen> {
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          'Tip: chopsticks or a hand in the shot helps the '
-                          'AI judge portion sizes.',
+                          context.l10n.addPhotosTip,
                           style: Theme.of(context)
                               .textTheme
                               .bodySmall
@@ -363,14 +364,15 @@ class _AddPhotoScreenState extends State<AddPhotoScreen> {
           if (_analyzing)
             Container(
               color: Colors.black45,
-              child: const Center(
+              child: Center(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    CircularProgressIndicator(key: Key('photoAnalyzing')),
-                    SizedBox(height: 12),
-                    Text('Analyzing…',
-                        style: TextStyle(color: Colors.white)),
+                    const CircularProgressIndicator(
+                        key: Key('photoAnalyzing')),
+                    const SizedBox(height: 12),
+                    Text(context.l10n.analyzing,
+                        style: const TextStyle(color: Colors.white)),
                   ],
                 ),
               ),

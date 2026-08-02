@@ -1,0 +1,287 @@
+{
+  "@@locale": "en",
+  "tabToday": "Today",
+  "tabHistory": "History",
+  "tabBody": "Body",
+  "tabSettings": "Settings",
+  "kcalAmount": "{kcal} kcal",
+  "@kcalAmount": {
+    "placeholders": {
+      "kcal": {
+        "type": "String"
+      }
+    }
+  },
+  "mealsToday": "{count, plural, =1{1 meal today} other{{count} meals today}}",
+  "@mealsToday": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "rowTypical": "Typical",
+  "rowBurn": "Burn",
+  "rowEaten": "Eaten",
+  "rowResultLeft": "= Left",
+  "rowResultOver": "= Above typical",
+  "ringHeadroom": "headroom",
+  "ringLeftToday": "left today",
+  "ringAboveTypical": "above typical",
+  "ringKcalToday": "kcal today",
+  "todayEmptyTitle": "No meals logged yet today.",
+  "todayEmptyHint": "Tap \"Log\" below to add one from a photo or a description — or turn on \"Watch camera roll\" in Settings and new food photos log themselves.",
+  "fabLog": "Log",
+  "shareDayTooltip": "Share today as an image",
+  "shareDayFailed": "Could not build the image: {error}",
+  "@shareDayFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "historyAverage": "Average: ~{kcal} kcal / day",
+  "@historyAverage": {
+    "placeholders": {
+      "kcal": {
+        "type": "String"
+      }
+    }
+  },
+  "historyNoMeals": "no meals logged",
+  "historyEmpty": "No meals logged in the past {days} days.",
+  "@historyEmpty": {
+    "placeholders": {
+      "days": {
+        "type": "int"
+      }
+    }
+  },
+  "retry": "Retry",
+  "bodyWeightHeader": "Weight",
+  "bodyMeasurementsHeader": "Measurements",
+  "bodyHistoryHeader": "History",
+  "bodyOnDate": "on {date}",
+  "@bodyOnDate": {
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  },
+  "bodyNoChange": "no change",
+  "bodyWaist": "Waist",
+  "bodyChest": "Chest",
+  "bodyHip": "Hip",
+  "bodyEmptyTitle": "No body data yet.",
+  "bodyEmptyHint": "Tap Log to record your weight or your waist, chest and hip measurements. Weight logged by chat (\"I weigh 81.6 kg\") lands here too.",
+  "bodySheetLogTitle": "Log body · {date}",
+  "@bodySheetLogTitle": {
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  },
+  "bodySheetEditTitle": "Edit {date}",
+  "@bodySheetEditTitle": {
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  },
+  "bodySheetHint": "Leave anything you did not measure empty.",
+  "bodyFieldWeight": "Weight",
+  "save": "Save",
+  "saving": "Saving…",
+  "bodyErrNotNumber": "{label}: \"{raw}\" is not a number.",
+  "@bodyErrNotNumber": {
+    "placeholders": {
+      "label": {
+        "type": "String"
+      },
+      "raw": {
+        "type": "String"
+      }
+    }
+  },
+  "bodyErrBounds": "{label} must be between {min} and {max}.",
+  "@bodyErrBounds": {
+    "placeholders": {
+      "label": {
+        "type": "String"
+      },
+      "min": {
+        "type": "String"
+      },
+      "max": {
+        "type": "String"
+      }
+    }
+  },
+  "bodyErrEmpty": "Enter at least one value.",
+  "bodyDeleteTitle": "Delete {date}?",
+  "@bodyDeleteTitle": {
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  },
+  "bodyDeleteBody": "Removes the {what} recorded for this day.",
+  "@bodyDeleteBody": {
+    "placeholders": {
+      "what": {
+        "type": "String"
+      }
+    }
+  },
+  "bodyDeleteWeight": "weight",
+  "bodyDeleteMeasurements": "measurements",
+  "bodyDeleteBoth": "weight and measurements",
+  "cancel": "Cancel",
+  "delete": "Delete",
+  "settingsWelcomeTitle": "Welcome — one step to start logging",
+  "settingsWelcomeBody": "Tap AI Provider below, pick a provider and paste its API key (it saves as you type), then Test This Provider.\nThen turn on Watch Camera Roll and new food photos log themselves.\nIn mainland China choose Qwen 通义千问, Doubao 豆包 or GLM 智谱 (GLM's default model is free) — the other providers need a VPN. 中国大陆用户请选择国内提供商。",
+  "settingsSectionAi": "AI",
+  "settingsAiFooterPaused": "Analyses are paused — the daily quota was hit. New photos are kept and retried automatically; changing the key or provider on the AI Provider page resumes now.",
+  "settingsAiFooter": "Photos are analysed by the provider you pick — its key never leaves this phone.",
+  "settingsRowAiProvider": "AI Provider",
+  "settingsSectionPhotos": "Photos",
+  "settingsPhotosFooter": "The watcher logs new food photos automatically; the lookback window decides how far back catch-up scans reach.",
+  "settingsRowWatch": "Watch Camera Roll",
+  "settingsRowLookback": "Backfill Lookback",
+  "lookbackDays": "{count, plural, =1{1 day} other{{count} days}}",
+  "@lookbackDays": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "settingsRowCoverage": "Photo Coverage",
+  "settingsSectionReport": "Report",
+  "settingsRowReportTime": "Report Time",
+  "settingsSectionProfile": "Profile",
+  "settingsRowDietaryProfile": "Dietary Profile",
+  "profileSet": "Set",
+  "profileNotSet": "Not set",
+  "settingsSectionData": "Your Data",
+  "settingsDataFooter": "Import MERGES an exported file into this phone: meals already here are left alone, so importing twice never doubles your calories.",
+  "settingsRowExport": "Export Data…",
+  "settingsRowImport": "Import Data…",
+  "settingsRowLanguage": "Language",
+  "languageSystem": "System",
+  "languageSheetTitle": "Language",
+  "lookbackSheetTitle": "Backfill lookback",
+  "lookbackSheetHint": "How many days catch-up scans look back.",
+  "lookbackSet": "Set {count, plural, =1{1 day} other{{count} days}}",
+  "@lookbackSet": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "providerPageTitle": "AI Provider",
+  "connectionTypeHeader": "Connection type",
+  "connectionTypeFooter": "An API key pays per photo and lives on this phone. A subscription is a flat-rate plan your own cloud server signs into — photos cost nothing extra.",
+  "typeApiKey": "API Key",
+  "typeSubscription": "Subscription",
+  "testProvider": "Test This Provider",
+  "testProviderFooter": "The test names exactly what is broken: configuration, network, key, account credit, reply format, or quota.",
+  "apiPageTitle": "API Key",
+  "apiProviderHeader": "Provider",
+  "apiProviderFooter": "Pay per photo: the key lives on this phone and every photo is a metered API call billed by the vendor. In mainland China choose Qwen, Doubao or GLM — the others need a VPN. 中国大陆用户请选择国内提供商。",
+  "noteVpn": "VPN in China",
+  "noteFreeTierVpn": "free tier · VPN in China",
+  "noteDirect": "direct in China",
+  "noteFreeDirect": "free · direct in China",
+  "apiKeyHeader": "API key",
+  "apiKeyLabel": "{provider} API key",
+  "@apiKeyLabel": {
+    "placeholders": {
+      "provider": {
+        "type": "String"
+      }
+    }
+  },
+  "apiKeyFooterDefault": "The key saves as you type. Stored securely on this device only.",
+  "apiKeyFooterQwen": "From bailian.console.aliyun.com (Alibaba Cloud 百炼 → API-KEY). New accounts get ~1M free tokens per model. Stored securely on this device only.",
+  "apiKeyFooterDoubao": "From console.volcengine.com/ark (API Key + 开通管理 to activate models). 500k free tokens per model. Stored securely on this device only.",
+  "apiKeyFooterGlm": "From open.bigmodel.cn (real-name verification required). The default flash model is free. Stored securely on this device only.",
+  "modelHeader": "Model",
+  "modelCustomRow": "Custom — type a model name…",
+  "modelCustomLabel": "Custom model name",
+  "apiInactiveFooter": "A subscription is currently active. Pick a provider above to switch to a pay-per-photo API key.",
+  "subPageTitle": "Subscription",
+  "planHeader": "Plan",
+  "planFooter": "Flat-rate: your own cloud machine signs in to ONE plan and analyses photos under it — each photo costs nothing extra. Plan credentials stay on that machine.",
+  "planClaude": "Claude Plan",
+  "planClaudeNote": "Anthropic subscription",
+  "planGlm": "GLM Coding Plan",
+  "planDoubao": "Doubao Agent Plan",
+  "serverHeader": "Your server",
+  "serverFooter": "The cloud machine that holds your plan sign-in and runs the analysis — not this phone. This phone keeps only the upload key it uses to talk to that machine.",
+  "serverAddressLabel": "Server address",
+  "serverUploadKeyLabel": "Server upload key",
+  "connectClaude": "Connect Claude",
+  "connectClaudeFooter": "Signs this server in to your Anthropic subscription. Needs a VPN in mainland China.",
+  "subInactiveFooter": "An API key is currently active. Pick a plan above to switch to subscription analysis via your server.",
+  "connectDialogTitle": "Finish connecting Claude",
+  "connectDialogBody": "Sign in on the Anthropic page that just opened. It will show you a code — paste it here.",
+  "connectCodeLabel": "Authorization code",
+  "connect": "Connect",
+  "connectStartFailed": "Could not start the sign-in.",
+  "connectBrowserFailed": "Could not open the browser.",
+  "connectDone": "Claude connected — analyses run on your subscription.",
+  "profilePageTitle": "Dietary Profile",
+  "profileFooter": "Preferences and cultural context the AI reads alongside every photo — e.g. \"vegetarian\", \"Cantonese home cooking, light oil\", \"cutting, high protein\". Saves as you type.",
+  "profileHint": "Nothing yet — the AI assumes no special preferences.",
+  "addSheetTitle": "Log a meal",
+  "addFromPhotos": "From recent photos",
+  "addDescribe": "Describe a meal",
+  "addDescribeNote": "any language",
+  "addManual": "Enter manually",
+  "addManualNote": "no AI",
+  "addFix": "Fix or delete a meal",
+  "addFixFooter": "\"meal 2 was roast duck\" · \"删除第一餐\"",
+  "addPhotosTip": "Tip: chopsticks or a hand in the shot helps the AI judge portion sizes.",
+  "addNoPhotos": "No recent photos found.",
+  "analyzing": "Analyzing…",
+  "reportTitle": "Daily intake",
+  "reportMeals": "{count, plural, =1{1 meal} other{{count} meals}}",
+  "@reportMeals": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "reportNoMeals": "No meals logged.",
+  "reportFooter": "Logged with CalorieTracker",
+  "typicalDayHeadroom": "Typical day: ~{typical} kcal · ~{delta} kcal headroom",
+  "@typicalDayHeadroom": {
+    "placeholders": {
+      "typical": {
+        "type": "String"
+      },
+      "delta": {
+        "type": "String"
+      }
+    }
+  },
+  "typicalDayOver": "Typical day: ~{typical} kcal · ~{delta} kcal above typical",
+  "@typicalDayOver": {
+    "placeholders": {
+      "typical": {
+        "type": "String"
+      },
+      "delta": {
+        "type": "String"
+      }
+    }
+  }
+}

@@ -69,6 +69,7 @@ class AppSettings extends ChangeNotifier {
   static const String _kModel = 'settings.model';
   static const String _kLookbackDays = 'settings.lookback_days';
   static const String _kReportTime = 'settings.report_time';
+  static const String _kAppLanguage = 'settings.app_language';
   static const String _kWatcherEnabled = 'settings.watcher_enabled';
   static const String _kDietaryProfile = 'settings.dietary_profile';
   static const String _kQuotaPauseUntil = 'settings.quota_pause_until';
@@ -126,6 +127,7 @@ class AppSettings extends ChangeNotifier {
   String _model = defaultModel;
   int _lookbackDays = defaultLookbackDays;
   String _reportTime = defaultReportTime;
+  String _appLanguage = 'system'; // 'system' | 'en' | 'zh'
   bool _watcherEnabled = false;
   String? _dietaryProfile;
   DateTime? _quotaPauseUntil;
@@ -172,6 +174,10 @@ class AppSettings extends ChangeNotifier {
         .clamp(minLookbackDays, maxLookbackDays);
     final rt = p.getString(_kReportTime) ?? defaultReportTime;
     s._reportTime = _reportTimeRe.hasMatch(rt) ? rt : defaultReportTime;
+    final lang = p.getString(_kAppLanguage) ?? 'system';
+    s._appLanguage = const {'system', 'en', 'zh'}.contains(lang)
+        ? lang
+        : 'system';
     s._watcherEnabled = p.getBool(_kWatcherEnabled) ?? false;
     final profile = (p.getString(_kDietaryProfile) ?? '').trim();
     s._dietaryProfile = profile.isEmpty ? null : profile;
@@ -404,6 +410,19 @@ class AppSettings extends ChangeNotifier {
   Future<void> setLookbackDays(int value) async {
     _lookbackDays = value.clamp(minLookbackDays, maxLookbackDays);
     await _prefs.setInt(_kLookbackDays, _lookbackDays);
+    notifyListeners();
+  }
+
+  /// UI language override: 'system' follows the OS; 'en'/'zh' force it.
+  /// App-only (spec §9 localization row) — never a wire value.
+  String get appLanguage => _appLanguage;
+
+  Future<void> setAppLanguage(String value) async {
+    final v = const {'system', 'en', 'zh'}.contains(value)
+        ? value
+        : 'system';
+    _appLanguage = v;
+    await _prefs.setString(_kAppLanguage, v);
     notifyListeners();
   }
 

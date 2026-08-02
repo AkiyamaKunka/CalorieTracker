@@ -18,6 +18,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../format.dart';
+import '../l10n.dart';
 
 class CalorieRing extends StatelessWidget {
   const CalorieRing({
@@ -61,13 +62,14 @@ class CalorieRing extends StatelessWidget {
         : over
             ? '+${formatKcal(_eaten - budget)}'
             : formatKcal(budget - _eaten);
+    final l = context.l10n;
     final centerSmall = budget == null
-        ? 'kcal today'
+        ? l.ringKcalToday
         : over
-            ? 'above typical' // matches the spec-pinned caption's wording
+            ? l.ringAboveTypical // matches the caption's wording
             : burnKcal.round() > 0
-                ? 'left today'
-                : 'headroom';
+                ? l.ringLeftToday
+                : l.ringHeadroom;
     final semantics = budget == null
         ? '${formatKcal(_eaten)} kcal eaten today'
         : over

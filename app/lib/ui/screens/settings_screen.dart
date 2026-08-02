@@ -22,6 +22,7 @@ import '../../services/photo/photo_library.dart';
 import '../photo_pipeline.dart';
 import '../format.dart' show isoDate;
 import '../services.dart';
+import '../l10n.dart';
 import '../widgets/grouped.dart';
 import 'coverage_screen.dart';
 import 'meal_editor_screen.dart';
@@ -304,12 +305,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
       color: groupedBackground(theme.colorScheme),
       child: CustomScrollView(
         slivers: [
-          const SliverAppBar.large(title: Text('Settings')),
+          SliverAppBar.large(title: Text(context.l10n.tabSettings)),
           SliverList.list(children: [
             ..._aiSection(theme),
             ..._photoSection(theme),
             ..._reportSection(theme),
             ..._profileSection(theme),
+            ..._languageSection(theme),
             ..._dataSection(theme),
             const SizedBox(height: 32),
           ]),
@@ -335,18 +337,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Welcome — one step to start logging',
+                    Text(context.l10n.settingsWelcomeTitle,
                         style: theme.textTheme.titleSmall),
                     const SizedBox(height: 6),
                     Text(
-                      'Tap AI Provider below, pick a provider and paste '
-                      'its API key (it saves as you type), then Test This '
-                      'Provider.\n'
-                      'Then turn on Watch Camera Roll and new food photos '
-                      'log themselves.\n'
-                      'In mainland China choose Qwen 通义千问, Doubao 豆包 or '
-                      'GLM 智谱 (GLM\u2019s default model is free) — the other '
-                      'providers need a VPN. 中国大陆用户请选择国内提供商。',
+                      context.l10n.settingsWelcomeBody,
                       style: theme.textTheme.bodySmall,
                     ),
                   ],
@@ -355,19 +350,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
         GroupedSection(
-          header: 'AI',
+          header: context.l10n.settingsSectionAi,
           footer: widget.settings.isQuotaPaused
-              ? 'Analyses are paused — the daily quota was hit. New photos '
-                  'are kept and retried automatically; changing the key or '
-                  'provider on the AI Provider page resumes now.'
-              : 'Photos are analysed by the provider you pick — its key '
-                  'never leaves this phone.',
+              ? context.l10n.settingsAiFooterPaused
+              : context.l10n.settingsAiFooter,
           children: [
             GroupedRow(
               key: const Key('aiProviderRow'),
               icon: Icons.auto_awesome,
               iconColor: theme.colorScheme.primary,
-              title: 'AI Provider',
+              title: context.l10n.settingsRowAiProvider,
               value: providerDisplayLabel(widget.settings.provider,
                   widget.settings.serverBackend),
               onTap: () async {
@@ -390,23 +382,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// Camera-roll watching, coverage audit, backfill window.
   List<Widget> _photoSection(ThemeData theme) => [
         GroupedSection(
-          header: 'Photos',
-          footer: 'The watcher logs new food photos automatically; the '
-              'lookback window decides how far back catch-up scans reach.',
+          header: context.l10n.settingsSectionPhotos,
+          footer: context.l10n.settingsPhotosFooter,
           children: [
             GroupedToggleRow(
               switchKey: const Key('watcherToggle'),
               icon: Icons.photo_camera_outlined,
               iconColor: theme.colorScheme.primary,
-              title: 'Watch Camera Roll',
+              title: context.l10n.settingsRowWatch,
               value: _watcherEnabled,
               onChanged: (v) => _toggleWatcher(v),
             ),
             GroupedRow(
               icon: Icons.history,
               iconColor: theme.colorScheme.tertiary,
-              title: 'Backfill Lookback',
-              value: '$_lookbackDays day${_lookbackDays == 1 ? '' : 's'}',
+              title: context.l10n.settingsRowLookback,
+              value: context.l10n.lookbackDays(_lookbackDays),
               onTap: _pickLookback,
             ),
             if (widget.coverage != null && widget.processPhoto != null)
@@ -414,7 +405,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 key: const Key('coverageCheckTile'),
                 icon: Icons.fact_check_outlined,
                 iconColor: theme.colorScheme.secondary,
-                title: 'Photo Coverage',
+                title: context.l10n.settingsRowCoverage,
                 onTap: () => Navigator.of(context).push(MaterialPageRoute(
                   builder: (_) => CoverageScreen(
                     auditor: widget.coverage!,
@@ -456,9 +447,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Backfill lookback',
+              Text(ctx.l10n.lookbackSheetTitle,
                   style: Theme.of(ctx).textTheme.titleMedium),
-              Text('How many days catch-up scans look back.',
+              Text(ctx.l10n.lookbackSheetHint,
                   style: Theme.of(ctx).textTheme.bodySmall),
               Slider(
                 key: const Key('lookbackSlider'),
@@ -473,7 +464,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 alignment: Alignment.centerRight,
                 child: FilledButton(
                   onPressed: () => Navigator.pop(ctx, days),
-                  child: Text('Set $days day${days == 1 ? '' : 's'}'),
+                  child: Text(ctx.l10n.lookbackSet(days)),
                 ),
               ),
             ],
@@ -489,13 +480,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// Daily-report time.
   List<Widget> _reportSection(ThemeData theme) => [
         GroupedSection(
-          header: 'Report',
+          header: context.l10n.settingsSectionReport,
           children: [
             GroupedRow(
               key: const Key('reportTimeTile'),
               icon: Icons.schedule,
               iconColor: theme.colorScheme.primary,
-              title: 'Report Time',
+              title: context.l10n.settingsRowReportTime,
               value: _reportTime,
               onTap: _pickReportTime,
             ),
@@ -506,16 +497,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// Dietary profile appended to the photo prompt (§1.3).
   List<Widget> _profileSection(ThemeData theme) => [
         GroupedSection(
-          header: 'Profile',
+          header: context.l10n.settingsSectionProfile,
           children: [
             GroupedRow(
               key: const Key('dietaryProfileRow'),
               icon: Icons.person_outline,
               iconColor: theme.colorScheme.secondary,
-              title: 'Dietary Profile',
+              title: context.l10n.settingsRowDietaryProfile,
               value: widget.settings.dietaryProfile.trim().isEmpty
-                  ? 'Not set'
-                  : 'Set',
+                  ? context.l10n.profileNotSet
+                  : context.l10n.profileSet,
               onTap: () async {
                 await Navigator.of(context).push(MaterialPageRoute(
                   builder: (_) =>
@@ -528,19 +519,91 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
   ];
 
+  String _languageLabel(BuildContext context) =>
+      switch (widget.settings.appLanguage) {
+        'en' => 'English',
+        'zh' => '中文',
+        _ => context.l10n.languageSystem,
+      };
+
+  Future<void> _pickLanguage() async {
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      backgroundColor: groupedBackground(Theme.of(context).colorScheme),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(ctx.l10n.languageSheetTitle,
+                    style: Theme.of(ctx)
+                        .textTheme
+                        .titleLarge
+                        ?.copyWith(fontWeight: FontWeight.w600)),
+              ),
+            ),
+            GroupedSection(
+              separatorInset: 16,
+              children: [
+                for (final (value, label) in [
+                  ('system', ctx.l10n.languageSystem),
+                  ('en', 'English'),
+                  ('zh', '中文'),
+                ])
+                  GroupedRow(
+                    key: Key('language-$value'),
+                    title: label,
+                    showChevron: false,
+                    trailing: widget.settings.appLanguage == value
+                        ? Icon(Icons.check,
+                            size: 20,
+                            color: Theme.of(ctx).colorScheme.primary)
+                        : const SizedBox(width: 20),
+                    onTap: () => Navigator.pop(ctx, value),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+    if (picked == null || !mounted) return;
+    await widget.settings.update(appLanguage: picked);
+    if (mounted) setState(() {});
+  }
+
+  List<Widget> _languageSection(ThemeData theme) => [
+        GroupedSection(
+          header: context.l10n.settingsRowLanguage,
+          children: [
+            GroupedRow(
+              key: const Key('languageRow'),
+              icon: Icons.translate,
+              iconColor: theme.colorScheme.tertiary,
+              title: context.l10n.settingsRowLanguage,
+              value: _languageLabel(context),
+              onTap: _pickLanguage,
+            ),
+          ],
+        ),
+  ];
+
   /// Export and import — the food log is the user's.
   List<Widget> _dataSection(ThemeData theme) => [
         GroupedSection(
-          header: 'Your Data',
-          footer: 'Import MERGES an exported file into this phone: meals '
-              'already here are left alone, so importing twice never '
-              'doubles your calories.',
+          header: context.l10n.settingsSectionData,
+          footer: context.l10n.settingsDataFooter,
           children: [
             GroupedRow(
               key: const Key('exportButton'),
               icon: Icons.ios_share,
               iconColor: theme.colorScheme.primary,
-              title: 'Export Data…',
+              title: context.l10n.settingsRowExport,
               trailing: _exporting
                   ? const SizedBox(
                       width: 16,
@@ -554,7 +617,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               key: const Key('importButton'),
               icon: Icons.file_download_outlined,
               iconColor: theme.colorScheme.secondary,
-              title: 'Import Data…',
+              title: context.l10n.settingsRowImport,
               trailing: _importing
                   ? const SizedBox(
                       width: 16,

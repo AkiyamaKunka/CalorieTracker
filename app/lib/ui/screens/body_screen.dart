@@ -16,6 +16,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/contracts.dart';
 import '../../core/shared_generated.dart';
+import '../l10n.dart';
 import '../widgets/grouped.dart' show cellBackground;
 
 /// Chart + list window. A year keeps the page honest for lapsed loggers
@@ -113,23 +114,25 @@ class BodyScreenState extends State<BodyScreen> {
   Future<bool> _confirmDelete(String date) async {
     final hasWeight = _weightOn(date) != null;
     final hasMeasurements = _measurementsOn(date) != null;
-    final what = [
-      if (hasWeight) 'weight',
-      if (hasMeasurements) 'measurements',
-    ].join(' and ');
+    final l = context.l10n;
+    final what = hasWeight && hasMeasurements
+        ? l.bodyDeleteBoth
+        : hasWeight
+            ? l.bodyDeleteWeight
+            : l.bodyDeleteMeasurements;
     final ok = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Delete $date?'),
-        content: Text('Removes the $what recorded for this day.'),
+        title: Text(l.bodyDeleteTitle(date)),
+        content: Text(l.bodyDeleteBody(what)),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel')),
+              child: Text(l.cancel)),
           FilledButton(
               key: const Key('confirmDeleteBodyDay'),
               onPressed: () => Navigator.pop(context, true),
-              child: const Text('Delete')),
+              child: Text(l.delete)),
         ],
       ),
     );
@@ -156,11 +159,11 @@ class BodyScreenState extends State<BodyScreen> {
         heroTag: 'bodyLogFab',
         onPressed: () => _openSheet(),
         icon: const Icon(Icons.add),
-        label: const Text('Log'),
+        label: Text(context.l10n.fabLog),
       ),
       body: empty
           ? CustomScrollView(slivers: [
-              const SliverAppBar.large(title: Text('Body')),
+              SliverAppBar.large(title: Text(context.l10n.tabBody)),
               SliverFillRemaining(
                   child: Center(
               child: Padding(
@@ -172,13 +175,11 @@ class BodyScreenState extends State<BodyScreen> {
                     Icon(Icons.monitor_weight_outlined,
                         size: 48, color: theme.colorScheme.onSurfaceVariant),
                     const SizedBox(height: 12),
-                    Text('No body data yet.',
+                    Text(context.l10n.bodyEmptyTitle,
                         style: theme.textTheme.titleMedium),
                     const SizedBox(height: 8),
                     Text(
-                      'Tap Log to record your weight or your waist, chest '
-                      'and hip measurements. Weight logged by chat ("I '
-                      'weigh 81.6 kg") lands here too.',
+                      context.l10n.bodyEmptyHint,
                       textAlign: TextAlign.center,
                       style: theme.textTheme.bodyMedium?.copyWith(
                           color: theme.colorScheme.onSurfaceVariant),
@@ -188,7 +189,7 @@ class BodyScreenState extends State<BodyScreen> {
               ),
             ))])
           : CustomScrollView(slivers: [
-              const SliverAppBar.large(title: Text('Body')),
+              SliverAppBar.large(title: Text(context.l10n.tabBody)),
               SliverPadding(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
                 sliver: SliverList.list(children: [
@@ -200,7 +201,7 @@ class BodyScreenState extends State<BodyScreen> {
                 const SizedBox(height: 20),
                 Padding(
                   padding: const EdgeInsets.only(left: 16, bottom: 7),
-                  child: Text('History',
+                  child: Text(context.l10n.bodyHistoryHeader,
                       style: theme.textTheme.titleSmall?.copyWith(
                           color: theme.colorScheme.onSurfaceVariant,
                           fontWeight: FontWeight.w600)),
@@ -271,7 +272,8 @@ class _WeightCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Weight', style: theme.textTheme.titleMedium),
+            Text(context.l10n.bodyWeightHeader,
+                style: theme.textTheme.titleMedium),
             const SizedBox(height: 8),
             Row(
               crossAxisAlignment: CrossAxisAlignment.end,
@@ -293,7 +295,7 @@ class _WeightCard extends StatelessWidget {
                       sinceDate: previous!.date),
               ],
             ),
-            Text('on ${latest.date}',
+            Text(context.l10n.bodyOnDate(latest.date),
                 style: theme.textTheme.bodySmall
                     ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
             if (weights.length >= 2) ...[
@@ -343,7 +345,7 @@ class _DeltaChip extends StatelessWidget {
     // "good", so green/red would editorialize.
     final sign = delta > 0 ? '▲ +' : (delta < 0 ? '▼ ' : '· ');
     final text = delta == 0
-        ? 'no change'
+        ? context.l10n.bodyNoChange
         : '$sign${delta.abs().toStringAsFixed(1)} $unit';
     return Tooltip(
       message: 'since $sinceDate',
@@ -375,14 +377,15 @@ class _MeasurementsCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Measurements', style: theme.textTheme.titleMedium),
+            Text(context.l10n.bodyMeasurementsHeader,
+                style: theme.textTheme.titleMedium),
             const SizedBox(height: 4),
-            _metricRow(context, 'Waist', (m) => m.waistCm,
+            _metricRow(context, context.l10n.bodyWaist, (m) => m.waistCm,
                 const Key('bodyWaistLatest')),
-            _metricRow(context, 'Chest', (m) => m.chestCm,
+            _metricRow(context, context.l10n.bodyChest, (m) => m.chestCm,
                 const Key('bodyChestLatest')),
-            _metricRow(
-                context, 'Hip', (m) => m.hipCm, const Key('bodyHipLatest')),
+            _metricRow(context, context.l10n.bodyHip, (m) => m.hipCm,
+                const Key('bodyHipLatest')),
           ],
         ),
       ),
@@ -421,7 +424,7 @@ class _MeasurementsCard extends StatelessWidget {
           Text('${_cm(latest.$2)} cm',
               key: key, style: theme.textTheme.titleMedium),
           const SizedBox(width: 8),
-          Text('on ${latest.$1}',
+          Text(context.l10n.bodyOnDate(latest.$1),
               style: theme.textTheme.bodySmall
                   ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
           const Spacer(),
@@ -557,9 +560,12 @@ class _LogBodySheetState extends State<LogBodySheet> {
     final raw = c.text.trim().replaceAll(',', '.');
     if (raw.isEmpty) return (null, null);
     final v = double.tryParse(raw);
-    if (v == null) return (null, '$label: "$raw" is not a number.');
+    if (v == null) {
+      return (null, context.l10n.bodyErrNotNumber(label, raw));
+    }
     if (v < min || v > max) {
-      return (null, '$label must be between ${_num(min)} and ${_num(max)}.');
+      return (null,
+          context.l10n.bodyErrBounds(label, _num(min), _num(max)));
     }
     return (v, null);
   }
@@ -583,7 +589,7 @@ class _LogBodySheetState extends State<LogBodySheet> {
         (widget.existing != null && !widget.existing!.isEmpty);
     if (kg == null && waist == null && chest == null && hip == null &&
         !hadAnything) {
-      setState(() => _error = 'Enter at least one value.');
+      setState(() => _error = context.l10n.bodyErrEmpty);
       return;
     }
     setState(() {
@@ -621,13 +627,13 @@ class _LogBodySheetState extends State<LogBodySheet> {
           children: [
             Text(
               widget.latestDate == null
-                  ? 'Log body · ${widget.date}'
-                  : 'Edit ${widget.date}',
+                  ? context.l10n.bodySheetLogTitle(widget.date)
+                  : context.l10n.bodySheetEditTitle(widget.date),
               style: theme.textTheme.titleLarge,
             ),
             const SizedBox(height: 4),
             Text(
-              'Leave anything you did not measure empty.',
+              context.l10n.bodySheetHint,
               style: theme.textTheme.bodySmall
                   ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
             ),
@@ -640,8 +646,8 @@ class _LogBodySheetState extends State<LogBodySheet> {
                     controller: _weight,
                     keyboardType: const TextInputType.numberWithOptions(
                         decimal: true),
-                    decoration: const InputDecoration(
-                      labelText: 'Weight',
+                    decoration: InputDecoration(
+                      labelText: context.l10n.bodyFieldWeight,
                       suffixText: 'kg',
                       border: OutlineInputBorder(),
                     ),
@@ -654,8 +660,8 @@ class _LogBodySheetState extends State<LogBodySheet> {
                     controller: _waist,
                     keyboardType: const TextInputType.numberWithOptions(
                         decimal: true),
-                    decoration: const InputDecoration(
-                      labelText: 'Waist',
+                    decoration: InputDecoration(
+                      labelText: context.l10n.bodyWaist,
                       suffixText: 'cm',
                       border: OutlineInputBorder(),
                     ),
@@ -672,8 +678,8 @@ class _LogBodySheetState extends State<LogBodySheet> {
                     controller: _chest,
                     keyboardType: const TextInputType.numberWithOptions(
                         decimal: true),
-                    decoration: const InputDecoration(
-                      labelText: 'Chest',
+                    decoration: InputDecoration(
+                      labelText: context.l10n.bodyChest,
                       suffixText: 'cm',
                       border: OutlineInputBorder(),
                     ),
@@ -686,8 +692,8 @@ class _LogBodySheetState extends State<LogBodySheet> {
                     controller: _hip,
                     keyboardType: const TextInputType.numberWithOptions(
                         decimal: true),
-                    decoration: const InputDecoration(
-                      labelText: 'Hip',
+                    decoration: InputDecoration(
+                      labelText: context.l10n.bodyHip,
                       suffixText: 'cm',
                       border: OutlineInputBorder(),
                     ),
@@ -707,7 +713,8 @@ class _LogBodySheetState extends State<LogBodySheet> {
               child: FilledButton(
                 key: const Key('bodySheetSave'),
                 onPressed: _saving ? null : _save,
-                child: Text(_saving ? 'Saving…' : 'Save'),
+                child: Text(
+                    _saving ? context.l10n.saving : context.l10n.save),
               ),
             ),
           ],
