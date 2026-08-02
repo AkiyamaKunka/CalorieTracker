@@ -26,7 +26,11 @@ class CalorieTrackerApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const seed = Color(0xFF3E7D4F);
+    // Warm clay seed (Anthropic-family terracotta, user-picked over the
+    // original green 0xFF3E7D4F): M3 derives warm ivory surfaces and a
+    // clay primary from it — appetizing tones for a food app, restraint
+    // per the Apple lesson. Macro identity hues are unaffected (contract).
+    const seed = Color(0xFFCC785C);
     // Design pass 2026-08-02 (10-app research, scratchpad/uiux_direction.md):
     // number-forward typography (heavy tabular numerals — the data IS the
     // interface), quiet tonal cards with a 16 radius, zero elevation. The

@@ -37,6 +37,14 @@ flowchart LR
 
 *Everything stays on your phone except the single photo being analyzed.*
 
+<p align="center">
+  <img src="docs/screenshots/today_light.png" width="23%" alt="Today — calorie ring, transparent arithmetic, macro bars (light)">
+  <img src="docs/screenshots/today_dark.png" width="23%" alt="Today in dark mode">
+  <img src="docs/screenshots/history_dark.png" width="23%" alt="History — 30 days with honest gap days">
+  <img src="docs/screenshots/body_dark.png" width="23%" alt="Body — weight trend and measurements">
+</p>
+<p align="center"><sub><i>Demo data. The design pass is research-driven — ten leading health apps studied, lessons applied, backlashes avoided.</i></sub></p>
+
 ## Features
 
 **Photo → meal log, automatically.** Turn on *Watch camera roll* and every food photo you take logs itself — no need to open the app after each meal. Dedup is guaranteed: a photo is never analyzed (or billed) twice, even across restarts, double-taps on share, or a 200-photo backlog.

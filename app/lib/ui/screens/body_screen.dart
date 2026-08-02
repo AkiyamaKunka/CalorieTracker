@@ -16,7 +16,6 @@ import 'package:flutter/material.dart';
 
 import '../../core/contracts.dart';
 import '../../core/shared_generated.dart';
-import '../widgets/macro_chart.dart' show MacroPalette;
 
 /// Chart + list window. A year keeps the page honest for lapsed loggers
 /// (a 90-day window would silently hide that the last entry is old).
@@ -260,7 +259,9 @@ class _WeightCard extends StatelessWidget {
                   key: const Key('weightTrendChart'),
                   painter: WeightTrendPainter(
                     entries: weights,
-                    line: MacroPalette.of(context).protein,
+                    // Weight is its own entity — it wears primary, not
+                    // protein's borrowed blue (one hue per entity).
+                    line: theme.colorScheme.primary,
                     axis: theme.colorScheme.outlineVariant,
                     label: theme.colorScheme.onSurfaceVariant,
                     textDirection: Directionality.of(context),

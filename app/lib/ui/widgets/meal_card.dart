@@ -124,8 +124,11 @@ class MealCard extends StatelessWidget {
     // Tint alphas: a11y-measured — 0.14 was compliant but nearly invisible;
     // 0.20 light / 0.25 dark actually reads while keeping >6:1 text headroom.
     final dark = Theme.of(context).brightness == Brightness.dark;
+    // The TOTAL wears solid primary — under the clay seed, primaryContainer
+    // and the carb tint became near-twins, dissolving the hierarchy the
+    // emphasized chip exists for.
     final bg = emphasized
-        ? scheme.primaryContainer
+        ? scheme.primary
         : tint != null
             ? tint.withValues(alpha: dark ? 0.25 : 0.20)
             : scheme.surfaceContainerHighest;
@@ -137,7 +140,8 @@ class MealCard extends StatelessWidget {
       ),
       child: Text(label,
           style: Theme.of(context).textTheme.labelSmall?.copyWith(
-              color: emphasized ? scheme.onPrimaryContainer : null)),
+              color: emphasized ? scheme.onPrimary : null,
+              fontWeight: emphasized ? FontWeight.w600 : null)),
     );
   }
 }
