@@ -73,17 +73,35 @@ String providerLabel(String provider) => switch (provider) {
       _ => 'Gemini',
     };
 
-/// (id, name, note) — note carries the one fact that decides the choice
-/// for a mainland user: VPN needed, direct, or free.
-const List<(String, String, String)> kProviderChoices = [
+/// The two CONNECTION TYPES (user-designed IA, 2026-08-02): an API key
+/// is pay-per-photo with the key on this phone; an Agent/Coding plan is
+/// a flat-rate subscription the user's own server signs into. Each type
+/// lists its options; the note carries the one deciding fact.
+const List<(String, String, String)> kApiKeyChoices = [
   ('gemini', 'Google Gemini', 'free tier · VPN in China'),
   ('openai', 'OpenAI', 'VPN in China'),
   ('anthropic', 'Anthropic Claude', 'VPN in China'),
-  ('server', 'My server', 'your subscription'),
   ('qwen', 'Alibaba Qwen 通义千问', '中国直连'),
   ('doubao', 'ByteDance Doubao 豆包', '中国直连'),
   ('glm', 'Zhipu GLM 智谱', 'free 免费 · 中国直连'),
 ];
+
+/// (backend id, name, note) — all three ride the user's server.
+const List<(String, String, String)> kPlanChoices = [
+  ('claude', 'Claude Plan', 'Anthropic subscription'),
+  ('glm', 'GLM Coding Plan', '¥49/mo'),
+  ('doubao', 'Doubao Agent Plan', '¥40/mo'),
+];
+
+/// Root-row display: the concrete plan name, never an opaque 'My server'.
+String providerDisplayLabel(String provider, String serverBackend) =>
+    provider == 'server'
+        ? switch (serverBackend) {
+            'glm' => 'GLM Coding Plan',
+            'doubao' => 'Doubao Agent Plan',
+            _ => 'Claude Plan',
+          }
+        : providerLabel(provider);
 
 class ProviderSettingsPage extends StatefulWidget {
   const ProviderSettingsPage({
@@ -141,6 +159,25 @@ class _ProviderSettingsPageState extends State<ProviderSettingsPage> {
     setState(() {
       // Key/model fields are provider-scoped: reload them from the newly
       // selected provider's stored values.
+      _keyController.text = widget.settings.apiKey;
+      _modelController.text = widget.settings.model;
+      _customModel =
+          !isCuratedModel(widget.settings.provider, widget.settings.model);
+    });
+  }
+
+  /// Picking a PLAN means: provider = the server, backend = that plan.
+  Future<void> _selectPlan(String backend) async {
+    final already = widget.settings.provider == 'server' &&
+        widget.settings.serverBackend == backend;
+    if (already) return;
+    HapticFeedback.selectionClick();
+    await widget.settings.update(serverBackend: backend);
+    if (widget.settings.provider != 'server') {
+      await widget.settings.update(provider: 'server');
+    }
+    if (!mounted) return;
+    setState(() {
       _keyController.text = widget.settings.apiKey;
       _modelController.text = widget.settings.model;
       _customModel =
@@ -287,11 +324,13 @@ class _ProviderSettingsPageState extends State<ProviderSettingsPage> {
             ),
           ),
         GroupedSection(
-          header: 'Provider',
-          footer: 'In mainland China choose Qwen, Doubao or GLM — the '
-              'others need a VPN. 中国大陆用户请选择国内提供商。',
+          header: 'API key · pay per photo',
+          footer: 'The key lives on this phone; every photo is a metered '
+              'API call billed by the vendor. In mainland China choose '
+              'Qwen, Doubao or GLM — the others need a VPN. '
+              '中国大陆用户请选择国内提供商。',
           children: [
-            for (final (id, name, note) in kProviderChoices)
+            for (final (id, name, note) in kApiKeyChoices)
               GroupedRow(
                 key: Key('providerChoice-$id'),
                 title: name,
@@ -304,16 +343,32 @@ class _ProviderSettingsPageState extends State<ProviderSettingsPage> {
               ),
           ],
         ),
+        GroupedSection(
+          header: 'Subscription · via your server',
+          footer: 'Your own cloud machine signs in to ONE flat-rate plan '
+              'and analyses photos under it — each photo costs nothing '
+              'extra. The plan credentials stay on that machine; this '
+              'phone holds only your server’s upload key.',
+          children: [
+            for (final (backend, name, note) in kPlanChoices)
+              GroupedRow(
+                key: Key('planChoice-$backend'),
+                title: name,
+                value: note,
+                showChevron: false,
+                trailing: settings.provider == 'server' &&
+                        settings.serverBackend == backend
+                    ? Icon(Icons.check, size: 20, color: scheme.primary)
+                    : const SizedBox(width: 20),
+                onTap: () => _selectPlan(backend),
+              ),
+          ],
+        ),
         if (_isServerProvider)
           GroupedSection(
             header: 'Your server',
-            footer: 'Your server is your own machine in the cloud (the '
-                'address above) — not this phone. It signs in to ONE '
-                'flat-rate subscription and analyses photos under it, so '
-                'each photo costs nothing extra: your Claude plan, a GLM '
-                'Coding Plan (¥49/mo), or a Doubao Agent Plan (¥40/mo). '
-                'The plan credentials stay on that machine; this phone '
-                'holds only the upload key.',
+            footer: 'The cloud machine that holds your plan sign-in and '
+                'runs the analysis — not this phone.',
             children: [
               _cellField(TextField(
                 key: const Key('serverUrlField'),
@@ -329,20 +384,6 @@ class _ProviderSettingsPageState extends State<ProviderSettingsPage> {
                     settings.update(serverBaseUrl: v.trim()),
                 onTapOutside: (_) => settings.update(
                     serverBaseUrl: _serverUrlController.text.trim()),
-              )),
-              _cellField(SegmentedButton<String>(
-                key: const Key('serverBackendSelector'),
-                segments: const [
-                  ButtonSegment(value: 'claude', label: Text('Claude')),
-                  ButtonSegment(value: 'glm', label: Text('GLM')),
-                  ButtonSegment(value: 'doubao', label: Text('Doubao')),
-                ],
-                selected: {settings.serverBackend},
-                onSelectionChanged: (sel) async {
-                  HapticFeedback.selectionClick();
-                  await settings.update(serverBackend: sel.single);
-                  if (mounted) setState(() {});
-                },
               )),
             ],
           ),

@@ -80,21 +80,28 @@ void main() {
       requestPhotoPermission: () async => true,
     )));
     await openProviderPage(tester);
-    expect(find.byKey(const Key('serverBackendSelector')), findsOneWidget);
+    // The segmented control became the Subscription checklist (user-
+    // designed two-type IA, 2026-08-02): picking a plan row selects both
+    // the server provider AND the backend.
+    expect(find.byKey(const Key('planChoice-claude')), findsOneWidget);
     expect(settings.serverBackend, 'claude');
 
-    await tester.tap(find.text('GLM'));
+    await tester.tap(find.byKey(const Key('planChoice-glm')));
     await tester.pumpAndSettle();
     expect(settings.serverBackend, 'glm',
         reason: 'the tap must reach SettingsStore.update(serverBackend:)');
+    expect(settings.provider, 'server');
 
-    await tester.tap(find.text('Doubao'));
+    await tester.tap(find.byKey(const Key('planChoice-doubao')));
     await tester.pumpAndSettle();
     expect(settings.serverBackend, 'doubao');
   });
 
-  testWidgets('no backend selector away from the server provider',
-      (tester) async {
+  testWidgets('picking a plan from an API provider switches to the server '
+      'in one tap', (tester) async {
+    tester.view.physicalSize = const Size(800, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
     final settings = FakeSettings(apiKey: 'k'); // gemini default
     await tester.pumpWidget(_wrap(SettingsScreen(
       settings: settings,
@@ -103,7 +110,14 @@ void main() {
       requestPhotoPermission: () async => true,
     )));
     await openProviderPage(tester);
-    expect(find.byKey(const Key('serverBackendSelector')), findsNothing);
+    expect(find.byKey(const Key('serverBackendSelector')), findsNothing,
+        reason: 'the segmented control is gone — plans are first-class rows');
+    await tester.ensureVisible(find.byKey(const Key('planChoice-doubao')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('planChoice-doubao')));
+    await tester.pumpAndSettle();
+    expect(settings.provider, 'server');
+    expect(settings.serverBackend, 'doubao');
   });
 
   testWidgets('model is PICKED from a curated list, not typed', (tester) async {

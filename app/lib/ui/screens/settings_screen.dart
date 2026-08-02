@@ -368,7 +368,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               icon: Icons.auto_awesome,
               iconColor: theme.colorScheme.primary,
               title: 'AI Provider',
-              value: providerLabel(widget.settings.provider),
+              value: providerDisplayLabel(widget.settings.provider,
+                  widget.settings.serverBackend),
               onTap: () async {
                 await Navigator.of(context).push(MaterialPageRoute(
                   builder: (_) => ProviderSettingsPage(
