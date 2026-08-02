@@ -10,6 +10,7 @@ import '../../core/contracts.dart';
 import 'dart:typed_data';
 
 import '../format.dart';
+import 'macro_chart.dart' show MacroPalette;
 import 'meal_thumb.dart';
 
 class MealCard extends StatelessWidget {
@@ -78,15 +79,21 @@ class MealCard extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 8),
+            // Macro chips carry their FIXED identity hues (research: Apple's
+            // color discipline — the same metric wears the same color on
+            // every screen; grey chips made Today color-blind).
             Wrap(
               spacing: 6,
               runSpacing: 4,
               children: [
                 _chip(context, '~${displayTotalCalories(a)} kcal',
                     emphasized: true),
-                _chip(context, 'P: ${displayMacro(a, 'total_protein_g')}g'),
-                _chip(context, 'C: ${displayMacro(a, 'total_carbs_g')}g'),
-                _chip(context, 'F: ${displayMacro(a, 'total_fat_g')}g'),
+                _chip(context, 'P: ${displayMacro(a, 'total_protein_g')}g',
+                    tint: MacroPalette.of(context).protein),
+                _chip(context, 'C: ${displayMacro(a, 'total_carbs_g')}g',
+                    tint: MacroPalette.of(context).carbs),
+                _chip(context, 'F: ${displayMacro(a, 'total_fat_g')}g',
+                    tint: MacroPalette.of(context).fat),
               ],
             ),
             if (showItems && items.isNotEmpty) ...[
@@ -109,12 +116,20 @@ class MealCard extends StatelessWidget {
     );
   }
 
-  Widget _chip(BuildContext context, String label, {bool emphasized = false}) {
+  Widget _chip(BuildContext context, String label,
+      {bool emphasized = false, Color? tint}) {
     final scheme = Theme.of(context).colorScheme;
+    // Identity never rests on colour ALONE (chart rule): the P/C/F letter
+    // stays in the label; the tint is reinforcement.
+    final bg = emphasized
+        ? scheme.primaryContainer
+        : tint != null
+            ? tint.withValues(alpha: 0.14)
+            : scheme.surfaceContainerHighest;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
-        color: emphasized ? scheme.primaryContainer : scheme.surfaceContainerHighest,
+        color: bg,
         borderRadius: BorderRadius.circular(12),
       ),
       child: Text(label, style: Theme.of(context).textTheme.labelSmall),

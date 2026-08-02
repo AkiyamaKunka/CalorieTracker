@@ -52,7 +52,9 @@ void main() {
 
     expect(find.textContaining('latte'), findsOneWidget,
         reason: 'the list must not keep showing pre-save data');
-    expect(find.textContaining('345'), findsOneWidget); // totals recomputed
+    // totals recomputed — the redesigned hero shows the number in the ring
+    // center AND the headline, so "at least one" is the durable assertion.
+    expect(find.textContaining('345'), findsWidgets);
   });
 
   testWidgets('re-selecting the Today tab re-queries', (tester) async {

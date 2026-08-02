@@ -69,6 +69,64 @@ class HistoryScreenState extends State<HistoryScreen> {
     if (mounted) await reload();
   }
 
+  num _maxDayKcal = 0;
+
+  /// One day: value + a thin magnitude track beneath it (research: a
+  /// number-only list hides the week's shape; MacroFactor/Cronometer put a
+  /// visual scale in every row). Gap days stay dimmed text-only.
+  Widget _dayRow(BuildContext context, String date) {
+    final theme = Theme.of(context);
+    final has = _perDay.containsKey(date);
+    final kcal = _perDay[date];
+    final frac = (!has || _maxDayKcal <= 0)
+        ? 0.0
+        : (kcal! / _maxDayKcal).clamp(0.0, 1.0).toDouble();
+    return ListTile(
+      key: Key('historyDay$date'),
+      dense: true,
+      title: Text(friendlyHistoryDay(date),
+          style: has
+              ? null
+              : TextStyle(color: theme.colorScheme.onSurfaceVariant)),
+      subtitle: has
+          ? Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(2),
+                child: SizedBox(
+                  height: 4,
+                  child: LayoutBuilder(
+                    builder: (context, c) => Stack(children: [
+                      Container(
+                          width: c.maxWidth,
+                          color: theme.colorScheme.surfaceContainerHighest),
+                      Container(
+                          width: frac * c.maxWidth,
+                          color: theme.colorScheme.primary
+                              .withValues(alpha: 0.55)),
+                    ]),
+                  ),
+                ),
+              ),
+            )
+          : null,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          has
+              ? Text('~${formatKcal(kcal!)} kcal')
+              : Text('no meals logged',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+          const SizedBox(width: 4),
+          const Icon(Icons.chevron_right, size: 18),
+        ],
+      ),
+      // Gap rows open the day too — its + FAB is the remedy.
+      onTap: () => _openDay(date),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loading) return const Center(child: CircularProgressIndicator());
@@ -121,6 +179,8 @@ class HistoryScreenState extends State<HistoryScreen> {
     // Average over days that have data, int truncation (spec §5.3).
     final sum = _perDay.values.fold<num>(0, (a, b) => a + b);
     final avg = (sum / _perDay.length).truncate();
+    _maxDayKcal = _perDay.values
+        .fold<num>(0, (a, b) => a > b ? a : b); // row magnitude track scale
     return RefreshIndicator(
       onRefresh: reload,
       child: ListView(
@@ -148,35 +208,7 @@ class HistoryScreenState extends State<HistoryScreen> {
             ),
           ),
           for (final date in dates)
-            ListTile(
-              key: Key('historyDay$date'),
-              dense: true,
-              title: Text(friendlyHistoryDay(date),
-                  style: _perDay.containsKey(date)
-                      ? null
-                      : TextStyle(
-                          color:
-                              Theme.of(context).colorScheme.onSurfaceVariant)),
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _perDay.containsKey(date)
-                      ? Text('~${formatKcal(_perDay[date]!)} kcal')
-                      : Text('no meals logged',
-                          style: Theme.of(context)
-                              .textTheme
-                              .bodySmall
-                              ?.copyWith(
-                                  color: Theme.of(context)
-                                      .colorScheme
-                                      .onSurfaceVariant)),
-                  const SizedBox(width: 4),
-                  const Icon(Icons.chevron_right, size: 18),
-                ],
-              ),
-              // Gap rows open the day too — its + FAB is the remedy.
-              onTap: () => _openDay(date),
-            ),
+            _dayRow(context, date),
         ],
       ),
     );

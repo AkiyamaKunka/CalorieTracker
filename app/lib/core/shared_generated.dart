@@ -38,19 +38,36 @@ order or of consumption is not clear, answer {"is_food": false}.
 If the image contains NO food, meal, or beverage, respond with exactly:
 {"is_food": false}
 
+PORTION SIZE — the main source of error. Estimate the REAL size of each
+dish before estimating calories:
+  - Look for reference objects of known size and calibrate against them:
+    chopsticks (~24 cm), a spoon (~15 cm), a hand or fingers (palm ~8-9 cm
+    across), a standard rice bowl (~11 cm across), a dinner plate (~26 cm),
+    a beverage can (330 mL), a phone. Name the reference you used in
+    confidence_note.
+  - Phone close-ups EXAGGERATE the nearest food: a bowl filling the frame
+    is usually a normal bowl, not a huge one. With no reference object in
+    frame, assume STANDARD single-serving portions rather than scaling up
+    from how large the food looks.
+  - State the assumed weight or volume of each item IN ITS NAME, e.g.
+    "Steamed rice (~150 g)", "Braised pork (~120 g)", "Soy milk (~250 mL)".
+    The user checks these numbers and corrects the ones that are wrong —
+    a visible wrong assumption gets fixed, an invisible one becomes a
+    silently wrong day.
+
 If the image DOES contain food, respond with a JSON object like this:
 {
   "is_food": true,
   "food_items": [
-    {"name": "Grilled Chicken Breast", "estimated_calories": 280, "protein_g": 43, "carbs_g": 0, "fat_g": 12},
-    {"name": "Caesar Salad", "estimated_calories": 170, "protein_g": 7, "carbs_g": 12, "fat_g": 10}
+    {"name": "Grilled chicken breast (~140 g)", "estimated_calories": 280, "protein_g": 43, "carbs_g": 0, "fat_g": 12},
+    {"name": "Caesar salad (~180 g)", "estimated_calories": 170, "protein_g": 7, "carbs_g": 12, "fat_g": 10}
   ],
   "total_calories": 450,
   "total_protein_g": 50,
   "total_carbs_g": 12,
   "total_fat_g": 22,
   "meal_description": "Grilled chicken breast with Caesar salad",
-  "confidence_note": "Portions appear to be standard restaurant serving sizes"
+  "confidence_note": "Calibrated against the chopsticks next to the plate; moderate confidence"
 }
 
 Rules:
@@ -60,7 +77,8 @@ Rules:
 - Include total_protein_g, total_carbs_g, total_fat_g as sums
 - Be as specific as possible about the food items
 - If you can see the portion size, adjust your estimate accordingly
-- Include a brief confidence note about the estimate uncertainty
+- Include a brief confidence note: name the scale reference you calibrated
+  against, or say no reference was visible and standard portions were assumed
 ''';
 
 const String sharedTextHandlerTemplate = '''

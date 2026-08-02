@@ -267,7 +267,37 @@ class _AddPhotoScreenState extends State<AddPhotoScreen> {
               if (assets.isEmpty) {
                 return const Center(child: Text('No recent photos found.'));
               }
-              return GridView.builder(
+              return Column(children: [
+                // Portion accuracy is the model's weakest link, and a scale
+                // reference in frame is the cheapest fix the USER controls.
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+                  child: Row(
+                    key: const Key('scaleReferenceTip'),
+                    children: [
+                      Icon(Icons.straighten,
+                          size: 16,
+                          color:
+                              Theme.of(context).colorScheme.onSurfaceVariant),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Tip: chopsticks or a hand in the shot helps the '
+                          'AI judge portion sizes.',
+                          style: Theme.of(context)
+                              .textTheme
+                              .bodySmall
+                              ?.copyWith(
+                                  color: Theme.of(context)
+                                      .colorScheme
+                                      .onSurfaceVariant),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                    child: GridView.builder(
                 padding: const EdgeInsets.all(8),
                 gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                     crossAxisCount: 3, crossAxisSpacing: 4, mainAxisSpacing: 4),
@@ -293,7 +323,8 @@ class _AddPhotoScreenState extends State<AddPhotoScreen> {
                     },
                   ),
                 ),
-              );
+              )),
+              ]);
             },
           ),
           if (_analyzing)

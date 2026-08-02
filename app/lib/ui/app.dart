@@ -22,16 +22,51 @@ class CalorieTrackerApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     const seed = Color(0xFF3E7D4F);
+    // Design pass 2026-08-02 (10-app research, scratchpad/uiux_direction.md):
+    // number-forward typography (heavy tabular numerals — the data IS the
+    // interface), quiet tonal cards with a 16 radius, zero elevation. The
+    // restraint is deliberate: the researched redesign backlashes (MFP 3.2→1.5
+    // stars, Yazio "app for children") all came from decoration and added
+    // friction, never from calm.
+    ThemeData themed(Brightness brightness) {
+      final scheme =
+          ColorScheme.fromSeed(seedColor: seed, brightness: brightness);
+      final base = ThemeData(colorScheme: scheme);
+      final text = base.textTheme;
+      TextStyle? nums(TextStyle? t, {FontWeight w = FontWeight.w700}) =>
+          t?.copyWith(
+              fontWeight: w,
+              fontFeatures: const [FontFeature.tabularFigures()]);
+      return base.copyWith(
+        textTheme: text.copyWith(
+          displaySmall: nums(text.displaySmall),
+          headlineMedium: nums(text.headlineMedium),
+          headlineSmall: nums(text.headlineSmall),
+          titleLarge: text.titleLarge?.copyWith(fontWeight: FontWeight.w600),
+        ),
+        cardTheme: base.cardTheme.copyWith(
+          elevation: 0,
+          color: scheme.surfaceContainerLow,
+          shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16)),
+        ),
+        floatingActionButtonTheme: FloatingActionButtonThemeData(
+          elevation: 1,
+          shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(18)),
+        ),
+        navigationBarTheme: NavigationBarThemeData(
+          height: 72,
+          indicatorColor: scheme.secondaryContainer,
+        ),
+      );
+    }
+
     return MaterialApp(
       title: 'CalorieTracker',
       scaffoldMessengerKey: messengerKey,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: seed),
-      ),
-      darkTheme: ThemeData(
-        colorScheme:
-            ColorScheme.fromSeed(seedColor: seed, brightness: Brightness.dark),
-      ),
+      theme: themed(Brightness.light),
+      darkTheme: themed(Brightness.dark),
       themeMode: ThemeMode.system,
       home: HomeShell(services: services),
     );

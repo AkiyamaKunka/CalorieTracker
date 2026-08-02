@@ -9,6 +9,8 @@ import 'package:flutter/material.dart';
 import '../../core/contracts.dart';
 import '../../services/garmin_client.dart';
 import '../format.dart';
+import '../widgets/calorie_ring.dart';
+import '../widgets/macro_chart.dart' show MacroPalette;
 import '../meal_thumbs.dart';
 import '../widgets/meal_card.dart';
 import 'meal_editor_screen.dart';
@@ -191,39 +193,82 @@ class TodayScreenState extends State<TodayScreen> {
 
   Widget _totalsHeader(BuildContext context, List<Meal> foodMeals) {
     final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final palette = MacroPalette.of(context);
     final totals = todayTotals(foodMeals); // Σ safeNumber, spec §5.1
     final typical = typicalDayKcal(_priorDayTotals);
+    final burn = _garmin?.activeCalories ?? 0;
     String? typicalLine;
     if (typical != null) {
       final total = totals.cal.round();
-      // Headroom vs above-typical wording, spec §5.1.
+      // Headroom vs above-typical wording, spec §5.1 — the string is
+      // parity-pinned; the ring VISUALIZES it, the caption still states it.
       typicalLine = total <= typical
           ? 'Typical day: ~${formatKcal(typical)} kcal · '
               '~${formatKcal(typical - total)} kcal headroom'
           : 'Typical day: ~${formatKcal(typical)} kcal · '
               '~${formatKcal(total - typical)} kcal above typical';
     }
+    // Hero layout (research: MFP arithmetic × Apple ring — see
+    // uiux_direction.md): ring answers "how am I doing", the rows beside it
+    // show the arithmetic that produced the answer, macro trio beneath.
     return Card(
       margin: const EdgeInsets.all(12),
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('${formatKcal(totals.cal)} kcal',
-                key: const Key('todayTotalKcal'),
-                style: theme.textTheme.headlineMedium),
-            const SizedBox(height: 4),
-            Text(
-              'Protein: ${totals.protein}g · Carbs: ${totals.carbs}g · '
-              'Fat: ${totals.fat}g · Meals: ${totals.meals}',
-              style: theme.textTheme.bodyMedium,
+            Row(
+              children: [
+                CalorieRing(eatenKcal: totals.cal, typicalKcal: typical),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('${formatKcal(totals.cal)} kcal',
+                          key: const Key('todayTotalKcal'),
+                          style: theme.textTheme.headlineSmall),
+                      Text(
+                          '${totals.meals} meal${totals.meals == 1 ? '' : 's'} today',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                              color: scheme.onSurfaceVariant)),
+                      const SizedBox(height: 8),
+                      if (typical != null)
+                        ArithmeticRow(
+                            label: 'Typical',
+                            value: '~${formatKcal(typical)}',
+                            dot: scheme.outlineVariant),
+                      ArithmeticRow(
+                          label: 'Eaten',
+                          value: formatKcal(totals.cal),
+                          dot: scheme.primary),
+                      if (burn > 0)
+                        ArithmeticRow(
+                            label: 'Burn',
+                            value: '−${formatKcal(burn)}',
+                            dot: scheme.tertiary),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            MacroTrio(
+              proteinG: totals.protein,
+              carbsG: totals.carbs,
+              fatG: totals.fat,
+              proteinColor: palette.protein,
+              carbsColor: palette.carbs,
+              fatColor: palette.fat,
             ),
             if (typicalLine != null) ...[
-              const SizedBox(height: 6),
+              const SizedBox(height: 10),
               Text(typicalLine,
                   key: const Key('typicalDayLine'),
-                  style: theme.textTheme.bodySmall),
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: scheme.onSurfaceVariant)),
             ],
             if (_garmin != null && _garmin!.activeCalories > 0) ...[
               const SizedBox(height: 4),
@@ -231,7 +276,8 @@ class TodayScreenState extends State<TodayScreen> {
                 'Active burn: ~${formatKcal(_garmin!.activeCalories)} kcal '
                 '(Garmin) · net ~${formatKcal(totals.cal - _garmin!.activeCalories)} kcal',
                 key: const Key('garminBurnLine'),
-                style: theme.textTheme.bodySmall,
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: scheme.onSurfaceVariant),
               ),
             ],
           ],
