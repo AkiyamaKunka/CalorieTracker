@@ -15,6 +15,7 @@ void main() {
       'meals',
       'photo_ingestions',
       'body_weight',
+      'body_measurements', // app-only, spec §9 (2026-08-02)
       'workouts',
       'activities',
       'fitness_profile',
@@ -57,6 +58,7 @@ void main() {
       'meals',
       'photo_ingestions',
       'body_weight',
+      'body_measurements',
       'workouts',
       'activities',
       'fitness_profile',

@@ -345,11 +345,13 @@ class SqfliteMealsDao implements MealsDao {
   // ------------------------------------------------------------- fitness
 
   @override
-  Future<void> saveBodyWeight(String date, double kg) async {
+  Future<void> saveBodyWeight(String date, double kg,
+      {String source = 'nl'}) async {
     // Spec §7.1/§4.7: one canonical weigh-in per user-local day; re-log
     // overwrites via upsert ON CONFLICT(chat_id, date) keeping the row id
-    // (database.py:744-762). Source 'nl' — the NL executor is the only
-    // phase-1 writer (spec §4.7 app note).
+    // (database.py:744-762). Source: 'nl' from the executor (spec §4.7),
+    // 'manual' from the Body page (§9 — the server's weigh-ins only ever
+    // arrive through chat).
     await _db.rawInsert(
       '''
 INSERT INTO body_weight (chat_id, date, weight_kg, source, note, logged_at)
@@ -359,8 +361,75 @@ ON CONFLICT(chat_id, date) DO UPDATE SET
     source = excluded.source,
     logged_at = excluded.logged_at
 ''',
-      [localChatId, date, kg, 'nl', _clock().toIso8601String()],
+      [localChatId, date, kg, source, _clock().toIso8601String()],
     );
+  }
+
+  @override
+  Future<List<WeightEntry>> listBodyWeights(
+      String startDate, String endDate) async {
+    final rows = await _db.query('body_weight',
+        where: 'chat_id = ? AND date >= ? AND date <= ?',
+        whereArgs: [localChatId, startDate, endDate],
+        orderBy: 'date ASC');
+    return [
+      for (final r in rows)
+        WeightEntry(r['date'] as String, (r['weight_kg'] as num).toDouble(),
+            source: (r['source'] as String?) ?? 'manual'),
+    ];
+  }
+
+  @override
+  Future<void> deleteBodyWeight(String date) async {
+    await _db.delete('body_weight',
+        where: 'chat_id = ? AND date = ?', whereArgs: [localChatId, date]);
+  }
+
+  @override
+  Future<void> saveBodyMeasurements(String date,
+      {double? waistCm, double? chestCm, double? hipCm}) async {
+    // Full-row upsert, nulls included: the sheet is prefilled with the
+    // existing row, so this is last-write-wins on the whole day (see the
+    // contract doc). A row with nothing in it is a delete, not a save —
+    // empty rows would render as blank history entries.
+    if (waistCm == null && chestCm == null && hipCm == null) {
+      await deleteBodyMeasurements(date);
+      return;
+    }
+    await _db.rawInsert(
+      '''
+INSERT INTO body_measurements (chat_id, date, waist_cm, chest_cm, hip_cm, note, logged_at)
+VALUES (?, ?, ?, ?, ?, '', ?)
+ON CONFLICT(chat_id, date) DO UPDATE SET
+    waist_cm = excluded.waist_cm,
+    chest_cm = excluded.chest_cm,
+    hip_cm = excluded.hip_cm,
+    logged_at = excluded.logged_at
+''',
+      [localChatId, date, waistCm, chestCm, hipCm, _clock().toIso8601String()],
+    );
+  }
+
+  @override
+  Future<List<BodyMeasurements>> listBodyMeasurements(
+      String startDate, String endDate) async {
+    final rows = await _db.query('body_measurements',
+        where: 'chat_id = ? AND date >= ? AND date <= ?',
+        whereArgs: [localChatId, startDate, endDate],
+        orderBy: 'date ASC');
+    return [
+      for (final r in rows)
+        BodyMeasurements(r['date'] as String,
+            waistCm: (r['waist_cm'] as num?)?.toDouble(),
+            chestCm: (r['chest_cm'] as num?)?.toDouble(),
+            hipCm: (r['hip_cm'] as num?)?.toDouble()),
+    ];
+  }
+
+  @override
+  Future<void> deleteBodyMeasurements(String date) async {
+    await _db.delete('body_measurements',
+        where: 'chat_id = ? AND date = ?', whereArgs: [localChatId, date]);
   }
 
   @override
@@ -528,6 +597,11 @@ ON CONFLICT(chat_id, date) DO UPDATE SET
           [row['chat_id'], row['image_hash']]
         ),
       'body_weight' => (
+          'chat_id = ? AND date = ?',
+          [row['chat_id'], row['date']]
+        ),
+      // Same one-row-per-day identity as body_weight.
+      'body_measurements' => (
           'chat_id = ? AND date = ?',
           [row['chat_id'], row['date']]
         ),

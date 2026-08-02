@@ -11,8 +11,9 @@ import 'package:sqflite/sqflite.dart';
 /// v1: the full spec §2.1 table set. v2: meal_thumbs (app-only, spec §9 —
 /// the server never stores thumbnails; the app keeps a tiny JPEG per photo
 /// meal so history can show the picture even after the gallery original is
-/// gone).
-const int kSchemaVersion = 2;
+/// gone). v3: body_measurements (app-only, spec §9 — waist/chest/hip for
+/// the Body page; the server tracks weight only).
+const int kSchemaVersion = 3;
 
 const String kDatabaseFileName = 'calorie_tracker.db';
 
@@ -58,6 +59,21 @@ CREATE TABLE IF NOT EXISTS body_weight (
     date TEXT NOT NULL,
     weight_kg REAL NOT NULL,
     source TEXT DEFAULT 'manual',
+    note TEXT DEFAULT '',
+    logged_at TEXT NOT NULL,
+    UNIQUE(chat_id, date)
+)''',
+  // App-only (spec §9): girth measurements for the Body page. Same
+  // one-canonical-row-per-day shape as body_weight; columns nullable so a
+  // day can carry any subset. The server has no equivalent table.
+  '''
+CREATE TABLE IF NOT EXISTS body_measurements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    waist_cm REAL,
+    chest_cm REAL,
+    hip_cm REAL,
     note TEXT DEFAULT '',
     logged_at TEXT NOT NULL,
     UNIQUE(chat_id, date)
@@ -136,6 +152,7 @@ const List<String> kExportTables = [
   'meals',
   'photo_ingestions',
   'body_weight',
+  'body_measurements',
   'workouts',
   'activities',
   'fitness_profile',

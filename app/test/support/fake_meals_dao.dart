@@ -40,6 +40,8 @@ class BaseFakeDao implements MealsDao {
   final List<(int, Map<String, dynamic>)> updates = [];
   final List<int> deletedIds = [];
   final List<(String, double)> savedWeights = [];
+  final Map<String, WeightEntry> weightsByDate = {};
+  final Map<String, BodyMeasurements> measurementsByDate = {};
   final List<Map<String, dynamic>> savedActivities = [];
 
   /// Knobs.
@@ -201,8 +203,53 @@ class BaseFakeDao implements MealsDao {
   Future<Uint8List?> mealThumb(int mealId) async => thumbs[mealId];
 
   @override
-  Future<void> saveBodyWeight(String date, double kg) async {
+  Future<void> saveBodyWeight(String date, double kg,
+      {String source = 'nl'}) async {
     savedWeights.add((date, kg));
+    weightsByDate[date] = WeightEntry(date, kg, source: source);
+  }
+
+  @override
+  Future<List<WeightEntry>> listBodyWeights(
+      String startDate, String endDate) async {
+    final out = weightsByDate.values
+        .where((w) =>
+            w.date.compareTo(startDate) >= 0 && w.date.compareTo(endDate) <= 0)
+        .toList()
+      ..sort((a, b) => a.date.compareTo(b.date));
+    return out;
+  }
+
+  @override
+  Future<void> deleteBodyWeight(String date) async {
+    weightsByDate.remove(date);
+  }
+
+  @override
+  Future<void> saveBodyMeasurements(String date,
+      {double? waistCm, double? chestCm, double? hipCm}) async {
+    if (waistCm == null && chestCm == null && hipCm == null) {
+      measurementsByDate.remove(date);
+      return;
+    }
+    measurementsByDate[date] = BodyMeasurements(date,
+        waistCm: waistCm, chestCm: chestCm, hipCm: hipCm);
+  }
+
+  @override
+  Future<List<BodyMeasurements>> listBodyMeasurements(
+      String startDate, String endDate) async {
+    final out = measurementsByDate.values
+        .where((m) =>
+            m.date.compareTo(startDate) >= 0 && m.date.compareTo(endDate) <= 0)
+        .toList()
+      ..sort((a, b) => a.date.compareTo(b.date));
+    return out;
+  }
+
+  @override
+  Future<void> deleteBodyMeasurements(String date) async {
+    measurementsByDate.remove(date);
   }
 
   @override

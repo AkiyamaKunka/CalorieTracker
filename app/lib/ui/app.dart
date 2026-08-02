@@ -7,6 +7,7 @@ import 'dart:async' show unawaited;
 import 'package:flutter/material.dart';
 
 import 'screens/add_flow.dart';
+import 'screens/body_screen.dart';
 import 'screens/history_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/today_screen.dart';
@@ -53,6 +54,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   // (bug found by the e2e flow: meals logged after launch never appeared).
   final GlobalKey<HistoryScreenState> _historyKey =
       GlobalKey<HistoryScreenState>();
+  final GlobalKey<BodyScreenState> _bodyKey = GlobalKey<BodyScreenState>();
 
   @override
   void initState() {
@@ -60,7 +62,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     mealsChangedSignal.addListener(_onMealsChanged);
     // Onboarding: with no API key yet, land on Settings first.
-    _index = widget.services.settings.apiKey.trim().isEmpty ? 2 : 0;
+    _index = widget.services.settings.apiKey.trim().isEmpty ? 3 : 0;
   }
 
   @override
@@ -111,7 +113,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     final s = widget.services;
     return Scaffold(
       appBar: AppBar(
-        title: Text(const ['Today', 'History', 'Settings'][_index]),
+        title: Text(const ['Today', 'History', 'Body', 'Settings'][_index]),
       ),
       body: IndexedStack(
         index: _index,
@@ -127,6 +129,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
               onAdd: () => openAddFlow(context, s,
                   onChanged: () async => _todayKey.currentState?.reload())),
           HistoryScreen(key: _historyKey, dao: s.dao, thumbs: s.thumbs),
+          BodyScreen(key: _bodyKey, dao: s.dao),
           SettingsScreen(
             settings: s.settings,
             analyzer: s.analyzer,
@@ -155,6 +158,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           // (real report, 2026-07-26).
           if (i == 0) _todayKey.currentState?.reload();
           if (i == 1) _historyKey.currentState?.reload();
+          if (i == 2) _bodyKey.currentState?.reload();
         },
         destinations: const [
           NavigationDestination(
@@ -163,6 +167,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
               label: 'Today'),
           NavigationDestination(
               icon: Icon(Icons.history), label: 'History'),
+          NavigationDestination(
+              icon: Icon(Icons.monitor_weight_outlined),
+              selectedIcon: Icon(Icons.monitor_weight),
+              label: 'Body'),
           NavigationDestination(
               icon: Icon(Icons.settings_outlined),
               selectedIcon: Icon(Icons.settings),

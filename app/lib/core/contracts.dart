@@ -110,7 +110,25 @@ abstract class MealsDao {
   Future<void> saveMealThumb(int mealId, Uint8List jpeg);
   Future<Uint8List?> mealThumb(int mealId);
   // Fitness (phase 1: weight + activity only)
-  Future<void> saveBodyWeight(String date, double kg);
+  /// One canonical weigh-in per user-local day (upsert on chat_id+date,
+  /// spec §7.1). [source] is 'nl' for executor writes, 'manual' for the
+  /// Body page.
+  Future<void> saveBodyWeight(String date, double kg, {String source});
+
+  /// Weigh-ins with [startDate] <= date <= [endDate], ascending — the
+  /// same window shape as the server's get_body_weights.
+  Future<List<WeightEntry>> listBodyWeights(String startDate, String endDate);
+  Future<void> deleteBodyWeight(String date);
+
+  /// App-only (spec §9): full-row upsert of the day's girth measurements.
+  /// Null means "no value for this metric that day" and OVERWRITES — the
+  /// Body page's sheet is prefilled with the existing row, so unchanged
+  /// fields carry through and a cleared field really clears.
+  Future<void> saveBodyMeasurements(String date,
+      {double? waistCm, double? chestCm, double? hipCm});
+  Future<List<BodyMeasurements>> listBodyMeasurements(
+      String startDate, String endDate);
+  Future<void> deleteBodyMeasurements(String date);
   Future<void> saveActivity(String date,
       {num? activeCalories, int? steps, double? distanceKm});
   Future<String> exportJson(); // full data export (spec §8)
@@ -120,6 +138,26 @@ abstract class MealsDao {
   /// result reports what happened. Throws [FormatException] on a payload
   /// that is not a CalorieTracker export.
   Future<ImportSummary> importJson(String json);
+}
+
+/// One weigh-in row (body_weight): a date and the kilograms recorded for it.
+class WeightEntry {
+  const WeightEntry(this.date, this.kg, {this.source = 'manual'});
+  final String date; // YYYY-MM-DD
+  final double kg;
+  final String source;
+}
+
+/// One day's girth measurements (body_measurements, app-only spec §9).
+/// Any subset of the three may be present.
+class BodyMeasurements {
+  const BodyMeasurements(this.date, {this.waistCm, this.chestCm, this.hipCm});
+  final String date; // YYYY-MM-DD
+  final double? waistCm;
+  final double? chestCm;
+  final double? hipCm;
+
+  bool get isEmpty => waistCm == null && chestCm == null && hipCm == null;
 }
 
 /// Outcome of [MealsDao.importJson] — per-table added/skipped counts so the
