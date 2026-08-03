@@ -33,8 +33,11 @@ order or of consumption is not clear, answer {"is_food": false}.
 If the image contains NO food, meal, or beverage, respond with exactly:
 {"is_food": false}
 
-PORTION SIZE — the main source of error. Estimate the REAL size of each
-dish before estimating calories:
+<<ESTIMATION_PRIORITY>>
+
+PORTION SIZE (the Priority-4 fallback) — the main source of error when no
+printed evidence exists. Estimate the REAL size of each dish before
+estimating calories:
   - Look for reference objects of known size and calibrate against them:
     chopsticks (~24 cm), a spoon (~15 cm), a hand or fingers (palm ~8-9 cm
     across), a standard rice bowl (~11 cm across), a dinner plate (~26 cm),

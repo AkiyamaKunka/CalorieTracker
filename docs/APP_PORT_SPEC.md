@@ -28,7 +28,16 @@ Historical note: the server optionally routes photos through a Claude CLI first
 
 ### 1.1 FOOD_DETECTION_PROMPT (`config.py:47-81`)
 
-Send **verbatim** (subject only to §1.3 dietary-profile append):
+Send **verbatim** (subject only to §1.3 dietary-profile append). Since
+2026-08-03 the canonical text is COMPOSED at sync time: `shared/prompts/
+food_detection_prompt.txt` carries an `<<ESTIMATION_PRIORITY>>` placeholder
+that `scripts/sync_shared.py` fills from `shared/prompts/
+estimation_priority.txt` (the editable calorie-evidence ladder: nutrition
+label > printed weight > brand data > visual estimate; '#' lines are
+docs, stripped). Both generated bindings therefore already contain the
+ladder — the verbatim rule applies to the COMPOSED text, and the snapshot
+below predates the ladder (`tests/test_estimation_priority.py` +
+`app/test/shared/estimation_priority_test.dart` pin the composition):
 
 ```
 Analyze this photo and determine if it contains food, a meal, or a beverage.

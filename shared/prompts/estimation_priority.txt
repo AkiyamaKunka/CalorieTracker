@@ -1,0 +1,46 @@
+# CALORIE-ESTIMATION PRIORITY LADDER (the "skill" file)
+# ======================================================
+# This file is the single source of truth for HOW the model should decide
+# a food's calories, in priority order. It is spliced into the photo
+# prompt at the <<ESTIMATION_PRIORITY>> placeholder by
+# scripts/sync_shared.py, which regenerates BOTH platform bindings
+# (shared_generated.py + app/lib/core/shared_generated.dart), so one edit
+# here reaches the app's six direct providers AND the server CLI path.
+#
+# TO ADD A PRIORITY: insert a numbered entry in the ladder below (renumber
+# the fallback so VISUAL ESTIMATION stays LAST), then run:
+#   python3 scripts/sync_shared.py
+# and commit this file together with both regenerated bindings.
+# Lines starting with '#' are comments — the sync strips them; everything
+# else is sent to the model verbatim.
+#
+CALORIE EVIDENCE — decide each item's calories from the BEST evidence in
+the photo, in this strict priority order (highest first). Printed truth
+always beats estimation; never eyeball a number the photo already states.
+
+Priority 1 — A NUTRITION LABEL in the photo (营养成分表 / Nutrition
+Facts): read energy and macros directly from it. Respect the serving
+size and the number of servings actually consumed. Chinese labels state
+energy in kJ per 100 g — convert (kcal = kJ ÷ 4.184) and scale by the
+package's net weight (净含量), not by 100 g.
+
+Priority 2 — A PRINTED WEIGHT for the food (supermarket scale sticker,
+package net weight 净含量, a menu or receipt stating grams/mL): use that
+exact weight with standard nutrition density for the food. Do not
+second-guess a printed weight from how the portion looks.
+
+Priority 3 — A BRAND, CHAIN LOGO, OR MERCHANT PACKAGING that identifies
+the exact product or menu item (e.g. McDonald's, 蜜雪冰城, a barcoded
+package, a delivery-app listing): use the brand's published nutrition
+data for that exact item — via web search if search is available to you,
+otherwise from your knowledge of the brand's published figures. Say
+which item you matched. If you cannot identify the exact product,
+fall through to Priority 4.
+
+Priority 4 — VISUAL ESTIMATION, only when no higher evidence exists:
+follow the PORTION SIZE calibration rules below.
+
+Mixed meals: apply the ladder PER ITEM (a labeled drink next to an
+unlabeled dish uses Priority 1 for the drink, Priority 4 for the dish).
+In confidence_note, name the priority used per item, e.g.
+"P1 label (milk), P4 visual (noodles, calibrated on chopsticks)".
