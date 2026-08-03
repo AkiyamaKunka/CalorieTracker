@@ -28,7 +28,16 @@ Historical note: the server optionally routes photos through a Claude CLI first
 
 ### 1.1 FOOD_DETECTION_PROMPT (`config.py:47-81`)
 
-Send **verbatim** (subject only to §1.3 dietary-profile append):
+Send **verbatim** (subject only to §1.3 dietary-profile append). Since
+2026-08-03 the canonical text is COMPOSED at sync time: `shared/prompts/
+food_detection_prompt.txt` carries an `<<ESTIMATION_PRIORITY>>` placeholder
+that `scripts/sync_shared.py` fills from `shared/prompts/
+estimation_priority.txt` (the editable calorie-evidence ladder: nutrition
+label > printed weight > brand data > visual estimate; '#' lines are
+docs, stripped). Both generated bindings therefore already contain the
+ladder — the verbatim rule applies to the COMPOSED text, and the snapshot
+below predates the ladder (`tests/test_estimation_priority.py` +
+`app/test/shared/estimation_priority_test.dart` pin the composition):
 
 ```
 Analyze this photo and determine if it contains food, a meal, or a beverage.
@@ -1053,6 +1062,8 @@ one SQLite file). Each is pinned by tests named alongside.
 | Garmin energy balance (2026-08-02) | garmin.py feeds the DAILY REPORT (Telegram) | the app asks the server's `/api/garmin_daily` (pure read, per-date 10-min cache, `GARMIN_IS_CN` for garmin.cn accounts) and Today renders a cosmetic 'Active burn · net' line; fetch is injected, fire-and-forget, date-guarded, and NEVER blocks or errors the screen — zero burn or any failure just means no line | the report's consumer is retired (Telegram off); the phone is where the energy-balance answer is useful now. Health Connect was ruled out on-device: absent on the China-market Honor phone | `today_garmin_test`, `test_api_analyze_endpoints.py`, `test_garmin.py` |
 | Day-report share image (2026-08-02) | n/a (reports arrive as Telegram TEXT) | Today's app bar shares the day as ONE tall PNG (ui/widgets/day_report.dart): ring + reconciling arithmetic + macro trio + every meal with thumbnail, per-item lines and portion assumptions; rendered in a detached render tree (synchronous paint, pre-decoded thumbs) at 3x and handed to the system share sheet | the user reports intake to a coach in chat apps — an image travels where a database cannot | `day_report_test` (content, PNG magic bytes, button visibility) |
 | `body_measurements` table (2026-08-02) | none — the server tracks weight only | app-only table: waist_cm/chest_cm/hip_cm nullable, one canonical row per day (same chat_id+date upsert shape as `body_weight`); FULL-ROW upsert (null overwrites — the sheet prefills, so unchanged fields carry through and a cleared field clears); all-empty save = delete; exported/imported with chat_id+date dedup; girth bounds 20–300 cm are app-local (weight keeps the SHARED 30–300 kg parity bounds) | girth tracking was requested for the app; inventing a server half for a chat interface nobody uses for this would be parity theater | `body_metrics_test` (incl. v2→v3 migration + round-trip) |
+| Imperial units option (2026-08-03) | server is metric-only (weight parsed/stored in kg, shared 30–300 kg bounds) | Settings▸Units (ENGLISH UI only): metric/imperial for BODY data display+input (`settings.units`); `ui/units.dart` converts at the edge — lb/in on the Body page (headline, deltas, chart labels, history rows, sheet fields), input converts to metric BEFORE the shared-bounds check (display-rounded bound values accepted then clamped), storage stays kg/cm bit-for-bit (untouched prefill short-circuits, no lb round-trip drift); the CHINESE UI is always metric and hides the row (user decision 2026-08-03); food stays g/kcal in both systems; NL replies + daily-report text stay parity English-metric | the user asked for imperial in the English version and metric-always in Chinese; converting at the display edge keeps every stored value and parity contract untouched | `units_test` (conversion, rendering, storage, drift guard, zh-forces-metric, row visibility) |
+| Chinese UI + language switcher (2026-08-02) | server replies/reports are English-only, parity-pinned strings | gen_l10n (`lib/l10n/app_en.arb` + `app_zh.arb`) over the primary surfaces (tabs, Today/History/Body, add flow, Settings + provider pages, day-report image); Settings▸语言 offers system/EN/中文, persisted as `settings.app_language`, applied LIVE via a `ListenableBuilder` over the settings notifier — no restart; `context.l10n` falls back to English so bare-MaterialApp tests stay valid; the share image localizes through an explicit `Localizations` scope in its detached render tree (it can't inherit the app's); en ARB values are byte-identical to the old literals so every pinned `find.text` still holds; secondary screens (diagnostics, meal editor, day detail, coverage) deliberately stay English pending phase 2 | the user asked for a Chinese version switchable in Settings; server-side strings stay English because their exact bytes are parity-tested against `shared/` vectors | `l10n_test` (boot-in-zh + live switch), `day_report_test` (zh report) |
 
 ### §9.1 `source` vocabulary (app)
 

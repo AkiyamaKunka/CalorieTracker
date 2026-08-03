@@ -38,8 +38,40 @@ order or of consumption is not clear, answer {"is_food": false}.
 If the image contains NO food, meal, or beverage, respond with exactly:
 {"is_food": false}
 
-PORTION SIZE — the main source of error. Estimate the REAL size of each
-dish before estimating calories:
+CALORIE EVIDENCE — decide each item's calories from the BEST evidence in
+the photo, in this strict priority order (highest first). Printed truth
+always beats estimation; never eyeball a number the photo already states.
+
+Priority 1 — A NUTRITION LABEL in the photo (营养成分表 / Nutrition
+Facts): read energy and macros directly from it. Respect the serving
+size and the number of servings actually consumed. Chinese labels state
+energy in kJ per 100 g — convert (kcal = kJ ÷ 4.184) and scale by the
+package's net weight (净含量), not by 100 g.
+
+Priority 2 — A PRINTED WEIGHT for the food (supermarket scale sticker,
+package net weight 净含量, a menu or receipt stating grams/mL): use that
+exact weight with standard nutrition density for the food. Do not
+second-guess a printed weight from how the portion looks.
+
+Priority 3 — A BRAND, CHAIN LOGO, OR MERCHANT PACKAGING that identifies
+the exact product or menu item (e.g. McDonald's, 蜜雪冰城, a barcoded
+package, a delivery-app listing): use the brand's published nutrition
+data for that exact item — via web search if search is available to you,
+otherwise from your knowledge of the brand's published figures. Say
+which item you matched. If you cannot identify the exact product,
+fall through to Priority 4.
+
+Priority 4 — VISUAL ESTIMATION, only when no higher evidence exists:
+follow the PORTION SIZE calibration rules below.
+
+Mixed meals: apply the ladder PER ITEM (a labeled drink next to an
+unlabeled dish uses Priority 1 for the drink, Priority 4 for the dish).
+In confidence_note, name the priority used per item, e.g.
+"P1 label (milk), P4 visual (noodles, calibrated on chopsticks)".
+
+PORTION SIZE (the Priority-4 fallback) — the main source of error when no
+printed evidence exists. Estimate the REAL size of each dish before
+estimating calories:
   - Look for reference objects of known size and calibrate against them:
     chopsticks (~24 cm), a spoon (~15 cm), a hand or fingers (palm ~8-9 cm
     across), a standard rice bowl (~11 cm across), a dinner plate (~26 cm),

@@ -5,6 +5,8 @@ library;
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show ChangeNotifier;
+
 import 'package:calorie_tracker/core/contracts.dart';
 import 'package:calorie_tracker/ui/photo_pipeline.dart';
 import 'package:calorie_tracker/ui/services.dart';
@@ -96,7 +98,7 @@ class FakeExecutor implements NlExecutor {
   }
 }
 
-class FakeSettings implements SettingsStore {
+class FakeSettings with ChangeNotifier implements SettingsStore {
   /// Provider-scoped keys, like the real store: [apiKey] reads/writes the
   /// CURRENT provider's slot so tests can catch cross-provider misrouting.
   final Map<String, String> keysByProvider;
@@ -156,6 +158,12 @@ class FakeSettings implements SettingsStore {
             };
 
   @override
+  String appLanguage = 'system';
+
+  @override
+  String units = 'metric';
+
+  @override
   Future<void> update({
     String? apiKey,
     String? provider,
@@ -166,8 +174,12 @@ class FakeSettings implements SettingsStore {
     String? dietaryProfile,
     String? serverBaseUrl,
     String? serverBackend,
+    String? appLanguage,
+    String? units,
   }) async {
     updateCalls++;
+    if (appLanguage != null) this.appLanguage = appLanguage;
+    if (units != null) this.units = units;
     if (apiKey != null) this.apiKey = apiKey;
     if (provider != null) this.provider = provider;
     if (model != null) this.model = model;
@@ -177,6 +189,9 @@ class FakeSettings implements SettingsStore {
     if (dietaryProfile != null) this.dietaryProfile = dietaryProfile;
     if (serverBaseUrl != null) this.serverBaseUrl = serverBaseUrl;
     if (serverBackend != null) this.serverBackend = serverBackend;
+    // The real AppSettings notifies on every write; the app's live-locale
+    // rebuild rides on it, so the fake must too.
+    notifyListeners();
   }
 }
 
@@ -265,15 +280,20 @@ UiServices makeServices({
   FakeIntake? intake,
   bool grantPhotoPermission = true,
   Future<PhotoOutcome> Function(IntakePhoto photo)? processPhoto,
-}) =>
-    UiServices(
-      dao: dao ?? FakeDao(),
-      analyzer: analyzer ?? FakeAnalyzer(),
-      executor: executor ?? FakeExecutor(),
-      settings: settings ?? FakeSettings(),
-      picker: picker ?? FakePicker(),
-      photoIntake: intake ?? FakeIntake(),
-      reports: FakeReports(),
-      requestPhotoPermission: () async => grantPhotoPermission,
-      processPhoto: processPhoto,
-    );
+}) {
+  final s = settings ?? FakeSettings();
+  return UiServices(
+    dao: dao ?? FakeDao(),
+    analyzer: analyzer ?? FakeAnalyzer(),
+    executor: executor ?? FakeExecutor(),
+    settings: s,
+    // Same wiring as production di.dart: the settings object IS the
+    // change signal the app re-locales on.
+    settingsChanges: s,
+    picker: picker ?? FakePicker(),
+    photoIntake: intake ?? FakeIntake(),
+    reports: FakeReports(),
+    requestPhotoPermission: () async => grantPhotoPermission,
+    processPhoto: processPhoto,
+  );
+}

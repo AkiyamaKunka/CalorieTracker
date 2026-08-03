@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show HapticFeedback;
 
 import '../../services.dart' show SettingsStore;
+import '../../l10n.dart';
 import '../../widgets/grouped.dart';
 import 'provider_page.dart'
     show kApiKeyChoices, kCustomModelSentinel, kKnownModels, isCuratedModel,
@@ -74,18 +75,12 @@ class _ApiKeyProviderPageState extends State<ApiKeyProviderPage> {
       };
 
   /// Where the key comes from — the footer's job.
-  String _keyFooter() => switch (widget.settings.provider) {
-        'qwen' => 'From bailian.console.aliyun.com (Alibaba Cloud 百炼 → '
-            'API-KEY). New accounts get ~1M free tokens per model. Stored '
-            'securely on this device only.',
-        'doubao' => 'From console.volcengine.com/ark (API Key + 开通管理 to '
-            'activate models). 500k free tokens per model. Stored securely '
-            'on this device only.',
-        'glm' => 'From open.bigmodel.cn (real-name verification required). '
-            'The default flash model is free. Stored securely on this '
-            'device only.',
-        _ => 'The key saves as you type. Stored securely on this device '
-            'only.',
+  String _keyFooter(BuildContext context) =>
+      switch (widget.settings.provider) {
+        'qwen' => context.l10n.apiKeyFooterQwen,
+        'doubao' => context.l10n.apiKeyFooterDoubao,
+        'glm' => context.l10n.apiKeyFooterGlm,
+        _ => context.l10n.apiKeyFooterDefault,
       };
 
   Widget _cellField(Widget field) => Padding(
@@ -98,14 +93,11 @@ class _ApiKeyProviderPageState extends State<ApiKeyProviderPage> {
     final scheme = Theme.of(context).colorScheme;
     final settings = widget.settings;
     return GroupedPage(
-      title: 'API Key',
+      title: context.l10n.apiPageTitle,
       children: [
         GroupedSection(
-          header: 'Provider',
-          footer: 'Pay per photo: the key lives on this phone and every '
-              'photo is a metered API call billed by the vendor. In '
-              'mainland China choose Qwen, Doubao or GLM — the others '
-              'need a VPN. 中国大陆用户请选择国内提供商。',
+          header: context.l10n.apiProviderHeader,
+          footer: context.l10n.apiProviderFooter,
           children: [
             for (final (id, name, note) in kApiKeyChoices)
               GroupedRow(
@@ -122,8 +114,8 @@ class _ApiKeyProviderPageState extends State<ApiKeyProviderPage> {
         ),
         if (_apiActive) ...[
           GroupedSection(
-            header: 'API key',
-            footer: _keyFooter(),
+            header: context.l10n.apiKeyHeader,
+            footer: _keyFooter(context),
             children: [
               _cellField(TextField(
                 key: const Key('apiKeyField'),
@@ -137,15 +129,15 @@ class _ApiKeyProviderPageState extends State<ApiKeyProviderPage> {
                 onTapOutside: (_) =>
                     settings.update(apiKey: _keyController.text.trim()),
                 decoration: InputDecoration(
-                  labelText:
-                      '${providerLabel(settings.provider)} API key',
+                  labelText: context.l10n
+                      .apiKeyLabel(providerLabel(settings.provider)),
                   border: InputBorder.none,
                 ),
               )),
             ],
           ),
           GroupedSection(
-            header: 'Model',
+            header: context.l10n.modelHeader,
             footer: _customModel ? _modelHelperText() : null,
             children: [
               _cellField(KeyedSubtree(
@@ -163,9 +155,9 @@ class _ApiKeyProviderPageState extends State<ApiKeyProviderPage> {
                         in kKnownModels[settings.provider] ??
                             const <(String, String)>[])
                       DropdownMenuItem(value: id, child: Text(label)),
-                    const DropdownMenuItem(
+                    DropdownMenuItem(
                         value: kCustomModelSentinel,
-                        child: Text('Custom — type a model name…')),
+                        child: Text(context.l10n.modelCustomRow)),
                   ],
                   onChanged: (v) async {
                     if (v == null) return;
@@ -190,8 +182,8 @@ class _ApiKeyProviderPageState extends State<ApiKeyProviderPage> {
                   onSubmitted: (v) => settings.update(model: v.trim()),
                   onTapOutside: (_) => settings.update(
                       model: _modelController.text.trim()),
-                  decoration: const InputDecoration(
-                    labelText: 'Custom model name',
+                  decoration: InputDecoration(
+                    labelText: context.l10n.modelCustomLabel,
                     border: InputBorder.none,
                   ),
                 )),
@@ -199,8 +191,7 @@ class _ApiKeyProviderPageState extends State<ApiKeyProviderPage> {
           ),
         ] else
           GroupedSection(
-            footer: 'A subscription is currently active. Pick a provider '
-                'above to switch to a pay-per-photo API key.',
+            footer: context.l10n.apiInactiveFooter,
             children: const [SizedBox(height: 1)],
           ),
       ],

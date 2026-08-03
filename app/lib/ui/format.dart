@@ -11,12 +11,16 @@ import 'package:intl/intl.dart';
 import '../core/coerce.dart';
 import '../data/meals_logic.dart' as logic;
 import '../core/contracts.dart';
-import 'meal_edit_logic.dart' show parseClock;
+import 'meal_edit_logic.dart' show isRealIsoDate, parseClock;
 
 final NumberFormat _thousands = NumberFormat('#,##0');
 
 /// Thousands-separated integer calories (spec §5 formatting rules).
-String formatKcal(num v) => _thousands.format(v.round());
+/// Non-finite input renders as 0: `.round()` THROWS on NaN/Infinity, and
+/// this helper sits inside build() methods fed by untrusted numbers — a
+/// hostile value must degrade, never crash the screen (spec §1.2).
+String formatKcal(num v) =>
+    _thousands.format(v is double && !v.isFinite ? 0 : v.round());
 
 /// Python truthiness for is_food (spec §3.5): false, 0, 0.0, '', [], {},
 /// null → false; every other value → true. Food filtering uses THIS, never
@@ -138,12 +142,37 @@ int? typicalDayKcal(Map<String, num> perDay) {
 /// persist dates that no query could match.
 String isoDate(DateTime d) => logic.isoDate(d);
 
-/// History day label: 'Today' for today, else `%A, %b %d` e.g.
-/// 'Tuesday, Jul 15' (spec §5.3).
-String friendlyHistoryDay(String date, {DateTime? now}) {
+/// History day label: [todayLabel] for today, else [pattern] via intl —
+/// defaults reproduce the original English `%A, %b %d` e.g.
+/// 'Tuesday, Jul 15' (spec §5.3). UI callers go through
+/// `context.friendlyDay`, which feeds the locale's pattern and 今天/Today.
+String friendlyHistoryDay(String date,
+    {DateTime? now,
+    String? localeName,
+    String pattern = 'EEEE, MMM dd',
+    String todayLabel = 'Today'}) {
   final today = isoDate(now ?? DateTime.now());
-  if (date == today) return 'Today';
+  if (date == today) return todayLabel;
+  // isRealIsoDate: DateTime.tryParse ROLLS OVER impossible components
+  // ('2026-02-30' → Mar 02), which would label the day with a confident
+  // WRONG date. Degrading to the raw string matches the Python reference
+  // (strict fromisoformat + fallback) and the module contract.
+  if (!isRealIsoDate(date)) return date;
   final parsed = DateTime.tryParse(date);
   if (parsed == null) return date;
-  return DateFormat('EEEE, MMM dd').format(parsed);
+  return DateFormat(pattern, localeName).format(parsed);
+}
+
+/// Stored meal clock → locale display. English passes the stored string
+/// through UNTOUCHED (it already is the en display; intl's own en output
+/// would sneak in a U+202F before AM). Chinese reformats to the 24-hour
+/// '08:05' CLDR gives zh. STORAGE is untouched — meals.time keeps the
+/// server-parity `%I:%M %p` shape; anything unparseable renders raw
+/// (poison rows degrade, spec §1.2).
+String displayClock(String raw, {String? localeName}) {
+  if (localeName == null || !localeName.startsWith('zh')) return raw;
+  final t = parseClock(raw);
+  if (t == null) return raw;
+  return DateFormat.jm(localeName)
+      .format(DateTime(2000, 1, 1, t.hour, t.minute));
 }

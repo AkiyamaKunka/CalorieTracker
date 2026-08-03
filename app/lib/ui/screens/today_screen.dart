@@ -15,6 +15,7 @@ import 'dart:ui' as ui show Image;
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
+import '../l10n.dart';
 import '../widgets/calorie_ring.dart';
 import '../widgets/day_report.dart';
 import '../widgets/grouped.dart' show GroupedCard;
@@ -130,7 +131,7 @@ class TodayScreenState extends State<TodayScreen> {
               key: const Key('addMealFab'),
               onPressed: onAdd,
               icon: const Icon(Icons.add),
-              label: const Text('Log'),
+              label: Text(context.l10n.fabLog),
             ),
           ),
       ],
@@ -146,7 +147,7 @@ class TodayScreenState extends State<TodayScreen> {
           : const NeverScrollableScrollPhysics(),
       slivers: [
         SliverAppBar.large(
-          title: const Text('Today'),
+          title: Text(context.l10n.tabToday),
           actions: [
             // Report-to-my-coach (user request 2026-08-02): the whole day
             // as ONE tall image, straight into the share sheet.
@@ -159,7 +160,7 @@ class TodayScreenState extends State<TodayScreen> {
                         height: 18,
                         child: CircularProgressIndicator(strokeWidth: 2))
                     : const Icon(Icons.ios_share),
-                tooltip: 'Share today as an image',
+                tooltip: context.l10n.shareDayTooltip,
                 onPressed: _sharing ? null : _shareDay,
               ),
           ],
@@ -175,6 +176,7 @@ class TodayScreenState extends State<TodayScreen> {
   Future<void> _shareDay() async {
     setState(() => _sharing = true);
     final theme = Theme.of(context); // captured before any await
+    final locale = Localizations.localeOf(context);
     try {
       final today = isoDate(DateTime.now());
       final foodMeals = _todayMeals.where(isFoodMeal).toList();
@@ -193,6 +195,7 @@ class TodayScreenState extends State<TodayScreen> {
         typicalKcal: typicalDayKcal(_priorDayTotals),
         burnKcal: _garmin?.activeCalories ?? 0,
         theme: theme,
+        locale: locale,
       );
       final dir = await getTemporaryDirectory();
       final file = File('${dir.path}/intake_$today.png');
@@ -205,7 +208,7 @@ class TodayScreenState extends State<TodayScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Could not build the image: $e')));
+            SnackBar(content: Text(context.l10n.shareDayFailed('$e'))));
       }
     } finally {
       if (mounted) setState(() => _sharing = false);
@@ -263,12 +266,10 @@ class TodayScreenState extends State<TodayScreen> {
                     // Empty copy per spec §5.1; the hint below is app-only
                     // (§9) — the bare sentence was a dead-ish end for a
                     // user who just finished setup.
-                    const Text('No meals logged yet today.'),
+                    Text(context.l10n.todayEmptyTitle),
                     const SizedBox(height: 8),
                     Text(
-                      'Tap "Log" below to add one from a photo or a '
-                      'description — or turn on "Watch camera roll" in '
-                      'Settings and new food photos log themselves.',
+                      context.l10n.todayEmptyHint,
                       textAlign: TextAlign.center,
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
                           color:
@@ -305,10 +306,10 @@ class TodayScreenState extends State<TodayScreen> {
       // Headroom vs above-typical wording, spec §5.1 — the string is
       // parity-pinned; the ring VISUALIZES it, the caption still states it.
       typicalLine = total <= typical
-          ? 'Typical day: ~${formatKcal(typical)} kcal · '
-              '~${formatKcal(typical - total)} kcal headroom'
-          : 'Typical day: ~${formatKcal(typical)} kcal · '
-              '~${formatKcal(total - typical)} kcal above typical';
+          ? context.l10n.typicalDayHeadroom(
+              formatKcal(typical), formatKcal(typical - total))
+          : context.l10n.typicalDayOver(
+              formatKcal(typical), formatKcal(total - typical));
     }
     // Hero layout (research: MFP arithmetic × Apple ring — see
     // uiux_direction.md): ring answers "how am I doing", the rows beside it
@@ -332,11 +333,10 @@ class TodayScreenState extends State<TodayScreen> {
                     children: [
                       // Demoted from headline (review: one hero numeral per
                       // card — the ring's center). Key + string format stay.
-                      Text('${formatKcal(totals.cal)} kcal',
+                      Text(context.l10n.kcalAmount(formatKcal(totals.cal)),
                           key: const Key('todayTotalKcal'),
                           style: theme.textTheme.titleMedium),
-                      Text(
-                          '${totals.meals} meal${totals.meals == 1 ? '' : 's'} today',
+                      Text(context.l10n.mealsToday(totals.meals),
                           style: theme.textTheme.bodySmall?.copyWith(
                               color: scheme.onSurfaceVariant)),
                       const SizedBox(height: 8),
@@ -344,24 +344,24 @@ class TodayScreenState extends State<TodayScreen> {
                       // typical + burn − eaten IS the ring's center number.
                       if (typical != null) ...[
                         ArithmeticRow(
-                            label: 'Typical',
+                            label: context.l10n.rowTypical,
                             value: '~${formatKcal(typical)}',
                             dot: scheme.outlineVariant),
                         if (burn > 0)
                           ArithmeticRow(
-                              label: 'Burn',
+                              label: context.l10n.rowBurn,
                               value: '+${formatKcal(burn)}',
                               dot: scheme.tertiary),
                         ArithmeticRow(
-                            label: 'Eaten',
+                            label: context.l10n.rowEaten,
                             value: '−${formatKcal(totals.cal.round())}',
                             dot: scheme.primary),
                         ArithmeticRow(
                             key: const Key('arithmeticResultRow'),
                             label: totals.cal.round() >
                                     typical + burn.round()
-                                ? '= Above typical'
-                                : '= Left',
+                                ? context.l10n.rowResultOver
+                                : context.l10n.rowResultLeft,
                             value: formatKcal(
                                 (typical + burn.round() - totals.cal.round())
                                     .abs()),
@@ -369,7 +369,7 @@ class TodayScreenState extends State<TodayScreen> {
                             emphasized: true),
                       ] else
                         ArithmeticRow(
-                            label: 'Eaten',
+                            label: context.l10n.rowEaten,
                             value: formatKcal(totals.cal.round()),
                             dot: scheme.primary),
                     ],
@@ -396,8 +396,9 @@ class TodayScreenState extends State<TodayScreen> {
             if (_garmin != null && _garmin!.activeCalories > 0) ...[
               const SizedBox(height: 4),
               Text(
-                'Active burn: ~${formatKcal(_garmin!.activeCalories)} kcal '
-                '(Garmin) · net ~${formatKcal(totals.cal - _garmin!.activeCalories)} kcal',
+                context.l10n.garminBurnLine(
+                    formatKcal(_garmin!.activeCalories),
+                    formatKcal(totals.cal - _garmin!.activeCalories)),
                 key: const Key('garminBurnLine'),
                 style: theme.textTheme.bodySmall
                     ?.copyWith(color: scheme.onSurfaceVariant),

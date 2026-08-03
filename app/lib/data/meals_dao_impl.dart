@@ -44,7 +44,10 @@ class SqfliteMealsDao implements MealsDao {
         'image_hash': hash,
         'file_id': meal.fileId,
         // Spec §2.2: analysis is stored as JSON text (json.dumps parity).
-        'analysis': jsonEncode(meal.analysis),
+        // finiteAnalysis: jsonEncode throws on NaN/Infinity (Python's
+        // json.dumps doesn't) — a model reply carrying 1e400 must save
+        // with the safeNumber fallback, not silently drop the meal.
+        'analysis': jsonEncode(finiteAnalysis(meal.analysis)),
         'corrected': meal.corrected ? 1 : 0,
       });
       // Spec §2.2: empty-after-normalization hash → ledger writes skipped.
@@ -68,7 +71,7 @@ class SqfliteMealsDao implements MealsDao {
     // (database.py:567-576), keyed by DB id + chat id.
     await _db.update(
       'meals',
-      {'analysis': jsonEncode(analysis), 'corrected': 1},
+      {'analysis': jsonEncode(finiteAnalysis(analysis)), 'corrected': 1},
       where: 'id = ? AND chat_id = ?',
       whereArgs: [mealId, localChatId],
     );
@@ -78,7 +81,9 @@ class SqfliteMealsDao implements MealsDao {
   Future<void> updateMealFields(int mealId,
       {Map<String, dynamic>? analysis, String? date, String? time}) async {
     final values = <String, Object?>{'corrected': 1};
-    if (analysis != null) values['analysis'] = jsonEncode(analysis);
+    if (analysis != null) {
+      values['analysis'] = jsonEncode(finiteAnalysis(analysis));
+    }
     if (date != null) values['date'] = date;
     if (time != null) values['time'] = time;
     // timestamp is NOT touched: it records when the row was ingested, while
@@ -576,6 +581,25 @@ ON CONFLICT(chat_id, date) DO UPDATE SET
   /// file a no-op instead of doubling the user's calories.
   Future<bool> _importRowExists(
       DatabaseExecutor txn, String table, Map<String, Object?> row) async {
+    // A photoless meal that was EDITED after export no longer matches its
+    // exported analysis text, so the analysis-based identity below missed
+    // it and an old backup re-imported the stale copy as a second meal
+    // (pressure-test find, 2026-08-03). Every edit path sets corrected=1
+    // and never touches timestamp, so a corrected row sharing this row's
+    // ingestion timestamp IS this meal, post-edit. The analysis-based
+    // check stays first: it distinguishes two DIFFERENT same-second
+    // text meals (server timestamps are second-resolution).
+    if (table == 'meals' &&
+        !(((row['image_hash'] as String?)?.isNotEmpty ?? false)) &&
+        row['timestamp'] != null) {
+      final edited = await txn.query('meals',
+          columns: const ['id'],
+          where: 'chat_id = ? AND timestamp = ? AND '
+              'IFNULL(image_hash, \'\') = \'\' AND corrected = 1',
+          whereArgs: [row['chat_id'], row['timestamp']],
+          limit: 1);
+      if (edited.isNotEmpty) return true;
+    }
     final (where, args) = switch (table) {
       // A PHOTO meal's identity is its photo (chat+hash): editing its
       // numbers must NOT make an older backup re-import it as a second

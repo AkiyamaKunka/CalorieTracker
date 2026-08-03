@@ -38,6 +38,28 @@ def load_sources():
     text = (SHARED / "prompts" / "text_handler_prompt.txt").read_text(encoding="utf-8")
     constants = json.loads((SHARED / "constants.json").read_text(encoding="utf-8"))
     constants.pop("_comment", None)
+
+    # The estimation-priority "skill" file: an editable evidence ladder
+    # (nutrition label > printed weight > brand data > visual estimate)
+    # spliced into the photo prompt AT GENERATION TIME, so adding a
+    # priority never touches either platform's code. '#' lines are the
+    # file's own documentation, not prompt text.
+    priority_raw = (SHARED / "prompts" / "estimation_priority.txt").read_text(
+        encoding="utf-8"
+    )
+    priority = "\n".join(
+        ln for ln in priority_raw.splitlines() if not ln.startswith("#")
+    ).strip()
+    if not priority:
+        raise SystemExit("estimation_priority.txt has no prompt content")
+    if "<<ESTIMATION_PRIORITY>>" not in food:
+        raise SystemExit(
+            "food_detection_prompt.txt lost its <<ESTIMATION_PRIORITY>> "
+            "placeholder — the priority ladder would silently vanish"
+        )
+    food = food.replace("<<ESTIMATION_PRIORITY>>", priority)
+    if "<<ESTIMATION_PRIORITY>>" in food or "Priority 1" not in food:
+        raise SystemExit("estimation-priority splice failed")
     return food, text, constants
 
 

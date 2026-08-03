@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 import '../../../core/contracts.dart';
 import '../../diagnostics.dart';
 import '../../services.dart' show SettingsStore;
+import '../../l10n.dart';
 import '../../widgets/grouped.dart';
 import '../diagnostics_screen.dart';
 import 'api_key_page.dart';
@@ -129,7 +130,7 @@ class _ProviderSettingsPageState extends State<ProviderSettingsPage> {
     final settings = widget.settings;
     final planActive = settings.provider == 'server';
     return GroupedPage(
-      title: 'AI Provider',
+      title: context.l10n.providerPageTitle,
       children: [
         if (settings.isQuotaPaused)
           Padding(
@@ -152,16 +153,14 @@ class _ProviderSettingsPageState extends State<ProviderSettingsPage> {
             ),
           ),
         GroupedSection(
-          header: 'Connection type',
-          footer: 'An API key pays per photo and lives on this phone. A '
-              'subscription is a flat-rate plan your own cloud server '
-              'signs into — photos cost nothing extra.',
+          header: context.l10n.connectionTypeHeader,
+          footer: context.l10n.connectionTypeFooter,
           children: [
             GroupedRow(
               key: const Key('apiKeyTypeRow'),
               icon: Icons.vpn_key_outlined,
               iconColor: scheme.primary,
-              title: 'API Key',
+              title: context.l10n.typeApiKey,
               value: planActive
                   ? null
                   : providerLabel(settings.provider),
@@ -181,7 +180,7 @@ class _ProviderSettingsPageState extends State<ProviderSettingsPage> {
               key: const Key('subscriptionTypeRow'),
               icon: Icons.workspace_premium_outlined,
               iconColor: scheme.tertiary,
-              title: 'Subscription',
+              title: context.l10n.typeSubscription,
               value: planActive
                   ? providerDisplayLabel('server', settings.serverBackend)
                   : null,
@@ -204,14 +203,13 @@ class _ProviderSettingsPageState extends State<ProviderSettingsPage> {
           ],
         ),
         GroupedSection(
-          footer: 'The test names exactly what is broken: configuration, '
-              'network, key, account credit, reply format, or quota.',
+          footer: context.l10n.testProviderFooter,
           children: [
             GroupedRow(
               key: const Key('testProviderButton'),
               icon: Icons.verified_outlined,
               iconColor: scheme.primary,
-              title: 'Test This Provider',
+              title: context.l10n.testProvider,
               onTap: () => Navigator.of(context).push(MaterialPageRoute(
                 builder: (_) => DiagnosticsScreen(
                   diagnostics: ProviderDiagnostics(

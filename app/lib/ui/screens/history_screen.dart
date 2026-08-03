@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import '../../core/contracts.dart';
 import '../format.dart';
 import '../meal_thumbs.dart';
+import '../l10n.dart';
 import '../widgets/grouped.dart'
     show GroupedCard, cellBackground, kGroupInset;
 import '../widgets/macro_chart.dart';
@@ -76,7 +77,7 @@ class HistoryScreenState extends State<HistoryScreen> {
   /// Weekday span w600, remainder quiet — same string, richer weight.
   Widget _dayTitle(BuildContext context, String date, {required bool dimmed}) {
     final theme = Theme.of(context);
-    final text = friendlyHistoryDay(date);
+    final text = context.friendlyDay(date);
     final comma = text.indexOf(', ');
     final dimColor = theme.colorScheme.onSurfaceVariant;
     if (dimmed || comma < 0) {
@@ -142,10 +143,10 @@ class HistoryScreenState extends State<HistoryScreen> {
         mainAxisSize: MainAxisSize.min,
         children: [
           has
-              ? Text('~${formatKcal(kcal!)} kcal',
+              ? Text('~${context.l10n.kcalAmount(formatKcal(kcal!))}',
                   style: theme.textTheme.labelLarge?.copyWith(
                       fontFeatures: const [FontFeature.tabularFigures()]))
-              : Text('no meals logged',
+              : Text(context.l10n.historyNoMeals,
                   style: theme.textTheme.bodySmall
                       ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
           const SizedBox(width: 4),
@@ -163,7 +164,7 @@ class HistoryScreenState extends State<HistoryScreen> {
           ? const AlwaysScrollableScrollPhysics()
           : const NeverScrollableScrollPhysics(),
       slivers: [
-        const SliverAppBar.large(title: Text('History')),
+        SliverAppBar.large(title: Text(context.l10n.tabHistory)),
         ...slivers,
       ],
     );
@@ -189,7 +190,8 @@ class HistoryScreenState extends State<HistoryScreen> {
                   Text(_error!, textAlign: TextAlign.center),
                   const SizedBox(height: 12),
                   FilledButton(
-                      onPressed: reload, child: const Text('Retry')),
+                      onPressed: reload,
+                      child: Text(context.l10n.retry)),
                 ],
               ),
             ),
@@ -203,7 +205,7 @@ class HistoryScreenState extends State<HistoryScreen> {
           child: Center(
             // Empty copy per spec §5.3.
             child:
-                Text('No meals logged in the past ${widget.days} days.'),
+                Text(context.l10n.historyEmpty(widget.days)),
           ),
         ),
       ]);
@@ -259,7 +261,7 @@ class HistoryScreenState extends State<HistoryScreen> {
                   const SizedBox(height: 10),
                   // Spec-pinned string + key; styled as the card's caption.
                   Text(
-                    'Average: ~${formatKcal(avg)} kcal / day',
+                    context.l10n.historyAverage(formatKcal(avg)),
                     key: const Key('historyAverage'),
                     style: Theme.of(context)
                         .textTheme

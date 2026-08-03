@@ -6,6 +6,7 @@ import 'dart:async' show unawaited;
 import 'dart:io' show File;
 
 import 'package:flutter/cupertino.dart' show CupertinoPageTransitionsBuilder;
+import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:path_provider/path_provider.dart'
@@ -15,6 +16,7 @@ import 'package:flutter/material.dart';
 
 import 'screens/add_flow.dart';
 import 'screens/body_screen.dart';
+import 'l10n.dart';
 import 'widgets/grouped.dart' show cellBackground, groupedBackground;
 import 'screens/history_screen.dart';
 import 'screens/settings/provider_page.dart';
@@ -104,15 +106,35 @@ class CalorieTrackerApp extends StatelessWidget {
       );
     }
 
-    return MaterialApp(
-      title: 'CalorieTracker',
-      scaffoldMessengerKey: messengerKey,
-      // iOS scroll feel everywhere: bounce, no glow indicator.
-      scrollBehavior: const _AppleScrollBehavior(),
-      theme: themed(Brightness.light),
-      darkTheme: themed(Brightness.dark),
-      themeMode: ThemeMode.system,
-      home: HomeShell(services: services),
+    // ListenableBuilder: the language row writes settings, and the whole
+    // app re-locales in place — no restart.
+    final shell = HomeShell(services: services);
+    Widget appFor(Locale? locale) => MaterialApp(
+          title: 'CalorieTracker',
+          scaffoldMessengerKey: messengerKey,
+          // iOS scroll feel everywhere: bounce, no glow indicator.
+          scrollBehavior: const _AppleScrollBehavior(),
+          theme: themed(Brightness.light),
+          darkTheme: themed(Brightness.dark),
+          themeMode: ThemeMode.system,
+          locale: locale,
+          localizationsDelegates: const [
+            AppLocalizations.delegate,
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
+          supportedLocales: const [Locale('en'), Locale('zh')],
+          home: shell,
+        );
+    final changes = services.settingsChanges;
+    if (changes == null) {
+      return appFor(localeForSetting(services.settings.appLanguage));
+    }
+    return ListenableBuilder(
+      listenable: changes,
+      builder: (context, _) =>
+          appFor(localeForSetting(services.settings.appLanguage)),
     );
   }
 }
@@ -241,7 +263,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
               onAdd: () => openAddFlow(context, s,
                   onChanged: () async => _todayKey.currentState?.reload())),
           HistoryScreen(key: _historyKey, dao: s.dao, thumbs: s.thumbs),
-          BodyScreen(key: _bodyKey, dao: s.dao),
+          BodyScreen(key: _bodyKey, dao: s.dao, settings: s.settings),
           SettingsScreen(
             settings: s.settings,
             analyzer: s.analyzer,
@@ -272,21 +294,22 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           if (i == 1) _historyKey.currentState?.reload();
           if (i == 2) _bodyKey.currentState?.reload();
         },
-        destinations: const [
+        destinations: [
           NavigationDestination(
-              icon: Icon(Icons.today_outlined),
-              selectedIcon: Icon(Icons.today),
-              label: 'Today'),
+              icon: const Icon(Icons.today_outlined),
+              selectedIcon: const Icon(Icons.today),
+              label: context.l10n.tabToday),
           NavigationDestination(
-              icon: Icon(Icons.history), label: 'History'),
+              icon: const Icon(Icons.history),
+              label: context.l10n.tabHistory),
           NavigationDestination(
-              icon: Icon(Icons.monitor_weight_outlined),
-              selectedIcon: Icon(Icons.monitor_weight),
-              label: 'Body'),
+              icon: const Icon(Icons.monitor_weight_outlined),
+              selectedIcon: const Icon(Icons.monitor_weight),
+              label: context.l10n.tabBody),
           NavigationDestination(
-              icon: Icon(Icons.settings_outlined),
-              selectedIcon: Icon(Icons.settings),
-              label: 'Settings'),
+              icon: const Icon(Icons.settings_outlined),
+              selectedIcon: const Icon(Icons.settings),
+              label: context.l10n.tabSettings),
         ],
       ),
     );

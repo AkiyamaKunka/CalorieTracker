@@ -1352,6 +1352,7 @@
         {
           "intent": "delete",
           "meal_indices": [
+            3,
             1
           ]
         }

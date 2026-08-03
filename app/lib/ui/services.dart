@@ -7,6 +7,8 @@ library;
 
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show Listenable;
+
 import '../core/contracts.dart';
 import '../services/garmin_client.dart';
 import '../services/photo/coverage.dart';
@@ -53,6 +55,13 @@ abstract class SettingsStore {
   /// (AppSettings.serverBackends). Plan keys live in the server's .env.
   String get serverBackend;
 
+  /// 'system' | 'en' | 'zh' — the UI language override (app-only §9).
+  String get appLanguage;
+
+  /// 'metric' | 'imperial' — body-data DISPLAY units (app-only §9;
+  /// storage stays metric, zh UI renders metric regardless).
+  String get units;
+
   Future<void> update({
     String? apiKey,
     String? provider,
@@ -63,6 +72,8 @@ abstract class SettingsStore {
     String? dietaryProfile,
     String? serverBaseUrl,
     String? serverBackend,
+    String? appLanguage,
+    String? units,
   });
 }
 
@@ -93,6 +104,11 @@ class RecentAsset {
 /// fakes in widget tests.
 class UiServices {
   final MealsDao dao;
+
+  /// Fires when settings change — the app shell rebinds MaterialApp.locale
+  /// from it so the language switch applies live. Null in tests (locale
+  /// then follows the harness).
+  final Listenable? settingsChanges;
 
   /// Today's Garmin active-burn fetch via the user's server; null = off.
   final GarminDailyFetch? garminDaily;
@@ -145,5 +161,6 @@ class UiServices {
     this.completeClaudeAuth,
     this.openSystemSettings,
     this.garminDaily,
+    this.settingsChanges,
   });
 }

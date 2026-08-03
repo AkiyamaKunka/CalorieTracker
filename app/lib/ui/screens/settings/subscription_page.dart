@@ -10,6 +10,7 @@ import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:url_launcher/url_launcher.dart' as launcher;
 
 import '../../services.dart' show SettingsStore;
+import '../../l10n.dart';
 import '../../widgets/grouped.dart';
 import 'provider_page.dart' show kPlanChoices;
 
@@ -87,7 +88,7 @@ class _SubscriptionProviderPageState
       if (started.error != null || started.url == null) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content:
-                Text(started.error ?? 'Could not start the sign-in.')));
+                Text(started.error ?? context.l10n.connectStartFailed)));
         return;
       }
       final open = widget.openUrl ??
@@ -96,8 +97,8 @@ class _SubscriptionProviderPageState
       final opened = await open(Uri.parse(started.url!));
       if (!mounted) return;
       if (!opened) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Could not open the browser.')));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(context.l10n.connectBrowserFailed)));
         return;
       }
       final code = await showDialog<String>(
@@ -106,21 +107,19 @@ class _SubscriptionProviderPageState
         builder: (ctx) {
           final ctrl = TextEditingController();
           return AlertDialog(
-            title: const Text('Finish connecting Claude'),
+            title: Text(ctx.l10n.connectDialogTitle),
             content: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text(
-                    'Sign in on the Anthropic page that just opened. It '
-                    'will show you a code — paste it here.'),
+                Text(ctx.l10n.connectDialogBody),
                 const SizedBox(height: 12),
                 TextField(
                   key: const Key('claudeAuthCodeField'),
                   controller: ctrl,
                   autocorrect: false,
-                  decoration: const InputDecoration(
-                    labelText: 'Authorization code',
-                    border: OutlineInputBorder(),
+                  decoration: InputDecoration(
+                    labelText: ctx.l10n.connectCodeLabel,
+                    border: const OutlineInputBorder(),
                   ),
                 ),
               ],
@@ -128,11 +127,11 @@ class _SubscriptionProviderPageState
             actions: [
               TextButton(
                   onPressed: () => Navigator.of(ctx).pop(null),
-                  child: const Text('Cancel')),
+                  child: Text(ctx.l10n.cancel)),
               FilledButton(
                 key: const Key('claudeAuthSubmit'),
                 onPressed: () => Navigator.of(ctx).pop(ctrl.text.trim()),
-                child: const Text('Connect'),
+                child: Text(ctx.l10n.connect),
               ),
             ],
           );
@@ -143,8 +142,8 @@ class _SubscriptionProviderPageState
       final error = await complete(code);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(error ??
-              'Claude connected — analyses run on your subscription.')));
+          content: Text(
+              error ?? context.l10n.connectDone)));
     } finally {
       if (mounted) setState(() => _authBusy = false);
     }
@@ -160,13 +159,11 @@ class _SubscriptionProviderPageState
     final scheme = Theme.of(context).colorScheme;
     final settings = widget.settings;
     return GroupedPage(
-      title: 'Subscription',
+      title: context.l10n.subPageTitle,
       children: [
         GroupedSection(
-          header: 'Plan',
-          footer: 'Flat-rate: your own cloud machine signs in to ONE plan '
-              'and analyses photos under it — each photo costs nothing '
-              'extra. Plan credentials stay on that machine.',
+          header: context.l10n.planHeader,
+          footer: context.l10n.planFooter,
           children: [
             for (final (backend, name, note) in kPlanChoices)
               GroupedRow(
@@ -184,18 +181,16 @@ class _SubscriptionProviderPageState
         ),
         if (_planActive) ...[
           GroupedSection(
-            header: 'Your server',
-            footer: 'The cloud machine that holds your plan sign-in and '
-                'runs the analysis — not this phone. This phone keeps '
-                'only the upload key it uses to talk to that machine.',
+            header: context.l10n.serverHeader,
+            footer: context.l10n.serverFooter,
             children: [
               _cellField(TextField(
                 key: const Key('serverUrlField'),
                 controller: _serverUrlController,
                 autocorrect: false,
                 keyboardType: TextInputType.url,
-                decoration: const InputDecoration(
-                  labelText: 'Server address',
+                decoration: InputDecoration(
+                  labelText: context.l10n.serverAddressLabel,
                   hintText: 'http://your.server.ip',
                   border: InputBorder.none,
                 ),
@@ -213,8 +208,8 @@ class _SubscriptionProviderPageState
                 onSubmitted: (v) => settings.update(apiKey: v.trim()),
                 onTapOutside: (_) =>
                     settings.update(apiKey: _keyController.text.trim()),
-                decoration: const InputDecoration(
-                  labelText: 'Server upload key',
+                decoration: InputDecoration(
+                  labelText: context.l10n.serverUploadKeyLabel,
                   border: InputBorder.none,
                 ),
               )),
@@ -223,14 +218,13 @@ class _SubscriptionProviderPageState
           if (settings.serverBackend == 'claude' &&
               widget.startClaudeAuth != null)
             GroupedSection(
-              footer: 'Signs this server in to your Anthropic '
-                  'subscription. Needs a VPN in mainland China.',
+              footer: context.l10n.connectClaudeFooter,
               children: [
                 GroupedRow(
                   key: const Key('connectClaudeButton'),
                   icon: Icons.link,
                   iconColor: scheme.tertiary,
-                  title: 'Connect Claude',
+                  title: context.l10n.connectClaude,
                   trailing: _authBusy
                       ? const SizedBox(
                           width: 16,
@@ -244,8 +238,7 @@ class _SubscriptionProviderPageState
             ),
         ] else
           GroupedSection(
-            footer: 'An API key is currently active. Pick a plan above to '
-                'switch to subscription analysis via your server.',
+            footer: context.l10n.subInactiveFooter,
             children: const [SizedBox(height: 1)],
           ),
       ],
