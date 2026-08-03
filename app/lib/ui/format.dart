@@ -11,12 +11,16 @@ import 'package:intl/intl.dart';
 import '../core/coerce.dart';
 import '../data/meals_logic.dart' as logic;
 import '../core/contracts.dart';
-import 'meal_edit_logic.dart' show parseClock;
+import 'meal_edit_logic.dart' show isRealIsoDate, parseClock;
 
 final NumberFormat _thousands = NumberFormat('#,##0');
 
 /// Thousands-separated integer calories (spec §5 formatting rules).
-String formatKcal(num v) => _thousands.format(v.round());
+/// Non-finite input renders as 0: `.round()` THROWS on NaN/Infinity, and
+/// this helper sits inside build() methods fed by untrusted numbers — a
+/// hostile value must degrade, never crash the screen (spec §1.2).
+String formatKcal(num v) =>
+    _thousands.format(v is double && !v.isFinite ? 0 : v.round());
 
 /// Python truthiness for is_food (spec §3.5): false, 0, 0.0, '', [], {},
 /// null → false; every other value → true. Food filtering uses THIS, never
@@ -149,6 +153,11 @@ String friendlyHistoryDay(String date,
     String todayLabel = 'Today'}) {
   final today = isoDate(now ?? DateTime.now());
   if (date == today) return todayLabel;
+  // isRealIsoDate: DateTime.tryParse ROLLS OVER impossible components
+  // ('2026-02-30' → Mar 02), which would label the day with a confident
+  // WRONG date. Degrading to the raw string matches the Python reference
+  // (strict fromisoformat + fallback) and the module contract.
+  if (!isRealIsoDate(date)) return date;
   final parsed = DateTime.tryParse(date);
   if (parsed == null) return date;
   return DateFormat(pattern, localeName).format(parsed);

@@ -52,11 +52,40 @@ bool? parseBoolish(dynamic value) {
     return null;
   }
   if (value is String) {
-    final v = value.trim().toLowerCase();
+    // Python parity: str.strip() also removes the C0 separators U+001C–
+    // U+001F (they satisfy isspace()), which Dart's Unicode-White_Space
+    // trim() does not — without this a '\x1cyes\x1c' coerced true on the
+    // server and null here (pressure-test find, 2026-08-03).
+    final v = value
+        .replaceFirst(RegExp(r'^[\s\x1c-\x1f]+'), '')
+        .replaceFirst(RegExp(r'[\s\x1c-\x1f]+$'), '')
+        .toLowerCase();
     if (const {'true', 'yes', 'y', '1', 'on'}.contains(v)) return true;
     if (const {'false', 'no', 'n', '0', 'off'}.contains(v)) return false;
   }
   return null;
+}
+
+/// Deep-copy [analysis] with every non-finite double (NaN/Infinity —
+/// jsonDecode produces them for literals like 1e400) replaced by 0, the
+/// same fallback [safeNumber] uses. jsonEncode THROWS on non-finite
+/// doubles, so without this a model reply carrying one made every save
+/// path fail — the meal was silently dropped with a generic "try again"
+/// (pressure-test find, 2026-08-03). Structure and all other values are
+/// preserved raw (spec §3.5: coercion happens on READ).
+Map<String, dynamic> finiteAnalysis(Map analysis) {
+  dynamic walk(dynamic v) {
+    if (v is double && !v.isFinite) return 0;
+    if (v is Map) {
+      return <String, dynamic>{
+        for (final e in v.entries) '${e.key}': walk(e.value)
+      };
+    }
+    if (v is List) return [for (final e in v) walk(e)];
+    return v;
+  }
+
+  return walk(analysis) as Map<String, dynamic>;
 }
 
 /// Parse JSON out of a model reply, tolerating markdown fences and prose

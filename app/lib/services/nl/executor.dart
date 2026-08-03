@@ -41,8 +41,12 @@ final RegExp _weightUnitRe = RegExp(
   caseSensitive: false,
 );
 // Bare number guarded by an explicit weigh(ed/s/t) keyword, read as kg.
+// The (?<![a-z]) boundary keeps the 'weight' inside 'overweight'/
+// 'underweight' from matching — without it "overweight, ate 200 calories"
+// logged a 200 kg weigh-in (pressure-test find, 2026-08-03; nutrition.py
+// carries the same guard).
 final RegExp _weightKeywordRe = RegExp(
-  r'weigh(?:ed|s|t)?\D{0,12}?(?<![\w.])(\d+(?:\.\d+)?)',
+  r'(?<![a-z])weigh(?:ed|s|t)?\D{0,12}?(?<![\w.])(\d+(?:\.\d+)?)',
   caseSensitive: false,
 );
 
@@ -125,7 +129,14 @@ List<Map> normalizeActions(dynamic result) {
     final merged = <dynamic>[];
     for (final a in deletes) {
       final indices = a['meal_indices'];
-      if (indices is List) merged.addAll(indices);
+      if (indices is List) {
+        merged.addAll(indices);
+      } else if (indices is num && indices is! bool) {
+        // Honor a bare integer, same as the single-delete path — dropping
+        // it deleted FEWER meals than asked (pressure-test find,
+        // 2026-08-03; telegram_bot.py fixed identically).
+        merged.add(indices);
+      }
     }
     deletes.first['meal_indices'] = merged;
     usable = usable
@@ -138,8 +149,17 @@ List<Map> normalizeActions(dynamic result) {
 /// parse_weight_kg (spec §4.7, nutrition.py:433-460): explicit kg/lb units
 /// (lb × 0.45359237) or a bare number guarded by a weigh-keyword; rounded to
 /// 1 decimal; only accepted within [30, 300] kg.
-double? parseWeightKg(dynamic text) {
-  if (text is! String) return null;
+double? parseWeightKg(dynamic input) {
+  if (input is! String) return null;
+  // Chinese-IME normalization: fullwidth digits (７２．５) become ASCII
+  // before the regexes run — Python's float() understood them natively,
+  // and the phone is where a Chinese keyboard actually types now
+  // (nutrition.py normalizes identically for exact parity).
+  final text = input.replaceAllMapped(
+      RegExp('[０-９．]'),
+      (m) => m.group(0)! == '．'
+          ? '.'
+          : String.fromCharCode(m.group(0)!.codeUnitAt(0) - 0xff10 + 0x30));
   for (final m in _weightUnitRe.allMatches(text)) {
     final value = double.tryParse(m.group(1)!);
     if (value == null) continue;

@@ -12,6 +12,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../core/coerce.dart' show safeNumber;
 import 'settings/app_settings.dart';
 
 /// One day's activity as Today consumes it.
@@ -66,7 +67,11 @@ GarminDaily? parseGarminDailyBody(int statusCode, String body) {
     return null;
   }
   if (decoded is! Map || decoded['available'] != true) return null;
-  double num_(Object? v) => v is num ? v.toDouble() : 0;
+  // safeNumber shape: NaN/Infinity/absurd magnitudes → 0. Infinity passed
+  // the Today screen's `> 0` guard and crashed formatKcal (pressure-test
+  // find, 2026-08-03) — this parser exists to treat responses as
+  // untrusted, so it must sanitize magnitude too.
+  double num_(Object? v) => safeNumber(v).toDouble();
   return GarminDaily(
     activeCalories: num_(decoded['active_calories']),
     steps: num_(decoded['steps']),

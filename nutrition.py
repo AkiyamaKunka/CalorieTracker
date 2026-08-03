@@ -58,7 +58,9 @@ def _esc(value) -> str:
 
 def _normalize_mode(mode) -> str:
     """Unknown / junk mode falls back to balanced."""
-    return mode if mode in MODE_SPECS else "balanced"
+    # isinstance first: an unhashable junk mode (list/dict) would make the
+    # dict-membership test itself raise, breaking the documented fallback.
+    return mode if isinstance(mode, str) and mode in MODE_SPECS else "balanced"
 
 
 def _pos(value) -> Optional[float]:
@@ -227,7 +229,13 @@ def analyze_macros(meals, targets) -> dict:
     else:
         actual_split = {"protein": 0, "carbs": 0, "fat": 0}
 
+    # Numeric-or-None: the docstring promises "never raises on malformed
+    # targets", but a string carb_cap_g reached the `>` comparison raw.
     carb_cap = targets.get("carb_cap_g")
+    if isinstance(carb_cap, bool) or not isinstance(carb_cap, (int, float)):
+        carb_cap = None
+    elif carb_cap != carb_cap or carb_cap in (float("inf"), float("-inf")):
+        carb_cap = None
     macros = {}
     suggestions = []
 
@@ -419,26 +427,38 @@ def report_line(analysis_result, targets, mode) -> str:
 # "kilo" prefix of "kilometers"/"kilometres" can't be read as kilograms.
 _WEIGHT_UNIT_RE = re.compile(
     r"(?<![\w.])(\d+(?:\.\d+)?)\s*(kgs?|kilograms?|kilos?|lbs?|pounds?)(?![a-z])",
-    re.IGNORECASE,
+    re.IGNORECASE | re.ASCII,
 )
 # Bare number guarded by an explicit weigh(ed/s/t) keyword, interpreted as kg.
+# (?<![a-z]): 'overweight'/'underweight' must not arm the keyword — the bare
+# number after them is almost never a weigh-in. re.ASCII on both: Python \d
+# otherwise matches Unicode digits that float() parses but the Dart port's
+# ASCII \d rejects — same text logged a weigh-in on the server and nothing on
+# the phone (pressure-test finds, 2026-08-03).
 _WEIGHT_KEYWORD_RE = re.compile(
-    r"weigh(?:ed|s|t)?\D{0,12}?(?<![\w.])(\d+(?:\.\d+)?)", re.IGNORECASE
+    r"(?<![a-z])weigh(?:ed|s|t)?\D{0,12}?(?<![\w.])(\d+(?:\.\d+)?)",
+    re.IGNORECASE | re.ASCII,
 )
 _LB_TO_KG = 0.45359237
 MIN_WEIGHT_KG = 30
 MAX_WEIGHT_KG = 300
 
 
+_FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９．", "0123456789.")
+
+
 def parse_weight_kg(text) -> Optional[float]:
     """Extract a plausible body weight in kg from free text.
 
     Understands explicit kg/lb units ("72.5kg", "159 lb" -> converted), and a
-    bare number when preceded by a weigh-keyword. Values outside 30..300 kg (or
-    no match) return None.
+    bare number when preceded by a weigh-keyword. Fullwidth digits from a
+    Chinese IME (７２．５) normalize to ASCII first — the regexes are ASCII-only
+    so the Dart port parses the same texts identically. Values outside
+    30..300 kg (or no match) return None.
     """
     if not isinstance(text, str):
         return None
+    text = text.translate(_FULLWIDTH_DIGITS)
 
     for num_str, unit in _WEIGHT_UNIT_RE.findall(text):
         try:

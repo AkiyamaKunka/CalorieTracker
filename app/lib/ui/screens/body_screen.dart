@@ -367,9 +367,12 @@ class _DeltaChip extends StatelessWidget {
     // deliberately neutral — for weight, neither direction is universally
     // "good", so green/red would editorialize.
     final sign = delta > 0 ? '▲ +' : (delta < 0 ? '▼ ' : '· ');
-    final text = delta == 0
+    // No-change is judged at DISPLAY precision: a 0.02 delta rendered
+    // '▲ +0.0' contradicts itself (arrow says gain, number says none).
+    final magnitude = delta.abs().toStringAsFixed(1);
+    final text = magnitude == '0.0'
         ? context.l10n.bodyNoChange
-        : '$sign${delta.abs().toStringAsFixed(1)} $unit';
+        : '$sign$magnitude $unit';
     return Tooltip(
       message: context.l10n.bodySince(sinceDate),
       child: Container(
@@ -458,7 +461,9 @@ class _MeasurementsCard extends StatelessWidget {
               style: theme.textTheme.bodySmall
                   ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
           const Spacer(),
-          if (delta != null && delta != 0)
+          // Display-precision gate: a sub-0.05 delta must not render the
+          // self-contradictory '▲ +0.0' (same rule as the weight chip).
+          if (delta != null && delta.abs().toStringAsFixed(1) != '0.0')
             Text(
               '${delta > 0 ? '▲ +' : '▼ '}${delta.abs().toStringAsFixed(1)}',
               style: theme.textTheme.labelMedium
@@ -614,7 +619,11 @@ class _LogBodySheetState extends State<LogBodySheet> {
       return (existingMetric, null);
     }
     final typed = double.tryParse(raw);
-    if (typed == null) {
+    // !isFinite: tryParse accepts the literals 'NaN'/'Infinity' (pasteable
+    // even past a numeric keyboard). NaN then sails through the bounds
+    // check (every comparison false) and clamp() returns the UPPER bound —
+    // a fabricated 300 kg weigh-in (pressure-test find, 2026-08-03).
+    if (typed == null || !typed.isFinite) {
       return (null, context.l10n.bodyErrNotNumber(label, raw));
     }
     final v = toMetricSpace(typed, widget.imperial);

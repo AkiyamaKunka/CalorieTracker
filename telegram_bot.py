@@ -4268,6 +4268,11 @@ def _normalize_nl_actions(result) -> List[Dict]:
             indices = a.get("meal_indices")
             if isinstance(indices, list):
                 merged.extend(indices)
+            elif isinstance(indices, (int, float)) and not isinstance(indices, bool):
+                # Honor a bare integer, same as the single-delete path and
+                # _nl_delete — dropping it here silently deleted FEWER
+                # meals than the user asked (pressure-test find, 2026-08-03).
+                merged.append(indices)
         deletes[0]["meal_indices"] = merged
         usable = [a for a in usable if a.get("intent") != "delete" or a is deletes[0]]
         log.info(f"  Merged {len(deletes)} delete actions into one ({len(merged)} indices).")

@@ -213,8 +213,14 @@ class PhotoPipeline {
       } catch (_) {}
       final summary =
           '${mealDescription(analysis)} — ~${displayTotalCalories(analysis)} kcal';
-      notify?.call('Meal logged: $summary');
-      onMealSaved?.call();
+      // Same shield as the thumbnail: these run AFTER the commit, so a
+      // throwing callback must not fall into the outer catch — that
+      // flipped the committed ledger row saved→failed and told the user
+      // the intake failed (pressure-test find, 2026-08-03).
+      try {
+        notify?.call('Meal logged: $summary');
+        onMealSaved?.call();
+      } catch (_) {}
       // No row id in the copy: the chat flow numbers meals by LIST position
       // ("meal 2 was roast duck"), so surfacing the SQLite id taught users
       // a number that is guaranteed to miss.
