@@ -955,6 +955,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Typical day: ~{typical} kcal · ~{delta} kcal above typical'**
   String typicalDayOver(String typical, String delta);
+
+  /// intl DateFormat PATTERN for dated history-day labels, not display text. en: "Tuesday, Jul 15"; zh: "7月15日 星期二".
+  ///
+  /// In en, this message translates to:
+  /// **'EEEE, MMM dd'**
+  String get historyDayPattern;
+
+  /// No description provided for @garminBurnLine.
+  ///
+  /// In en, this message translates to:
+  /// **'Active burn: ~{burn} kcal (Garmin) · net ~{net} kcal'**
+  String garminBurnLine(String burn, String net);
 }
 
 class _AppLocalizationsDelegate

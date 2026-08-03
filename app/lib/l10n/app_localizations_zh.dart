@@ -483,4 +483,12 @@ class AppLocalizationsZh extends AppLocalizations {
   String typicalDayOver(String typical, String delta) {
     return '日常：~$typical 千卡 · 超出 ~$delta 千卡';
   }
+
+  @override
+  String get historyDayPattern => 'M月d日 EEEE';
+
+  @override
+  String garminBurnLine(String burn, String net) {
+    return '活动消耗：~$burn 千卡（Garmin）· 净摄入 ~$net 千卡';
+  }
 }

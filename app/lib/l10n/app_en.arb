@@ -283,5 +283,20 @@
         "type": "String"
       }
     }
+  },
+  "historyDayPattern": "EEEE, MMM dd",
+  "@historyDayPattern": {
+    "description": "intl DateFormat PATTERN for dated history-day labels, not display text. en: \"Tuesday, Jul 15\"; zh: \"7月15日 星期二\"."
+  },
+  "garminBurnLine": "Active burn: ~{burn} kcal (Garmin) · net ~{net} kcal",
+  "@garminBurnLine": {
+    "placeholders": {
+      "burn": {
+        "type": "String"
+      },
+      "net": {
+        "type": "String"
+      }
+    }
   }
 }

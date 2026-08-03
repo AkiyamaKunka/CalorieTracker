@@ -5,6 +5,7 @@
 import 'dart:typed_data';
 
 import 'package:calorie_tracker/core/contracts.dart';
+import 'package:calorie_tracker/ui/format.dart' show isoDate;
 import 'package:calorie_tracker/ui/l10n.dart';
 import 'package:calorie_tracker/ui/screens/today_screen.dart';
 import 'package:calorie_tracker/ui/widgets/day_report.dart';
@@ -14,10 +15,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'fakes.dart';
 
 Meal _meal(int id, String time, String desc, num kcal,
-        {String hash = ''}) =>
+        {String hash = '', String date = '2026-08-02'}) =>
     Meal(
       id: id,
-      date: '2026-08-02',
+      date: date,
       time: time,
       timestamp: '2026-08-02T12:00:00',
       source: 'app_photo',
@@ -129,6 +130,12 @@ void main() {
     expect(find.text('今日饮食'), findsOneWidget);
     expect(find.text('380 千卡'), findsOneWidget);
     expect(find.text('由 CalorieTracker 记录'), findsOneWidget);
+    // Dates and clocks localize too (user-reported 2026-08-03: History
+    // weekdays stayed English in zh) — the report shares the helpers.
+    expect(find.text('8月2日 星期日'), findsOneWidget);
+    expect(find.text('08:05'), findsOneWidget,
+        reason: 'zh clocks are 24-hour, never AM/PM');
+    expect(find.text('8:05 AM'), findsNothing);
   });
 
   testWidgets('the share button appears only when meals exist',
@@ -145,7 +152,10 @@ void main() {
     expect(find.byKey(const Key('shareDayButton')), findsNothing,
         reason: 'an empty day has nothing to report');
 
-    dao.put(_meal(0, '8:05 AM', 'Soy milk', 110));
+    // TODAY's date, computed — a pinned date turns this into a time bomb
+    // the first midnight after it's written (it detonated 2026-08-03).
+    dao.put(_meal(0, '8:05 AM', 'Soy milk', 110,
+        date: isoDate(DateTime.now())));
     await tester.pumpWidget(MaterialApp(
         home: Scaffold(
             body: TodayScreen(

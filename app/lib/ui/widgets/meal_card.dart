@@ -10,6 +10,7 @@ import '../../core/contracts.dart';
 import 'dart:typed_data';
 
 import '../format.dart';
+import '../l10n.dart';
 import 'grouped.dart' show GroupedCard;
 import 'macro_chart.dart' show MacroPalette;
 import 'meal_thumb.dart';
@@ -77,7 +78,8 @@ class MealCard extends StatelessWidget {
                     ),
                   ),
                 const SizedBox(width: 8),
-                Text(meal.time, style: theme.textTheme.bodySmall),
+                Text(context.clock(meal.time),
+                    style: theme.textTheme.bodySmall),
                 if (onTap != null) ...[
                   const SizedBox(width: 2),
                   Icon(Icons.chevron_right,
@@ -95,7 +97,8 @@ class MealCard extends StatelessWidget {
               spacing: 6,
               runSpacing: 4,
               children: [
-                _chip(context, '~${displayTotalCalories(a)} kcal',
+                _chip(context,
+                    '~${context.l10n.kcalAmount(displayTotalCalories(a))}',
                     emphasized: true),
                 _chip(context, 'P: ${displayMacro(a, 'total_protein_g')}g',
                     tint: MacroPalette.of(context).protein),
@@ -113,7 +116,7 @@ class MealCard extends StatelessWidget {
                   child: Text(
                     // Item line per §5.4; name stringified, missing → '?'.
                     '• ${item['name'] ?? '?'}: '
-                    '~${displayItemCalories(item['estimated_calories'])} kcal',
+                    '~${context.l10n.kcalAmount(displayItemCalories(item['estimated_calories']))}',
                     style: theme.textTheme.bodySmall,
                   ),
                 ),

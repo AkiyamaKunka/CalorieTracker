@@ -8,7 +8,9 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:calorie_tracker/core/contracts.dart';
 import 'package:calorie_tracker/ui/app.dart';
+import 'package:calorie_tracker/ui/format.dart' show isoDate;
 
 import 'fakes.dart';
 
@@ -24,6 +26,41 @@ void main() {
     expect(find.text('身体'), findsOneWidget);
     expect(find.text('设置'), findsOneWidget);
     expect(find.text('Today'), findsNothing);
+  });
+
+  testWidgets('History day labels speak the app language '
+      '(user-reported: weekdays stayed English in zh)', (tester) async {
+    final dao = FakeDao();
+    final day = DateTime.now().subtract(const Duration(days: 3));
+    dao.put(Meal(
+      id: 1,
+      date: isoDate(day),
+      time: '8:05 AM',
+      timestamp: '${isoDate(day)}T08:05:00',
+      source: 'app_photo',
+      imageHash: '',
+      analysis: const {
+        'is_food': true,
+        'total_calories': 380,
+        'meal_description': 'Soy milk',
+      },
+    ));
+    final settings = FakeSettings()..appLanguage = 'zh';
+    await tester.pumpWidget(CalorieTrackerApp(
+        services: makeServices(dao: dao, settings: settings)));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('历史'));
+    await tester.pumpAndSettle();
+    // A zh user must see 星期X, never 'Saturday' — and 千卡, never 'kcal'.
+    expect(find.textContaining('星期'), findsWidgets);
+    expect(find.textContaining('千卡'), findsWidgets);
+    expect(find.textContaining('kcal'), findsNothing);
+    for (final en in const [
+      'Monday', 'Tuesday', 'Wednesday', 'Thursday',
+      'Friday', 'Saturday', 'Sunday',
+    ]) {
+      expect(find.textContaining(en), findsNothing);
+    }
   });
 
   testWidgets('picking 中文 in Settings re-locales the app in place',

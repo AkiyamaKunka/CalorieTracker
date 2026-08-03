@@ -396,8 +396,9 @@ class TodayScreenState extends State<TodayScreen> {
             if (_garmin != null && _garmin!.activeCalories > 0) ...[
               const SizedBox(height: 4),
               Text(
-                'Active burn: ~${formatKcal(_garmin!.activeCalories)} kcal '
-                '(Garmin) · net ~${formatKcal(totals.cal - _garmin!.activeCalories)} kcal',
+                context.l10n.garminBurnLine(
+                    formatKcal(_garmin!.activeCalories),
+                    formatKcal(totals.cal - _garmin!.activeCalories)),
                 key: const Key('garminBurnLine'),
                 style: theme.textTheme.bodySmall
                     ?.copyWith(color: scheme.onSurfaceVariant),

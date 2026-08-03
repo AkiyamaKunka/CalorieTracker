@@ -520,4 +520,12 @@ class AppLocalizationsEn extends AppLocalizations {
   String typicalDayOver(String typical, String delta) {
     return 'Typical day: ~$typical kcal · ~$delta kcal above typical';
   }
+
+  @override
+  String get historyDayPattern => 'EEEE, MMM dd';
+
+  @override
+  String garminBurnLine(String burn, String net) {
+    return 'Active burn: ~$burn kcal (Garmin) · net ~$net kcal';
+  }
 }

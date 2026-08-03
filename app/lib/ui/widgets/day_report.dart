@@ -84,7 +84,7 @@ class DayReportCard extends StatelessWidget {
                     Text(l.reportTitle,
                         style: theme.textTheme.titleLarge
                             ?.copyWith(fontWeight: FontWeight.w700)),
-                    Text(friendlyHistoryDay(date),
+                    Text(context.friendlyDay(date),
                         style: theme.textTheme.bodyMedium
                             ?.copyWith(color: scheme.onSurfaceVariant)),
                   ],
@@ -221,7 +221,8 @@ class DayReportCard extends StatelessWidget {
                           ?.copyWith(fontWeight: FontWeight.w600)),
                 ),
                 const SizedBox(width: 8),
-                Text(rm.meal.time, style: theme.textTheme.bodySmall),
+                Text(context.clock(rm.meal.time),
+                    style: theme.textTheme.bodySmall),
               ],
             ),
             const SizedBox(height: 6),

@@ -138,12 +138,32 @@ int? typicalDayKcal(Map<String, num> perDay) {
 /// persist dates that no query could match.
 String isoDate(DateTime d) => logic.isoDate(d);
 
-/// History day label: 'Today' for today, else `%A, %b %d` e.g.
-/// 'Tuesday, Jul 15' (spec §5.3).
-String friendlyHistoryDay(String date, {DateTime? now}) {
+/// History day label: [todayLabel] for today, else [pattern] via intl —
+/// defaults reproduce the original English `%A, %b %d` e.g.
+/// 'Tuesday, Jul 15' (spec §5.3). UI callers go through
+/// `context.friendlyDay`, which feeds the locale's pattern and 今天/Today.
+String friendlyHistoryDay(String date,
+    {DateTime? now,
+    String? localeName,
+    String pattern = 'EEEE, MMM dd',
+    String todayLabel = 'Today'}) {
   final today = isoDate(now ?? DateTime.now());
-  if (date == today) return 'Today';
+  if (date == today) return todayLabel;
   final parsed = DateTime.tryParse(date);
   if (parsed == null) return date;
-  return DateFormat('EEEE, MMM dd').format(parsed);
+  return DateFormat(pattern, localeName).format(parsed);
+}
+
+/// Stored meal clock → locale display. English passes the stored string
+/// through UNTOUCHED (it already is the en display; intl's own en output
+/// would sneak in a U+202F before AM). Chinese reformats to the 24-hour
+/// '08:05' CLDR gives zh. STORAGE is untouched — meals.time keeps the
+/// server-parity `%I:%M %p` shape; anything unparseable renders raw
+/// (poison rows degrade, spec §1.2).
+String displayClock(String raw, {String? localeName}) {
+  if (localeName == null || !localeName.startsWith('zh')) return raw;
+  final t = parseClock(raw);
+  if (t == null) return raw;
+  return DateFormat.jm(localeName)
+      .format(DateTime(2000, 1, 1, t.hour, t.minute));
 }

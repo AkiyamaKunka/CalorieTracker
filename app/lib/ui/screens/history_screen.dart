@@ -77,7 +77,7 @@ class HistoryScreenState extends State<HistoryScreen> {
   /// Weekday span w600, remainder quiet — same string, richer weight.
   Widget _dayTitle(BuildContext context, String date, {required bool dimmed}) {
     final theme = Theme.of(context);
-    final text = friendlyHistoryDay(date);
+    final text = context.friendlyDay(date);
     final comma = text.indexOf(', ');
     final dimColor = theme.colorScheme.onSurfaceVariant;
     if (dimmed || comma < 0) {
@@ -143,7 +143,7 @@ class HistoryScreenState extends State<HistoryScreen> {
         mainAxisSize: MainAxisSize.min,
         children: [
           has
-              ? Text('~${formatKcal(kcal!)} kcal',
+              ? Text('~${context.l10n.kcalAmount(formatKcal(kcal!))}',
                   style: theme.textTheme.labelLarge?.copyWith(
                       fontFeatures: const [FontFeature.tabularFigures()]))
               : Text(context.l10n.historyNoMeals,

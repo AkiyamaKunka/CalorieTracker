@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/contracts.dart';
 import '../format.dart';
+import '../l10n.dart';
 import '../meal_thumbs.dart';
 import '../widgets/macro_chart.dart';
 import '../widgets/meal_thumb.dart';
@@ -94,7 +95,7 @@ class _DayDetailScreenState extends State<DayDetailScreen> {
       onPopInvokedWithResult: (didPop, _) {},
       child: Scaffold(
         appBar: AppBar(
-          title: Text(friendlyHistoryDay(widget.date,
+          title: Text(context.friendlyDay(widget.date,
               now: (widget.now ?? DateTime.now)())),
         ),
         body: _loading
@@ -120,7 +121,7 @@ class _DayDetailScreenState extends State<DayDetailScreen> {
                       physics: const AlwaysScrollableScrollPhysics(),
                       padding: const EdgeInsets.fromLTRB(16, 12, 16, 96),
                       children: [
-                        Text('~${formatKcal(totals.cal)} kcal',
+                        Text('~${context.l10n.kcalAmount(formatKcal(totals.cal))}',
                             key: const Key('dayTotalKcal'),
                             style: theme.textTheme.headlineSmall),
                         Text(
@@ -206,7 +207,7 @@ class _MealRow extends StatelessWidget {
                         style: theme.textTheme.titleSmall),
                   ),
                   const SizedBox(width: 8),
-                  Text(meal.time,
+                  Text(context.clock(meal.time),
                       style: theme.textTheme.bodySmall?.copyWith(
                           color: theme.colorScheme.onSurfaceVariant)),
                 ],
@@ -214,7 +215,7 @@ class _MealRow extends StatelessWidget {
               const SizedBox(height: 6),
               Row(
                 children: [
-                  Text('~${displayTotalCalories(a)} kcal',
+                  Text('~${context.l10n.kcalAmount(displayTotalCalories(a))}',
                       style: theme.textTheme.bodyMedium),
                   if (meal.corrected) ...[
                     const SizedBox(width: 8),
