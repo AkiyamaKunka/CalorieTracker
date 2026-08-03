@@ -528,4 +528,35 @@ class AppLocalizationsEn extends AppLocalizations {
   String garminBurnLine(String burn, String net) {
     return 'Active burn: ~$burn kcal (Garmin) · net ~$net kcal';
   }
+
+  @override
+  String get settingsRowUnits => 'Units';
+
+  @override
+  String get unitsMetric => 'Metric';
+
+  @override
+  String get unitsImperial => 'Imperial';
+
+  @override
+  String get unitsMetricDetail => 'Metric — kg · cm';
+
+  @override
+  String get unitsImperialDetail => 'Imperial — lb · in';
+
+  @override
+  String get unitsSheetTitle => 'Units';
+
+  @override
+  String get unitsFooter =>
+      'How body weight and measurements are shown and entered. Food stays in grams and kcal either way.';
+
+  @override
+  String get bodyEmptyHintImperial =>
+      'Tap Log to record your weight or your waist, chest and hip measurements. Weight logged by chat (\"I weigh 180 lb\") lands here too.';
+
+  @override
+  String bodySince(String date) {
+    return 'since $date';
+  }
 }

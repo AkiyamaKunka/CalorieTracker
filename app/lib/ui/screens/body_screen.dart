@@ -17,6 +17,8 @@ import 'package:flutter/material.dart';
 import '../../core/contracts.dart';
 import '../../core/shared_generated.dart';
 import '../l10n.dart';
+import '../services.dart' show SettingsStore;
+import '../units.dart';
 import '../widgets/grouped.dart' show cellBackground;
 
 /// Chart + list window. A year keeps the page honest for lapsed loggers
@@ -29,8 +31,11 @@ const double kGirthMinCm = 20;
 const double kGirthMaxCm = 300;
 
 class BodyScreen extends StatefulWidget {
-  const BodyScreen({super.key, required this.dao, this.clock});
+  const BodyScreen({super.key, required this.dao, this.settings, this.clock});
   final MealsDao dao;
+
+  /// For the units preference; null (tests that predate it) means metric.
+  final SettingsStore? settings;
 
   /// Test seam; defaults to [DateTime.now].
   final DateTime Function()? clock;
@@ -95,8 +100,13 @@ class BodyScreenState extends State<BodyScreen> {
     return null;
   }
 
+  /// Whether THIS build renders imperial (en UI + imperial preference).
+  bool get _imperial => widget.settings != null &&
+      useImperial(context, widget.settings!);
+
   Future<void> _openSheet({String? date}) async {
     final initialDate = date ?? _iso(_now);
+    final imperial = _imperial; // resolved before the sheet detaches
     final saved = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
@@ -106,6 +116,7 @@ class BodyScreenState extends State<BodyScreen> {
         existingWeight: _weightOn(initialDate)?.kg,
         existing: _measurementsOn(initialDate),
         latestDate: date == null ? null : _iso(_now),
+        imperial: imperial,
       ),
     );
     if (saved == true) await reload();
@@ -179,7 +190,9 @@ class BodyScreenState extends State<BodyScreen> {
                         style: theme.textTheme.titleMedium),
                     const SizedBox(height: 8),
                     Text(
-                      context.l10n.bodyEmptyHint,
+                      _imperial
+                          ? context.l10n.bodyEmptyHintImperial
+                          : context.l10n.bodyEmptyHint,
                       textAlign: TextAlign.center,
                       style: theme.textTheme.bodyMedium?.copyWith(
                           color: theme.colorScheme.onSurfaceVariant),
@@ -193,10 +206,12 @@ class BodyScreenState extends State<BodyScreen> {
               SliverPadding(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
                 sliver: SliverList.list(children: [
-                if (_weights.isNotEmpty) _WeightCard(weights: _weights),
+                if (_weights.isNotEmpty)
+                  _WeightCard(weights: _weights, imperial: _imperial),
                 if (_measurements.isNotEmpty) ...[
                   const SizedBox(height: 12),
-                  _MeasurementsCard(measurements: _measurements),
+                  _MeasurementsCard(
+                      measurements: _measurements, imperial: _imperial),
                 ],
                 const SizedBox(height: 20),
                 Padding(
@@ -240,6 +255,7 @@ class BodyScreenState extends State<BodyScreen> {
                           date: _dates[i],
                           weight: _weightOn(_dates[i]),
                           measurements: _measurementsOn(_dates[i]),
+                          imperial: _imperial,
                           onTap: () => _openSheet(date: _dates[i]),
                         ),
                       ),
@@ -256,15 +272,22 @@ class BodyScreenState extends State<BodyScreen> {
 // ─── weight card ────────────────────────────────────────────────────
 
 class _WeightCard extends StatelessWidget {
-  const _WeightCard({required this.weights});
+  const _WeightCard({required this.weights, required this.imperial});
   final List<WeightEntry> weights; // ascending
+  final bool imperial;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final latest = weights.last;
     final previous = weights.length > 1 ? weights[weights.length - 2] : null;
-    final delta = previous == null ? null : latest.kg - previous.kg;
+    // Delta CONVERTS-then-subtracts (not subtract-then-convert): both give
+    // the same number for a linear unit, but rounding happens per-value on
+    // screen, so the chip must match what the two headlines imply.
+    final delta = previous == null
+        ? null
+        : weightForDisplay(latest.kg, imperial) -
+            weightForDisplay(previous.kg, imperial);
     return Card(
       margin: EdgeInsets.zero,
       child: Padding(
@@ -278,20 +301,21 @@ class _WeightCard extends StatelessWidget {
             Row(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Text(_kg(latest.kg),
+                Text(fmtBodyValue(weightForDisplay(latest.kg, imperial)),
                     key: const Key('bodyWeightHeadline'),
                     style: theme.textTheme.displaySmall),
                 const SizedBox(width: 4),
                 Padding(
                   padding: const EdgeInsets.only(bottom: 6),
-                  child: Text('kg', style: theme.textTheme.titleMedium),
+                  child: Text(weightUnitLabel(imperial),
+                      style: theme.textTheme.titleMedium),
                 ),
                 const Spacer(),
                 if (delta != null)
                   _DeltaChip(
                       key: const Key('bodyWeightDelta'),
                       delta: delta,
-                      unit: 'kg',
+                      unit: weightUnitLabel(imperial),
                       sinceDate: previous!.date),
               ],
             ),
@@ -313,6 +337,7 @@ class _WeightCard extends StatelessWidget {
                     axis: theme.colorScheme.outlineVariant,
                     label: theme.colorScheme.onSurfaceVariant,
                     textDirection: Directionality.of(context),
+                    imperial: imperial,
                   ),
                 ),
               ),
@@ -323,8 +348,6 @@ class _WeightCard extends StatelessWidget {
     );
   }
 
-  static String _kg(double v) =>
-      v == v.roundToDouble() ? v.round().toString() : v.toStringAsFixed(1);
 }
 
 class _DeltaChip extends StatelessWidget {
@@ -348,7 +371,7 @@ class _DeltaChip extends StatelessWidget {
         ? context.l10n.bodyNoChange
         : '$sign${delta.abs().toStringAsFixed(1)} $unit';
     return Tooltip(
-      message: 'since $sinceDate',
+      message: context.l10n.bodySince(sinceDate),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
         decoration: BoxDecoration(
@@ -364,8 +387,10 @@ class _DeltaChip extends StatelessWidget {
 // ─── measurements card ──────────────────────────────────────────────
 
 class _MeasurementsCard extends StatelessWidget {
-  const _MeasurementsCard({required this.measurements});
+  const _MeasurementsCard(
+      {required this.measurements, required this.imperial});
   final List<BodyMeasurements> measurements; // ascending
+  final bool imperial;
 
   @override
   Widget build(BuildContext context) {
@@ -415,13 +440,18 @@ class _MeasurementsCard extends StatelessWidget {
     }
     final latest = series.last;
     final previous = series.length > 1 ? series[series.length - 2] : null;
-    final delta = previous == null ? null : latest.$2 - previous.$2;
+    final delta = previous == null
+        ? null
+        : girthForDisplay(latest.$2, imperial) -
+            girthForDisplay(previous.$2, imperial);
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(
         children: [
           SizedBox(width: 64, child: Text(label)),
-          Text('${_cm(latest.$2)} cm',
+          Text(
+              '${fmtBodyValue(girthForDisplay(latest.$2, imperial))} '
+              '${girthUnitLabel(imperial)}',
               key: key, style: theme.textTheme.titleMedium),
           const SizedBox(width: 8),
           Text(context.l10n.bodyOnDate(latest.$1),
@@ -439,8 +469,6 @@ class _MeasurementsCard extends StatelessWidget {
     );
   }
 
-  static String _cm(double v) =>
-      v == v.roundToDouble() ? v.round().toString() : v.toStringAsFixed(1);
 }
 
 // ─── history row ────────────────────────────────────────────────────
@@ -451,20 +479,25 @@ class _HistoryRow extends StatelessWidget {
     required this.date,
     required this.weight,
     required this.measurements,
+    required this.imperial,
     required this.onTap,
   });
   final String date;
   final WeightEntry? weight;
   final BodyMeasurements? measurements;
+  final bool imperial;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
+    String girth(double cm) => _v(girthForDisplay(cm, imperial));
     final parts = <String>[
-      if (weight != null) '${weight!.kg.toStringAsFixed(1)} kg',
-      if (measurements?.waistCm != null) 'W ${_v(measurements!.waistCm!)}',
-      if (measurements?.chestCm != null) 'C ${_v(measurements!.chestCm!)}',
-      if (measurements?.hipCm != null) 'H ${_v(measurements!.hipCm!)}',
+      if (weight != null)
+        '${weightForDisplay(weight!.kg, imperial).toStringAsFixed(1)} '
+            '${weightUnitLabel(imperial)}',
+      if (measurements?.waistCm != null) 'W ${girth(measurements!.waistCm!)}',
+      if (measurements?.chestCm != null) 'C ${girth(measurements!.chestCm!)}',
+      if (measurements?.hipCm != null) 'H ${girth(measurements!.hipCm!)}',
     ];
     final theme = Theme.of(context);
     return InkWell(
@@ -510,6 +543,7 @@ class LogBodySheet extends StatefulWidget {
     this.existingWeight,
     this.existing,
     this.latestDate,
+    this.imperial = false,
   });
   final MealsDao dao;
   final String date;
@@ -519,6 +553,9 @@ class LogBodySheet extends StatefulWidget {
   /// When editing an old day, today's date (for the header hint); null when
   /// already logging today.
   final String? latestDate;
+
+  /// Display/input unit system; values are STORED metric either way.
+  final bool imperial;
 
   @override
   State<LogBodySheet> createState() => _LogBodySheetState();
@@ -535,15 +572,18 @@ class _LogBodySheetState extends State<LogBodySheet> {
   @override
   void initState() {
     super.initState();
-    _weight = TextEditingController(text: _fmt(widget.existingWeight));
-    _waist = TextEditingController(text: _fmt(widget.existing?.waistCm));
-    _chest = TextEditingController(text: _fmt(widget.existing?.chestCm));
-    _hip = TextEditingController(text: _fmt(widget.existing?.hipCm));
+    _weight = TextEditingController(
+        text: _fmt(widget.existingWeight, weightForDisplay));
+    _waist = TextEditingController(
+        text: _fmt(widget.existing?.waistCm, girthForDisplay));
+    _chest = TextEditingController(
+        text: _fmt(widget.existing?.chestCm, girthForDisplay));
+    _hip = TextEditingController(
+        text: _fmt(widget.existing?.hipCm, girthForDisplay));
   }
 
-  static String _fmt(double? v) => v == null
-      ? ''
-      : (v == v.roundToDouble() ? v.round().toString() : v.toStringAsFixed(1));
+  String _fmt(double? metric, double Function(double, bool) toDisplay) =>
+      metric == null ? '' : fmtBodyValue(toDisplay(metric, widget.imperial));
 
   @override
   void dispose() {
@@ -554,32 +594,59 @@ class _LogBodySheetState extends State<LogBodySheet> {
     super.dispose();
   }
 
-  /// Parse one field: (value, problem). Empty is a valid "no value".
+  /// Parse one field → METRIC: (value, problem). Empty is a valid
+  /// "no value". Bounds are metric (the shared parity bounds); the error
+  /// message shows them in the DISPLAY unit. [existingMetric] guards
+  /// round-trip drift: an untouched prefill keeps the stored value
+  /// bit-for-bit instead of lb→kg'ing the rounded display text.
   (double?, String?) _parse(
-      TextEditingController c, String label, double min, double max) {
+      TextEditingController c,
+      String label,
+      double min,
+      double max,
+      double Function(double, bool) toMetricSpace, // input → metric
+      double Function(double, bool) toDisplaySpace, // metric → display
+      double? existingMetric) {
     final raw = c.text.trim().replaceAll(',', '.');
     if (raw.isEmpty) return (null, null);
-    final v = double.tryParse(raw);
-    if (v == null) {
+    if (existingMetric != null &&
+        raw == fmtBodyValue(toDisplaySpace(existingMetric, widget.imperial))) {
+      return (existingMetric, null);
+    }
+    final typed = double.tryParse(raw);
+    if (typed == null) {
       return (null, context.l10n.bodyErrNotNumber(label, raw));
     }
-    if (v < min || v > max) {
+    final v = toMetricSpace(typed, widget.imperial);
+    // The error message advertises 1-decimal DISPLAY bounds, so accept
+    // anything that rounds into them (typing the advertised '66.1' lb
+    // must not bounce off 30 kg), then clamp to the exact parity bounds
+    // for storage.
+    final tol = toMetricSpace(0.05, widget.imperial);
+    if (v < min - tol || v > max + tol) {
       return (null,
-          context.l10n.bodyErrBounds(label, _num(min), _num(max)));
+          context.l10n.bodyErrBounds(
+              label,
+              fmtBodyValue(toDisplaySpace(min, widget.imperial)),
+              fmtBodyValue(toDisplaySpace(max, widget.imperial))));
     }
-    return (v, null);
+    return (v.clamp(min, max).toDouble(), null);
   }
 
-  static String _num(double v) =>
-      v == v.roundToDouble() ? v.round().toString() : v.toString();
-
   Future<void> _save() async {
-    final (kg, e1) = _parse(_weight, 'Weight',
+    final l = context.l10n;
+    final (kg, e1) = _parse(_weight, l.bodyFieldWeight,
         SharedConstants.weightMinKg.toDouble(),
-        SharedConstants.weightMaxKg.toDouble());
-    final (waist, e2) = _parse(_waist, 'Waist', kGirthMinCm, kGirthMaxCm);
-    final (chest, e3) = _parse(_chest, 'Chest', kGirthMinCm, kGirthMaxCm);
-    final (hip, e4) = _parse(_hip, 'Hip', kGirthMinCm, kGirthMaxCm);
+        SharedConstants.weightMaxKg.toDouble(),
+        weightFromInput, weightForDisplay, widget.existingWeight);
+    final (waist, e2) = _parse(_waist, l.bodyWaist, kGirthMinCm,
+        kGirthMaxCm, girthFromInput, girthForDisplay,
+        widget.existing?.waistCm);
+    final (chest, e3) = _parse(_chest, l.bodyChest, kGirthMinCm,
+        kGirthMaxCm, girthFromInput, girthForDisplay,
+        widget.existing?.chestCm);
+    final (hip, e4) = _parse(_hip, l.bodyHip, kGirthMinCm, kGirthMaxCm,
+        girthFromInput, girthForDisplay, widget.existing?.hipCm);
     final problem = e1 ?? e2 ?? e3 ?? e4;
     if (problem != null) {
       setState(() => _error = problem);
@@ -648,8 +715,8 @@ class _LogBodySheetState extends State<LogBodySheet> {
                         decimal: true),
                     decoration: InputDecoration(
                       labelText: context.l10n.bodyFieldWeight,
-                      suffixText: 'kg',
-                      border: OutlineInputBorder(),
+                      suffixText: weightUnitLabel(widget.imperial),
+                      border: const OutlineInputBorder(),
                     ),
                   ),
                 ),
@@ -662,8 +729,8 @@ class _LogBodySheetState extends State<LogBodySheet> {
                         decimal: true),
                     decoration: InputDecoration(
                       labelText: context.l10n.bodyWaist,
-                      suffixText: 'cm',
-                      border: OutlineInputBorder(),
+                      suffixText: girthUnitLabel(widget.imperial),
+                      border: const OutlineInputBorder(),
                     ),
                   ),
                 ),
@@ -680,8 +747,8 @@ class _LogBodySheetState extends State<LogBodySheet> {
                         decimal: true),
                     decoration: InputDecoration(
                       labelText: context.l10n.bodyChest,
-                      suffixText: 'cm',
-                      border: OutlineInputBorder(),
+                      suffixText: girthUnitLabel(widget.imperial),
+                      border: const OutlineInputBorder(),
                     ),
                   ),
                 ),
@@ -694,8 +761,8 @@ class _LogBodySheetState extends State<LogBodySheet> {
                         decimal: true),
                     decoration: InputDecoration(
                       labelText: context.l10n.bodyHip,
-                      suffixText: 'cm',
-                      border: OutlineInputBorder(),
+                      suffixText: girthUnitLabel(widget.imperial),
+                      border: const OutlineInputBorder(),
                     ),
                   ),
                 ),
@@ -736,6 +803,7 @@ class WeightTrendPainter extends CustomPainter {
     required this.axis,
     required this.label,
     required this.textDirection,
+    this.imperial = false,
   });
 
   final List<WeightEntry> entries; // ascending by date
@@ -743,6 +811,10 @@ class WeightTrendPainter extends CustomPainter {
   final Color axis;
   final Color label;
   final TextDirection textDirection;
+
+  /// Label values convert to lb; geometry stays in kg (linear, so shape
+  /// is identical either way).
+  final bool imperial;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -799,7 +871,7 @@ class WeightTrendPainter extends CustomPainter {
     for (final i in {minI, maxI, values.length - 1}) {
       final tp = TextPainter(
         text: TextSpan(
-            text: values[i].toStringAsFixed(1),
+            text: weightForDisplay(values[i], imperial).toStringAsFixed(1),
             style: TextStyle(fontSize: 10, color: label)),
         textDirection: textDirection,
       )..layout();
@@ -823,6 +895,7 @@ class WeightTrendPainter extends CustomPainter {
   bool shouldRepaint(WeightTrendPainter old) =>
       old.entries.length != entries.length ||
       old.line != line ||
+      old.imperial != imperial ||
       (entries.isNotEmpty &&
           old.entries.isNotEmpty &&
           (old.entries.last.date != entries.last.date ||

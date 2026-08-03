@@ -491,4 +491,34 @@ class AppLocalizationsZh extends AppLocalizations {
   String garminBurnLine(String burn, String net) {
     return '活动消耗：~$burn 千卡（Garmin）· 净摄入 ~$net 千卡';
   }
+
+  @override
+  String get settingsRowUnits => '单位';
+
+  @override
+  String get unitsMetric => '公制';
+
+  @override
+  String get unitsImperial => '英制';
+
+  @override
+  String get unitsMetricDetail => '公制 — 公斤 · 厘米';
+
+  @override
+  String get unitsImperialDetail => '英制 — 磅 · 英寸';
+
+  @override
+  String get unitsSheetTitle => '单位';
+
+  @override
+  String get unitsFooter => '身体体重与围度的显示和输入单位。食物始终使用克与千卡。';
+
+  @override
+  String get bodyEmptyHintImperial =>
+      '点击\"记录\"来记体重或腰围、胸围、臀围。通过对话记录的体重（\"我今天 81.6 公斤\"）也会显示在这里。';
+
+  @override
+  String bodySince(String date) {
+    return '自 $date';
+  }
 }

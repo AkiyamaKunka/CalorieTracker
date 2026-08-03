@@ -967,6 +967,60 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Active burn: ~{burn} kcal (Garmin) · net ~{net} kcal'**
   String garminBurnLine(String burn, String net);
+
+  /// No description provided for @settingsRowUnits.
+  ///
+  /// In en, this message translates to:
+  /// **'Units'**
+  String get settingsRowUnits;
+
+  /// No description provided for @unitsMetric.
+  ///
+  /// In en, this message translates to:
+  /// **'Metric'**
+  String get unitsMetric;
+
+  /// No description provided for @unitsImperial.
+  ///
+  /// In en, this message translates to:
+  /// **'Imperial'**
+  String get unitsImperial;
+
+  /// No description provided for @unitsMetricDetail.
+  ///
+  /// In en, this message translates to:
+  /// **'Metric — kg · cm'**
+  String get unitsMetricDetail;
+
+  /// No description provided for @unitsImperialDetail.
+  ///
+  /// In en, this message translates to:
+  /// **'Imperial — lb · in'**
+  String get unitsImperialDetail;
+
+  /// No description provided for @unitsSheetTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Units'**
+  String get unitsSheetTitle;
+
+  /// No description provided for @unitsFooter.
+  ///
+  /// In en, this message translates to:
+  /// **'How body weight and measurements are shown and entered. Food stays in grams and kcal either way.'**
+  String get unitsFooter;
+
+  /// bodyEmptyHint for imperial units (en-only surface; zh never renders imperial).
+  ///
+  /// In en, this message translates to:
+  /// **'Tap Log to record your weight or your waist, chest and hip measurements. Weight logged by chat (\"I weigh 180 lb\") lands here too.'**
+  String get bodyEmptyHintImperial;
+
+  /// No description provided for @bodySince.
+  ///
+  /// In en, this message translates to:
+  /// **'since {date}'**
+  String bodySince(String date);
 }
 
 class _AppLocalizationsDelegate

@@ -58,6 +58,10 @@ abstract class SettingsStore {
   /// 'system' | 'en' | 'zh' — the UI language override (app-only §9).
   String get appLanguage;
 
+  /// 'metric' | 'imperial' — body-data DISPLAY units (app-only §9;
+  /// storage stays metric, zh UI renders metric regardless).
+  String get units;
+
   Future<void> update({
     String? apiKey,
     String? provider,
@@ -69,6 +73,7 @@ abstract class SettingsStore {
     String? serverBaseUrl,
     String? serverBackend,
     String? appLanguage,
+    String? units,
   });
 }
 

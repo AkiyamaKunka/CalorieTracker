@@ -580,6 +580,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   List<Widget> _languageSection(ThemeData theme) => [
         GroupedSection(
           header: context.l10n.settingsRowLanguage,
+          // The Units row rides the language section and only exists in
+          // the ENGLISH UI: the Chinese UI is always metric (user
+          // decision 2026-08-03), so offering the choice there would be
+          // a lie — the zh screens ignore it.
+          footer: _showUnitsRow ? context.l10n.unitsFooter : null,
           children: [
             GroupedRow(
               key: const Key('languageRow'),
@@ -589,9 +594,73 @@ class _SettingsScreenState extends State<SettingsScreen> {
               value: _languageLabel(context),
               onTap: _pickLanguage,
             ),
+            if (_showUnitsRow)
+              GroupedRow(
+                key: const Key('unitsRow'),
+                icon: Icons.straighten,
+                iconColor: theme.colorScheme.secondary,
+                title: context.l10n.settingsRowUnits,
+                value: widget.settings.units == 'imperial'
+                    ? context.l10n.unitsImperial
+                    : context.l10n.unitsMetric,
+                onTap: _pickUnits,
+              ),
           ],
         ),
   ];
+
+  bool get _showUnitsRow =>
+      Localizations.maybeLocaleOf(context)?.languageCode != 'zh';
+
+  Future<void> _pickUnits() async {
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      backgroundColor: groupedBackground(Theme.of(context).colorScheme),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(ctx.l10n.unitsSheetTitle,
+                    style: Theme.of(ctx)
+                        .textTheme
+                        .titleLarge
+                        ?.copyWith(fontWeight: FontWeight.w600)),
+              ),
+            ),
+            GroupedSection(
+              separatorInset: 16,
+              children: [
+                for (final (value, label) in [
+                  ('metric', ctx.l10n.unitsMetricDetail),
+                  ('imperial', ctx.l10n.unitsImperialDetail),
+                ])
+                  GroupedRow(
+                    key: Key('units-$value'),
+                    title: label,
+                    showChevron: false,
+                    trailing: widget.settings.units == value
+                        ? Icon(Icons.check,
+                            size: 20,
+                            color: Theme.of(ctx).colorScheme.primary)
+                        : const SizedBox(width: 20),
+                    onTap: () => Navigator.pop(ctx, value),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+    if (picked == null || !mounted) return;
+    await widget.settings.update(units: picked);
+    if (mounted) setState(() {});
+  }
 
   /// Export and import — the food log is the user's.
   List<Widget> _dataSection(ThemeData theme) => [

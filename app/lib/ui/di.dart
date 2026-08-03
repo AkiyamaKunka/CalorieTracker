@@ -205,6 +205,8 @@ class _AppSettingsStore implements SettingsStore {
   String get serverBackend => _s.serverBackend;
   @override
   String get appLanguage => _s.appLanguage;
+  @override
+  String get units => _s.units;
 
   @override
   Future<void> update({
@@ -218,8 +220,10 @@ class _AppSettingsStore implements SettingsStore {
     String? serverBaseUrl,
     String? serverBackend,
     String? appLanguage,
+    String? units,
   }) async {
     if (appLanguage != null) await _s.setAppLanguage(appLanguage);
+    if (units != null) await _s.setUnits(units);
     if (provider != null) {
       await _s.setProvider(AiProvider.values
           .firstWhere((v) => v.name == provider, orElse: () => _s.provider));

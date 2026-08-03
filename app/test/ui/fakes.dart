@@ -161,6 +161,9 @@ class FakeSettings with ChangeNotifier implements SettingsStore {
   String appLanguage = 'system';
 
   @override
+  String units = 'metric';
+
+  @override
   Future<void> update({
     String? apiKey,
     String? provider,
@@ -172,9 +175,11 @@ class FakeSettings with ChangeNotifier implements SettingsStore {
     String? serverBaseUrl,
     String? serverBackend,
     String? appLanguage,
+    String? units,
   }) async {
     updateCalls++;
     if (appLanguage != null) this.appLanguage = appLanguage;
+    if (units != null) this.units = units;
     if (apiKey != null) this.apiKey = apiKey;
     if (provider != null) this.provider = provider;
     if (model != null) this.model = model;

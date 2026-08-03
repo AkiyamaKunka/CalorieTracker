@@ -70,6 +70,7 @@ class AppSettings extends ChangeNotifier {
   static const String _kLookbackDays = 'settings.lookback_days';
   static const String _kReportTime = 'settings.report_time';
   static const String _kAppLanguage = 'settings.app_language';
+  static const String _kUnits = 'settings.units';
   static const String _kWatcherEnabled = 'settings.watcher_enabled';
   static const String _kDietaryProfile = 'settings.dietary_profile';
   static const String _kQuotaPauseUntil = 'settings.quota_pause_until';
@@ -128,6 +129,7 @@ class AppSettings extends ChangeNotifier {
   int _lookbackDays = defaultLookbackDays;
   String _reportTime = defaultReportTime;
   String _appLanguage = 'system'; // 'system' | 'en' | 'zh'
+  String _units = 'metric'; // 'metric' | 'imperial'
   bool _watcherEnabled = false;
   String? _dietaryProfile;
   DateTime? _quotaPauseUntil;
@@ -178,6 +180,9 @@ class AppSettings extends ChangeNotifier {
     s._appLanguage = const {'system', 'en', 'zh'}.contains(lang)
         ? lang
         : 'system';
+    final units = p.getString(_kUnits) ?? 'metric';
+    s._units =
+        const {'metric', 'imperial'}.contains(units) ? units : 'metric';
     s._watcherEnabled = p.getBool(_kWatcherEnabled) ?? false;
     final profile = (p.getString(_kDietaryProfile) ?? '').trim();
     s._dietaryProfile = profile.isEmpty ? null : profile;
@@ -423,6 +428,19 @@ class AppSettings extends ChangeNotifier {
         : 'system';
     _appLanguage = v;
     await _prefs.setString(_kAppLanguage, v);
+    notifyListeners();
+  }
+
+  /// Body-data unit system for DISPLAY ('metric' | 'imperial'). Storage
+  /// stays metric everywhere; the Chinese UI ignores this and renders
+  /// metric regardless (user decision 2026-08-03). App-only (spec §9).
+  String get units => _units;
+
+  Future<void> setUnits(String value) async {
+    final v =
+        const {'metric', 'imperial'}.contains(value) ? value : 'metric';
+    _units = v;
+    await _prefs.setString(_kUnits, v);
     notifyListeners();
   }
 

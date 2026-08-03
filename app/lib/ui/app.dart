@@ -263,7 +263,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
               onAdd: () => openAddFlow(context, s,
                   onChanged: () async => _todayKey.currentState?.reload())),
           HistoryScreen(key: _historyKey, dao: s.dao, thumbs: s.thumbs),
-          BodyScreen(key: _bodyKey, dao: s.dao),
+          BodyScreen(key: _bodyKey, dao: s.dao, settings: s.settings),
           SettingsScreen(
             settings: s.settings,
             analyzer: s.analyzer,
