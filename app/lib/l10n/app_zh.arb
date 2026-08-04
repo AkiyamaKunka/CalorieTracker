@@ -167,5 +167,16 @@
   "leftoverDupRemoved": "这张照片还被误记成了一餐（{kcal} 千卡）— 该重复记录将一并删除。",
   "leftoverApplied": "已扣除剩菜。",
   "leftoverFailed": "无法从这张照片估算剩菜。",
-  "leftoverNoMeals": "今天和昨天没有可扣除的餐。"
+  "leftoverNoMeals": "今天和昨天没有可扣除的餐。",
+  "planTuningHeader": "模型与思考",
+  "planTuningFooter": "服务器用哪个 Claude 模型分析、思考多少。默认跟随服务器自身设置；仅 Claude 订阅提供此选项 — 其他套餐由服务商决定模型。",
+  "planModelRow": "模型",
+  "planEffortRow": "思考力度",
+  "planChoiceDefault": "服务器默认",
+  "planModelOpus": "Opus — 最准确",
+  "planModelSonnet": "Sonnet — 均衡",
+  "planModelHaiku": "Haiku — 最快",
+  "planEffortLow": "低 — 最快",
+  "planEffortMedium": "中",
+  "planEffortHigh": "高 — 最仔细"
 }

@@ -567,4 +567,38 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get leftoverNoMeals => '今天和昨天没有可扣除的餐。';
+
+  @override
+  String get planTuningHeader => '模型与思考';
+
+  @override
+  String get planTuningFooter =>
+      '服务器用哪个 Claude 模型分析、思考多少。默认跟随服务器自身设置；仅 Claude 订阅提供此选项 — 其他套餐由服务商决定模型。';
+
+  @override
+  String get planModelRow => '模型';
+
+  @override
+  String get planEffortRow => '思考力度';
+
+  @override
+  String get planChoiceDefault => '服务器默认';
+
+  @override
+  String get planModelOpus => 'Opus — 最准确';
+
+  @override
+  String get planModelSonnet => 'Sonnet — 均衡';
+
+  @override
+  String get planModelHaiku => 'Haiku — 最快';
+
+  @override
+  String get planEffortLow => '低 — 最快';
+
+  @override
+  String get planEffortMedium => '中';
+
+  @override
+  String get planEffortHigh => '高 — 最仔细';
 }

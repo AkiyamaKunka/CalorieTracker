@@ -351,5 +351,16 @@
   },
   "leftoverApplied": "Leftovers deducted.",
   "leftoverFailed": "Couldn't estimate the leftovers from that photo.",
-  "leftoverNoMeals": "No meals from today or yesterday to deduct from."
+  "leftoverNoMeals": "No meals from today or yesterday to deduct from.",
+  "planTuningHeader": "Model & thinking",
+  "planTuningFooter": "Which Claude model analyzes on your server, and how hard it thinks. Default follows the server's own setting; only the Claude plan offers this — the other plans choose models themselves.",
+  "planModelRow": "Model",
+  "planEffortRow": "Thinking effort",
+  "planChoiceDefault": "Server default",
+  "planModelOpus": "Opus — most accurate",
+  "planModelSonnet": "Sonnet — balanced",
+  "planModelHaiku": "Haiku — fastest",
+  "planEffortLow": "Low — fastest",
+  "planEffortMedium": "Medium",
+  "planEffortHigh": "High — most thorough"
 }

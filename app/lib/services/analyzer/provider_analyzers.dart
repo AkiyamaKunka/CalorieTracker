@@ -656,6 +656,17 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
 
   Uri _uri(String path) => Uri.parse('${settings.serverBaseUrl}$path');
 
+  /// The user's Claude-plan model/effort choice (2026-08-05). Sent ONLY
+  /// on the claude backend ('' = omit = server default): the vendor plans
+  /// map model names server-side and the API 400s overrides for them.
+  Map<String, String> _planChoice() {
+    if (settings.serverBackend != 'claude') return const {};
+    return {
+      if (settings.serverModel.isNotEmpty) 'model': settings.serverModel,
+      if (settings.serverEffort.isNotEmpty) 'effort': settings.serverEffort,
+    };
+  }
+
   @override
   Future<Map<String, dynamic>?> leftoverIntent(
       Uint8List originalBytes, String originalCompact) async {
@@ -682,6 +693,7 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
                 'image_b64': base64Encode(sendBytes),
                 'original_analysis': originalCompact,
                 'backend': settings.serverBackend,
+                ..._planChoice(),
               }))
           .timeout(deadline);
       if (resp.statusCode != 200) return null;
@@ -727,8 +739,13 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
               // 'glm' (coding plan) or 'doubao' (agent plan). The plan
               // keys live in the SERVER's .env — never on the phone.
               'backend': settings.serverBackend,
+              ..._planChoice(),
             }
-          : {'prompt': prompt, 'backend': settings.serverBackend});
+          : {
+              'prompt': prompt,
+              'backend': settings.serverBackend,
+              ..._planChoice(),
+            });
   }
 
   @override

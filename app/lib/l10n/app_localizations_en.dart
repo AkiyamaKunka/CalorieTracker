@@ -608,4 +608,38 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get leftoverNoMeals =>
       'No meals from today or yesterday to deduct from.';
+
+  @override
+  String get planTuningHeader => 'Model & thinking';
+
+  @override
+  String get planTuningFooter =>
+      'Which Claude model analyzes on your server, and how hard it thinks. Default follows the server\'s own setting; only the Claude plan offers this — the other plans choose models themselves.';
+
+  @override
+  String get planModelRow => 'Model';
+
+  @override
+  String get planEffortRow => 'Thinking effort';
+
+  @override
+  String get planChoiceDefault => 'Server default';
+
+  @override
+  String get planModelOpus => 'Opus — most accurate';
+
+  @override
+  String get planModelSonnet => 'Sonnet — balanced';
+
+  @override
+  String get planModelHaiku => 'Haiku — fastest';
+
+  @override
+  String get planEffortLow => 'Low — fastest';
+
+  @override
+  String get planEffortMedium => 'Medium';
+
+  @override
+  String get planEffortHigh => 'High — most thorough';
 }

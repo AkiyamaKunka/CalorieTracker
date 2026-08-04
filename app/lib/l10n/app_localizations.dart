@@ -1105,6 +1105,72 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'No meals from today or yesterday to deduct from.'**
   String get leftoverNoMeals;
+
+  /// No description provided for @planTuningHeader.
+  ///
+  /// In en, this message translates to:
+  /// **'Model & thinking'**
+  String get planTuningHeader;
+
+  /// No description provided for @planTuningFooter.
+  ///
+  /// In en, this message translates to:
+  /// **'Which Claude model analyzes on your server, and how hard it thinks. Default follows the server\'s own setting; only the Claude plan offers this — the other plans choose models themselves.'**
+  String get planTuningFooter;
+
+  /// No description provided for @planModelRow.
+  ///
+  /// In en, this message translates to:
+  /// **'Model'**
+  String get planModelRow;
+
+  /// No description provided for @planEffortRow.
+  ///
+  /// In en, this message translates to:
+  /// **'Thinking effort'**
+  String get planEffortRow;
+
+  /// No description provided for @planChoiceDefault.
+  ///
+  /// In en, this message translates to:
+  /// **'Server default'**
+  String get planChoiceDefault;
+
+  /// No description provided for @planModelOpus.
+  ///
+  /// In en, this message translates to:
+  /// **'Opus — most accurate'**
+  String get planModelOpus;
+
+  /// No description provided for @planModelSonnet.
+  ///
+  /// In en, this message translates to:
+  /// **'Sonnet — balanced'**
+  String get planModelSonnet;
+
+  /// No description provided for @planModelHaiku.
+  ///
+  /// In en, this message translates to:
+  /// **'Haiku — fastest'**
+  String get planModelHaiku;
+
+  /// No description provided for @planEffortLow.
+  ///
+  /// In en, this message translates to:
+  /// **'Low — fastest'**
+  String get planEffortLow;
+
+  /// No description provided for @planEffortMedium.
+  ///
+  /// In en, this message translates to:
+  /// **'Medium'**
+  String get planEffortMedium;
+
+  /// No description provided for @planEffortHigh.
+  ///
+  /// In en, this message translates to:
+  /// **'High — most thorough'**
+  String get planEffortHigh;
 }
 
 class _AppLocalizationsDelegate

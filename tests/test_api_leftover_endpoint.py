@@ -36,7 +36,7 @@ def _payload(**over):
 def _stub(monkeypatch, reply=LEFTOVER):
     captured = {}
 
-    def fake(image_bytes, prompt, backend="claude", raise_on_busy=False):
+    def fake(image_bytes, prompt, backend="claude", raise_on_busy=False, **kw):
         captured["bytes"] = image_bytes
         captured["prompt"] = prompt
         captured["backend"] = backend

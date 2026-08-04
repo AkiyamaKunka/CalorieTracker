@@ -4957,6 +4957,26 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         return jsonify({"ok": True,
                         "cancelled": claude_auth.cancel_session()})
 
+
+    def _plan_model_effort(payload, backend):
+        """Validate the app's optional model/effort choice (2026-08-05).
+
+        CLAUDE-ONLY closed whitelists — these become CLI argv, so anything
+        else is a 400 BEFORE a CLI run exists. Returns (model, effort,
+        error_response); error_response is None when valid.
+        """
+        model = payload.get("model") or None
+        effort = payload.get("effort") or None
+        if model is not None and (
+                backend != "claude"
+                or model not in claude_analyzer.CLAUDE_PLAN_MODELS):
+            return None, None, (jsonify({"error": "bad_model"}), 400)
+        if effort is not None and (
+                backend != "claude"
+                or effort not in claude_analyzer.CLAUDE_PLAN_EFFORTS):
+            return None, None, (jsonify({"error": "bad_effort"}), 400)
+        return model, effort, None
+
     @app.route('/api/analyze_photo', methods=['POST'])
     def api_analyze_photo():
         """Analyze a photo with the Claude Code CLI and RETURN the analysis.
@@ -4992,10 +5012,15 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
                     return jsonify({"error": "profile_too_large"}), 413
                 prompt = build_photo_prompt_with_profile(profile)
             backend = payload.get("backend") or "claude"
+            model, effort, bad = _plan_model_effort(payload, backend)
+            if bad:
+                return bad
         elif 'photo' in request.files:
             data = request.files['photo'].read()
+            model = effort = None
         else:
             data = request.get_data(cache=False) or b""
+            model = effort = None
         if not data:
             return jsonify({"error": "no_image"}), 400
         if len(data) > API_ANALYZE_MAX_BYTES:
@@ -5018,7 +5043,7 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         try:
             analysis = claude_analyzer.analyze_food_photo(
                 data, prompt, allow_file_fallback=False, backend=backend,
-                raise_on_busy=True)
+                raise_on_busy=True, model=model, effort=effort)
         except claude_analyzer.AnalyzerBusy:
             # Another photo owns the single-flight CLI — seconds fix this.
             return jsonify({"error": "claude_unavailable",
@@ -5069,6 +5094,9 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         backend = payload.get("backend") or "claude"
         if backend not in claude_analyzer.SUBSCRIPTION_BACKENDS:
             return jsonify({"error": "bad_backend"}), 400
+        model, effort, bad = _plan_model_effort(payload, backend)
+        if bad:
+            return bad
         if not claude_analyzer.backend_available(backend, for_photo=True):
             reason = claude_analyzer.backend_status().get(backend)
             log.warning(
@@ -5079,7 +5107,8 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         prompt = LEFTOVER_PROMPT_TEMPLATE.format(original_analysis=compact)
         try:
             leftover = claude_analyzer.analyze_leftover_photo(
-                data, prompt, backend=backend, raise_on_busy=True)
+                data, prompt, backend=backend, raise_on_busy=True,
+                model=model, effort=effort)
         except claude_analyzer.AnalyzerBusy:
             return jsonify({"error": "claude_unavailable",
                             "reason": "the analyzer is busy with another "
@@ -5109,6 +5138,9 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         backend = payload.get("backend") or "claude"
         if backend not in claude_analyzer.SUBSCRIPTION_BACKENDS:
             return jsonify({"error": "bad_backend"}), 400
+        model, effort, bad = _plan_model_effort(payload, backend)
+        if bad:
+            return bad
         if not claude_analyzer.backend_available(backend):
             reason = claude_analyzer.backend_status().get(backend)
             log.warning(
@@ -5118,7 +5150,8 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
                             "reason": reason}), 503
         try:
             out = claude_analyzer.analyze_text_prompt(
-                prompt, backend=backend, raise_on_busy=True)
+                prompt, backend=backend, raise_on_busy=True,
+                model=model, effort=effort)
         except claude_analyzer.AnalyzerBusy:
             return jsonify({"error": "claude_unavailable",
                             "reason": "the analyzer is busy",

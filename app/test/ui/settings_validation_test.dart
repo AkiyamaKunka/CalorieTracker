@@ -38,6 +38,7 @@ Future<void> openSubscriptionPage(WidgetTester tester) async {
 void main() {
   connectClaudeTests();
   importExportTests();
+  planTuningTests();
 
   testWidgets('ONE test action: the key field has no separate Validate — '
       'it opens the diagnostics page', (tester) async {
@@ -538,5 +539,60 @@ void importExportTests() {
     expect(dao.imported, isEmpty,
         reason: 'a pasted-but-cancelled payload must not be written');
     expect(find.textContaining('Imported'), findsNothing);
+  });
+}
+
+// ─── Claude-plan model & effort choice (2026-08-05) ──────────────────
+
+void planTuningTests() {
+  Future<FakeSettings> pumpPlan(WidgetTester tester,
+      {String backend = 'claude'}) async {
+    tester.view.physicalSize = const Size(800, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final settings = FakeSettings(apiKey: 'k')
+      ..provider = 'server'
+      ..serverBackend = backend;
+    await tester.pumpWidget(_wrap(SettingsScreen(
+      settings: settings,
+      analyzer: FakeAnalyzer(),
+      dao: FakeDao(),
+      requestPhotoPermission: () async => true,
+    )));
+    await openSubscriptionPage(tester);
+    return settings;
+  }
+
+  testWidgets('the Claude plan offers model + effort; picks persist',
+      (tester) async {
+    final settings = await pumpPlan(tester);
+    await tester.ensureVisible(find.byKey(const Key('planModelRow')));
+    await tester.tap(find.byKey(const Key('planModelRow')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('plan-model-haiku')));
+    await tester.pumpAndSettle();
+    expect(settings.serverModel, 'haiku');
+
+    await tester.ensureVisible(find.byKey(const Key('planEffortRow')));
+    await tester.tap(find.byKey(const Key('planEffortRow')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('plan-effort-low')));
+    await tester.pumpAndSettle();
+    expect(settings.serverEffort, 'low');
+
+    // Back to server default.
+    await tester.tap(find.byKey(const Key('planModelRow')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('plan-model-default')));
+    await tester.pumpAndSettle();
+    expect(settings.serverModel, '');
+  });
+
+  testWidgets('vendor plans hide the tuning rows entirely', (tester) async {
+    await pumpPlan(tester, backend: 'glm');
+    expect(find.byKey(const Key('planModelRow')), findsNothing,
+        reason: 'GLM maps models server-side — offering a choice would '
+            '400 every photo');
+    expect(find.byKey(const Key('planEffortRow')), findsNothing);
   });
 }

@@ -220,18 +220,34 @@ def _extra_flags() -> list:
         return []
 
 
-def _append_model_and_extra_flags(cmd: list, backend: str = "claude") -> None:
-    """Shared argv tail: optional --model override, then extra flags last.
+# The app-facing per-request choices (2026-08-05). CLAUDE-ONLY, closed
+# whitelists: these values become CLI argv, so free text is never accepted
+# — the endpoints 400 anything else before a CLI run exists.
+CLAUDE_PLAN_MODELS = ("opus", "sonnet", "haiku")
+CLAUDE_PLAN_EFFORTS = ("low", "medium", "high")
 
-    The --model override is CLAUDE-ONLY: the vendor plans map Anthropic
-    model names to their own models server-side (GLM: sonnet→glm-5.2;
-    Doubao: per plan tier), and an Anthropic model id pushed at them is at
-    best ignored and at worst a 400 on every photo.
+
+def _append_model_and_extra_flags(
+    cmd: list, backend: str = "claude",
+    model: Optional[str] = None, effort: Optional[str] = None,
+) -> None:
+    """Shared argv tail: optional --model/--effort, then extra flags last.
+
+    The overrides are CLAUDE-ONLY: the vendor plans map Anthropic model
+    names to their own models server-side (GLM: sonnet→glm-5.2; Doubao:
+    per plan tier), and an Anthropic model id pushed at them is at best
+    ignored and at worst a 400 on every photo. [model]/[effort] come from
+    the API endpoints PRE-VALIDATED against the whitelists above; the env
+    knob remains the owner's default when no request override arrives.
     """
     if backend == "claude":
-        model = (os.environ.get("CLAUDE_ANALYZER_MODEL") or "").strip()
-        if model:
-            cmd += ["--model", model]
+        chosen = (model or "").strip() if model in CLAUDE_PLAN_MODELS else ""
+        if not chosen:
+            chosen = (os.environ.get("CLAUDE_ANALYZER_MODEL") or "").strip()
+        if chosen:
+            cmd += ["--model", chosen]
+        if effort in CLAUDE_PLAN_EFFORTS:
+            cmd += ["--effort", effort]
     cmd += _extra_flags()
 
 
@@ -379,6 +395,7 @@ def _attempt_stream(
     cli: str, image_bytes: bytes, env: Dict[str, str], start: float,
     prompt: Optional[str] = None, backend: str = "claude",
     require_is_food: bool = True,
+    model: Optional[str] = None, effort: Optional[str] = None,
 ) -> Tuple[Optional[Dict], bool]:
     """Single-turn dispatch: image on stdin, no temp file, no tool turns.
 
@@ -397,7 +414,7 @@ def _attempt_stream(
         "--verbose",
         "--tools", "",  # no tools: the answer must land in turn one
     ]
-    _append_model_and_extra_flags(cmd, backend)
+    _append_model_and_extra_flags(cmd, backend, model=model, effort=effort)
     try:
         proc = subprocess.run(
             cmd,
@@ -620,6 +637,8 @@ def _attempt_file(
 
 
 def analyze_text_prompt(prompt: str, backend: str = "claude",
+                        model: Optional[str] = None,
+                        effort: Optional[str] = None,
                         raise_on_busy: bool = False) -> Optional[Dict]:
     """Run an arbitrary JSON-answering prompt through the CLI (subscription).
 
@@ -645,7 +664,8 @@ def analyze_text_prompt(prompt: str, backend: str = "claude",
     start = time.time()
     try:
         cmd = [cli, "-p", "--output-format", "json", "--tools", ""]
-        _append_model_and_extra_flags(cmd, backend)
+        _append_model_and_extra_flags(cmd, backend, model=model,
+                                      effort=effort)
         proc = subprocess.run(
             cmd,
             input=prompt,
@@ -691,6 +711,8 @@ def analyze_leftover_photo(
     prompt: str,
     backend: str = "claude",
     raise_on_busy: bool = False,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> Optional[Dict]:
     """Estimate leftover fractions for a previously analyzed meal.
 
@@ -721,7 +743,8 @@ def analyze_leftover_photo(
                                        require_is_food=False)
         analysis, _retry = _attempt_stream(cli, image_bytes, env, start,
                                            prompt, backend,
-                                           require_is_food=False)
+                                           require_is_food=False,
+                                           model=model, effort=effort)
         return analysis
     finally:
         _CLI_LOCK.release()
@@ -733,6 +756,8 @@ def analyze_food_photo(
     allow_file_fallback: bool = True,
     backend: str = "claude",
     raise_on_busy: bool = False,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> Optional[Dict]:
     """Analyze a food photo via the Claude Code CLI; None means 'use Gemini'.
 
@@ -790,7 +815,8 @@ def analyze_food_photo(
             return analysis
         if _dispatch_mode() == "stream":
             analysis, retry_via_file = _attempt_stream(
-                cli, image_bytes, env, start, prompt)
+                cli, image_bytes, env, start, prompt,
+                model=model, effort=effort)
             if not retry_via_file:
                 return analysis
             if not allow_file_fallback:

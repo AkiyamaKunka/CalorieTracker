@@ -62,6 +62,11 @@ abstract class SettingsStore {
   /// storage stays metric, zh UI renders metric regardless).
   String get units;
 
+  /// Claude-plan model/effort choice ('' = server default; claude-only —
+  /// the vendor plans map models server-side).
+  String get serverModel;
+  String get serverEffort;
+
   Future<void> update({
     String? apiKey,
     String? provider,
@@ -74,6 +79,8 @@ abstract class SettingsStore {
     String? serverBackend,
     String? appLanguage,
     String? units,
+    String? serverModel,
+    String? serverEffort,
   });
 }
 

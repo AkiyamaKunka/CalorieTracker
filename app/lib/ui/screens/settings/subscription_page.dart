@@ -154,6 +154,75 @@ class _SubscriptionProviderPageState
         child: field,
       );
 
+  String _modelLabel(BuildContext context, String v) => switch (v) {
+        'opus' => 'Opus',
+        'sonnet' => 'Sonnet',
+        'haiku' => 'Haiku',
+        _ => context.l10n.planChoiceDefault,
+      };
+
+  String _effortLabel(BuildContext context, String v) => switch (v) {
+        'low' => context.l10n.planEffortLow,
+        'medium' => context.l10n.planEffortMedium,
+        'high' => context.l10n.planEffortHigh,
+        _ => context.l10n.planChoiceDefault,
+      };
+
+  /// One picker for both rows: the sheet lists (value, label) options
+  /// with a checkmark on the current one; '' = server default.
+  Future<void> _pickPlanValue({
+    required String key,
+    required String title,
+    required String current,
+    required List<(String, String)> options,
+    required Future<void> Function(String) apply,
+  }) async {
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      backgroundColor: groupedBackground(Theme.of(context).colorScheme),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(title,
+                    style: Theme.of(ctx)
+                        .textTheme
+                        .titleLarge
+                        ?.copyWith(fontWeight: FontWeight.w600)),
+              ),
+            ),
+            GroupedSection(
+              separatorInset: 16,
+              children: [
+                for (final (value, label) in options)
+                  GroupedRow(
+                    key: Key('plan-$key-${value.isEmpty ? 'default' : value}'),
+                    title: label,
+                    showChevron: false,
+                    trailing: current == value
+                        ? Icon(Icons.check,
+                            size: 20,
+                            color: Theme.of(ctx).colorScheme.primary)
+                        : const SizedBox(width: 20),
+                    onTap: () => Navigator.pop(ctx, value),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+    if (picked == null || !mounted) return;
+    await apply(picked);
+    if (mounted) setState(() {});
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -215,6 +284,51 @@ class _SubscriptionProviderPageState
               )),
             ],
           ),
+          if (settings.serverBackend == 'claude')
+            GroupedSection(
+              header: context.l10n.planTuningHeader,
+              footer: context.l10n.planTuningFooter,
+              children: [
+                GroupedRow(
+                  key: const Key('planModelRow'),
+                  icon: Icons.auto_awesome_outlined,
+                  iconColor: scheme.primary,
+                  title: context.l10n.planModelRow,
+                  value: _modelLabel(context, settings.serverModel),
+                  onTap: () => _pickPlanValue(
+                    key: 'model',
+                    title: context.l10n.planModelRow,
+                    current: settings.serverModel,
+                    options: [
+                      ('', context.l10n.planChoiceDefault),
+                      ('opus', context.l10n.planModelOpus),
+                      ('sonnet', context.l10n.planModelSonnet),
+                      ('haiku', context.l10n.planModelHaiku),
+                    ],
+                    apply: (v) => settings.update(serverModel: v),
+                  ),
+                ),
+                GroupedRow(
+                  key: const Key('planEffortRow'),
+                  icon: Icons.psychology_outlined,
+                  iconColor: scheme.secondary,
+                  title: context.l10n.planEffortRow,
+                  value: _effortLabel(context, settings.serverEffort),
+                  onTap: () => _pickPlanValue(
+                    key: 'effort',
+                    title: context.l10n.planEffortRow,
+                    current: settings.serverEffort,
+                    options: [
+                      ('', context.l10n.planChoiceDefault),
+                      ('low', context.l10n.planEffortLow),
+                      ('medium', context.l10n.planEffortMedium),
+                      ('high', context.l10n.planEffortHigh),
+                    ],
+                    apply: (v) => settings.update(serverEffort: v),
+                  ),
+                ),
+              ],
+            ),
           if (settings.serverBackend == 'claude' &&
               widget.startClaudeAuth != null)
             GroupedSection(

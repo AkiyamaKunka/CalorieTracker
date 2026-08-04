@@ -176,6 +176,12 @@ class FakeSettings with ChangeNotifier implements SettingsStore {
   String units = 'metric';
 
   @override
+  String serverModel = '';
+
+  @override
+  String serverEffort = '';
+
+  @override
   Future<void> update({
     String? apiKey,
     String? provider,
@@ -188,10 +194,14 @@ class FakeSettings with ChangeNotifier implements SettingsStore {
     String? serverBackend,
     String? appLanguage,
     String? units,
+    String? serverModel,
+    String? serverEffort,
   }) async {
     updateCalls++;
     if (appLanguage != null) this.appLanguage = appLanguage;
     if (units != null) this.units = units;
+    if (serverModel != null) this.serverModel = serverModel;
+    if (serverEffort != null) this.serverEffort = serverEffort;
     if (apiKey != null) this.apiKey = apiKey;
     if (provider != null) this.provider = provider;
     if (model != null) this.model = model;
