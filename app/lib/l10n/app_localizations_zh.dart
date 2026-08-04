@@ -521,4 +521,50 @@ class AppLocalizationsZh extends AppLocalizations {
   String bodySince(String date) {
     return '自 $date';
   }
+
+  @override
+  String get addLeftover => '记录剩菜';
+
+  @override
+  String get addLeftoverNote => '扣除没吃完的部分';
+
+  @override
+  String get leftoverTitle => '剩菜扣除';
+
+  @override
+  String get leftoverPickMeal => '这是哪一餐的剩菜？';
+
+  @override
+  String get leftoverPickPhoto => '选择剩下食物的照片 — 这餐的热量会减为实际吃掉的部分。';
+
+  @override
+  String get leftoverChangeMeal => '更换';
+
+  @override
+  String get leftoverNotSame => '照片看起来不是这一餐';
+
+  @override
+  String get leftoverUseAnyway => '仍然使用';
+
+  @override
+  String get leftoverResultTitle => '确认扣除剩菜？';
+
+  @override
+  String leftoverResultLine(String pct, String kcal, String now) {
+    return '吃了约 $pct% — 扣除 $kcal 千卡，这餐现在 $now 千卡。';
+  }
+
+  @override
+  String leftoverDupRemoved(String kcal) {
+    return '这张照片还被误记成了一餐（$kcal 千卡）— 该重复记录将一并删除。';
+  }
+
+  @override
+  String get leftoverApplied => '已扣除剩菜。';
+
+  @override
+  String get leftoverFailed => '无法从这张照片估算剩菜。';
+
+  @override
+  String get leftoverNoMeals => '今天和昨天没有可扣除的餐。';
 }

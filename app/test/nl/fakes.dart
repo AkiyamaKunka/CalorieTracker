@@ -47,6 +47,11 @@ class FakeAnalyzer implements AnalyzerService {
       const AnalysisOutcome(wall: Duration.zero);
 
   @override
+  Future<Map<String, dynamic>?> leftoverIntent(
+          Uint8List originalBytes, String originalCompact) async =>
+      null;
+
+  @override
   Future<String?> validateKey(String apiKey) async => null;
 
   @override

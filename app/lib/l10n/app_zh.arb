@@ -153,5 +153,19 @@
   "unitsSheetTitle": "单位",
   "unitsFooter": "身体体重与围度的显示和输入单位。食物始终使用克与千卡。",
   "bodyEmptyHintImperial": "点击\"记录\"来记体重或腰围、胸围、臀围。通过对话记录的体重（\"我今天 81.6 公斤\"）也会显示在这里。",
-  "bodySince": "自 {date}"
+  "bodySince": "自 {date}",
+  "addLeftover": "记录剩菜",
+  "addLeftoverNote": "扣除没吃完的部分",
+  "leftoverTitle": "剩菜扣除",
+  "leftoverPickMeal": "这是哪一餐的剩菜？",
+  "leftoverPickPhoto": "选择剩下食物的照片 — 这餐的热量会减为实际吃掉的部分。",
+  "leftoverChangeMeal": "更换",
+  "leftoverNotSame": "照片看起来不是这一餐",
+  "leftoverUseAnyway": "仍然使用",
+  "leftoverResultTitle": "确认扣除剩菜？",
+  "leftoverResultLine": "吃了约 {pct}% — 扣除 {kcal} 千卡，这餐现在 {now} 千卡。",
+  "leftoverDupRemoved": "这张照片还被误记成了一餐（{kcal} 千卡）— 该重复记录将一并删除。",
+  "leftoverApplied": "已扣除剩菜。",
+  "leftoverFailed": "无法从这张照片估算剩菜。",
+  "leftoverNoMeals": "今天和昨天没有可扣除的餐。"
 }

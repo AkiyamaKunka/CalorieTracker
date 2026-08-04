@@ -280,6 +280,33 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
   }
 
   @override
+  Future<Map<String, dynamic>?> leftoverIntent(
+      Uint8List originalBytes, String originalCompact) async {
+    // Direct-API path: the leftover prompt is composed HERE from the
+    // shared template — the server provider overrides this and ships the
+    // compact analysis instead (its prompt is composed server-side).
+    Uint8List? sendBytes = await _normalize(originalBytes);
+    if (sendBytes == null && originalBytes.length < maxOriginalFallbackBytes) {
+      sendBytes = originalBytes;
+    }
+    if (sendBytes == null) return null;
+    final prompt = sharedLeftoverPrompt(originalAnalysis: originalCompact);
+    String text;
+    try {
+      text = await _post(prompt: prompt, jpegBytes: sendBytes);
+    } on _ProviderException {
+      return null;
+    }
+    dynamic parsed;
+    try {
+      parsed = parseAiJson(text);
+    } on FormatException {
+      return null;
+    }
+    return parsed is Map ? Map<String, dynamic>.from(parsed) : null;
+  }
+
+  @override
   Future<String?> validateKey(String apiKey) async {
     try {
       // extract:false — HTTP 200 alone proves the key; a 1-token reply may
@@ -630,6 +657,45 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
   Uri _uri(String path) => Uri.parse('${settings.serverBaseUrl}$path');
 
   @override
+  Future<Map<String, dynamic>?> leftoverIntent(
+      Uint8List originalBytes, String originalCompact) async {
+    // Server path: ship the COMPACT ORIGINAL ANALYSIS, never a prompt —
+    // the server re-sanitizes it and composes the leftover prompt from
+    // its own shared/ copy (same posture as analyze_photo).
+    final key = (apiKey ?? '').trim();
+    if (key.isEmpty || settings.serverBaseUrl.isEmpty) return null;
+    Uint8List? sendBytes = await _normalize(originalBytes);
+    if (sendBytes == null &&
+        originalBytes.length < _HttpVisionAnalyzer.maxOriginalFallbackBytes) {
+      sendBytes = originalBytes;
+    }
+    if (sendBytes == null) return null;
+    try {
+      final resp = await client
+          .post(_uri('/api/analyze_leftover'),
+              headers: {
+                'content-type': 'application/json',
+                'X-API-Key': key,
+                'X-Client-Platform': 'app',
+              },
+              body: jsonEncode({
+                'image_b64': base64Encode(sendBytes),
+                'original_analysis': originalCompact,
+                'backend': settings.serverBackend,
+              }))
+          .timeout(deadline);
+      if (resp.statusCode != 200) return null;
+      final decoded = jsonDecode(resp.body);
+      if (decoded is Map && decoded['leftover'] is Map) {
+        return (decoded['leftover'] as Map).cast<String, dynamic>();
+      }
+    } catch (_) {
+      // null = "couldn't estimate" — the flow surfaces a friendly error.
+    }
+    return null;
+  }
+
+  @override
   http.Request buildRequest(String key,
       {required String prompt, Uint8List? jpegBytes, required int maxTokens}) {
     if (settings.serverBaseUrl.isEmpty) {
@@ -933,6 +999,11 @@ class MultiProviderAnalyzer implements AnalyzerService {
   @override
   Future<Map<String, dynamic>?> textIntent(String prompt) =>
       _active.textIntent(prompt);
+
+  @override
+  Future<Map<String, dynamic>?> leftoverIntent(
+          Uint8List originalBytes, String originalCompact) =>
+      _active.leftoverIntent(originalBytes, originalCompact);
 
   @override
   Future<String?> validateKey(String apiKey) => _active.validateKey(apiKey);

@@ -43,6 +43,18 @@ class FakeAnalyzer implements AnalyzerService {
   Future<Map<String, dynamic>?> textIntent(String prompt) async =>
       nextTextIntent;
 
+  /// Canned leftover reply for the deduction-flow tests; records the
+  /// compact original the flow sent.
+  Map<String, dynamic>? nextLeftover;
+  String? lastLeftoverCompact;
+
+  @override
+  Future<Map<String, dynamic>?> leftoverIntent(
+      Uint8List originalBytes, String originalCompact) async {
+    lastLeftoverCompact = originalCompact;
+    return nextLeftover;
+  }
+
   @override
   Future<String?> validateKey(String apiKey) =>
       onValidateKey?.call(apiKey) ?? Future.value(null);

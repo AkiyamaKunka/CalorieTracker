@@ -332,6 +332,46 @@ class GeminiAnalyzer implements AnalyzerService {
   }
 
   @override
+  Future<Map<String, dynamic>?> leftoverIntent(
+      Uint8List originalBytes, String originalCompact) async {
+    // Same shape as analyzePhoto minus the is_food gate: leftover replies
+    // are {same_meal, leftover_fraction, items} — the PURE applyLeftover
+    // layer owns every clamp, so the raw map is returned as-is.
+    Uint8List? sendBytes = await _normalize(originalBytes);
+    if (sendBytes == null && originalBytes.length < maxOriginalFallbackBytes) {
+      sendBytes = originalBytes;
+    }
+    if (sendBytes == null) return null;
+    final prompt = sharedLeftoverPrompt(originalAnalysis: originalCompact);
+    String text;
+    try {
+      text = _extractText(await _post(<Map<String, Object?>>[
+        {'text': prompt},
+        {
+          'inline_data': {
+            'mime_type': 'image/jpeg',
+            'data': base64Encode(sendBytes),
+          }
+        },
+      ]));
+    } on GeminiException catch (e) {
+      if (isDailyFreeTierQuotaError(e.message)) {
+        await _settings.setQuotaPauseUntil(
+            DateTime.now().add(dailyQuotaCooldown),
+            forProvider: AiProvider.gemini);
+      }
+      return null;
+    }
+    dynamic parsed;
+    try {
+      parsed = parseAiJson(text);
+    } on FormatException {
+      return null;
+    }
+    return parsed is Map ? Map<String, dynamic>.from(parsed) : null;
+  }
+
+  @override
   Future<Map<String, dynamic>?> textIntent(String prompt) async {
     // Single attempt: spec §3.3's retry loop is the photo path; the text
     // handler surfaces transport errors to the user directly (spec §4 step 4).

@@ -1021,6 +1021,90 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'since {date}'**
   String bodySince(String date);
+
+  /// No description provided for @addLeftover.
+  ///
+  /// In en, this message translates to:
+  /// **'Log leftovers'**
+  String get addLeftover;
+
+  /// No description provided for @addLeftoverNote.
+  ///
+  /// In en, this message translates to:
+  /// **'deduct what you didn\'t finish'**
+  String get addLeftoverNote;
+
+  /// No description provided for @leftoverTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Leftovers'**
+  String get leftoverTitle;
+
+  /// No description provided for @leftoverPickMeal.
+  ///
+  /// In en, this message translates to:
+  /// **'Which meal was this?'**
+  String get leftoverPickMeal;
+
+  /// No description provided for @leftoverPickPhoto.
+  ///
+  /// In en, this message translates to:
+  /// **'Pick the photo of what\'s LEFT — the meal\'s calories shrink to what you ate.'**
+  String get leftoverPickPhoto;
+
+  /// No description provided for @leftoverChangeMeal.
+  ///
+  /// In en, this message translates to:
+  /// **'Change'**
+  String get leftoverChangeMeal;
+
+  /// No description provided for @leftoverNotSame.
+  ///
+  /// In en, this message translates to:
+  /// **'This doesn\'t look like the same meal'**
+  String get leftoverNotSame;
+
+  /// No description provided for @leftoverUseAnyway.
+  ///
+  /// In en, this message translates to:
+  /// **'Use anyway'**
+  String get leftoverUseAnyway;
+
+  /// No description provided for @leftoverResultTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Deduct leftovers?'**
+  String get leftoverResultTitle;
+
+  /// No description provided for @leftoverResultLine.
+  ///
+  /// In en, this message translates to:
+  /// **'Eaten ~{pct}% — deducting {kcal} kcal, this meal is now {now} kcal.'**
+  String leftoverResultLine(String pct, String kcal, String now);
+
+  /// No description provided for @leftoverDupRemoved.
+  ///
+  /// In en, this message translates to:
+  /// **'This photo was also logged as its own {kcal} kcal meal — that duplicate will be removed.'**
+  String leftoverDupRemoved(String kcal);
+
+  /// No description provided for @leftoverApplied.
+  ///
+  /// In en, this message translates to:
+  /// **'Leftovers deducted.'**
+  String get leftoverApplied;
+
+  /// No description provided for @leftoverFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t estimate the leftovers from that photo.'**
+  String get leftoverFailed;
+
+  /// No description provided for @leftoverNoMeals.
+  ///
+  /// In en, this message translates to:
+  /// **'No meals from today or yesterday to deduct from.'**
+  String get leftoverNoMeals;
 }
 
 class _AppLocalizationsDelegate

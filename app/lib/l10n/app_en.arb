@@ -317,5 +317,39 @@
         "type": "String"
       }
     }
-  }
+  },
+  "addLeftover": "Log leftovers",
+  "addLeftoverNote": "deduct what you didn't finish",
+  "leftoverTitle": "Leftovers",
+  "leftoverPickMeal": "Which meal was this?",
+  "leftoverPickPhoto": "Pick the photo of what's LEFT — the meal's calories shrink to what you ate.",
+  "leftoverChangeMeal": "Change",
+  "leftoverNotSame": "This doesn't look like the same meal",
+  "leftoverUseAnyway": "Use anyway",
+  "leftoverResultTitle": "Deduct leftovers?",
+  "leftoverResultLine": "Eaten ~{pct}% — deducting {kcal} kcal, this meal is now {now} kcal.",
+  "@leftoverResultLine": {
+    "placeholders": {
+      "pct": {
+        "type": "String"
+      },
+      "kcal": {
+        "type": "String"
+      },
+      "now": {
+        "type": "String"
+      }
+    }
+  },
+  "leftoverDupRemoved": "This photo was also logged as its own {kcal} kcal meal — that duplicate will be removed.",
+  "@leftoverDupRemoved": {
+    "placeholders": {
+      "kcal": {
+        "type": "String"
+      }
+    }
+  },
+  "leftoverApplied": "Leftovers deducted.",
+  "leftoverFailed": "Couldn't estimate the leftovers from that photo.",
+  "leftoverNoMeals": "No meals from today or yesterday to deduct from."
 }

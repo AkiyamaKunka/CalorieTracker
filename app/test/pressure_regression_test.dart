@@ -89,7 +89,10 @@ void main() {
           const []);
       expect(replies.map((r) => r.text).join('\n'), contains('✅'),
           reason: 'the meal must save, not "please try again"');
-      final saved = await dao.mealsBetween('2026-08-03', '2026-08-03');
+      // TODAY computed, not pinned — the executor dates meals with the
+      // real clock (the pinned form detonated at the first midnight).
+      final today = isoDate(DateTime.now());
+      final saved = await dao.mealsBetween(today, today);
       expect(saved, hasLength(1));
       expect(saved.single.analysis['total_calories'], 0,
           reason: 'safeNumber fallback, matching read-side coercion');

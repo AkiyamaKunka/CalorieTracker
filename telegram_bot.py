@@ -66,6 +66,7 @@ from config import (
     TELEGRAM_CHAT_ID,
     TEXT_HANDLER_PROMPT,
     FOOD_DETECTION_PROMPT,
+    LEFTOVER_PROMPT_TEMPLATE,
     DUPLICATE_WINDOW_MINUTES,
     ANDROID_API_KEY,
     ANDROID_API_KEY_RETIRING,
@@ -73,6 +74,7 @@ from config import (
     SUPPORTED_EXTENSIONS,
 )
 from utils import (
+    compact_leftover_original,
     meal_calorie_mismatch,
     parse_ai_json,
     parse_boolish,
@@ -5033,6 +5035,62 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
                                       "usable result",
                             "retry": False}), 503
         return jsonify({"ok": True, "analysis": analysis,
+                        "analyzed_by": backend})
+
+    @app.route('/api/analyze_leftover', methods=['POST'])
+    def api_analyze_leftover():
+        """Estimate leftover fractions for a previously analyzed meal.
+
+        Shape: {image_b64, original_analysis, backend?}. Same posture as
+        analyze_photo — the caller may NOT supply a prompt: the leftover
+        prompt is composed HERE from the server's shared/ template plus a
+        RE-SANITIZED compact of the caller's original analysis
+        (utils.compact_leftover_original — parsed and rebuilt from a
+        whitelist, never embedded verbatim), and the CLI run never takes
+        the Read-tool fallback.
+        """
+        if not _authorized_api_request():
+            return jsonify({"error": "Unauthorized"}), 401
+        payload = request.get_json(silent=True) or {}
+        raw = payload.get("image_b64")
+        if not isinstance(raw, str) or not raw.strip():
+            return jsonify({"error": "no_image"}), 400
+        try:
+            data = base64.b64decode(raw, validate=True)
+        except (binascii.Error, ValueError):
+            return jsonify({"error": "bad_image_encoding"}), 400
+        if not data:
+            return jsonify({"error": "no_image"}), 400
+        if len(data) > API_ANALYZE_MAX_BYTES:
+            return jsonify({"error": "image_too_large"}), 413
+        compact = compact_leftover_original(payload.get("original_analysis"))
+        if compact is None:
+            return jsonify({"error": "bad_original_analysis"}), 400
+        backend = payload.get("backend") or "claude"
+        if backend not in claude_analyzer.SUBSCRIPTION_BACKENDS:
+            return jsonify({"error": "bad_backend"}), 400
+        if not claude_analyzer.backend_available(backend, for_photo=True):
+            reason = claude_analyzer.backend_status().get(backend)
+            log.warning(
+                f"analyze_leftover refused: backend '{backend}' unavailable "
+                f"({reason}).")
+            return jsonify({"error": "claude_unavailable",
+                            "reason": reason}), 503
+        prompt = LEFTOVER_PROMPT_TEMPLATE.format(original_analysis=compact)
+        try:
+            leftover = claude_analyzer.analyze_leftover_photo(
+                data, prompt, backend=backend, raise_on_busy=True)
+        except claude_analyzer.AnalyzerBusy:
+            return jsonify({"error": "claude_unavailable",
+                            "reason": "the analyzer is busy with another "
+                                      "photo",
+                            "retry": True}), 503
+        if not leftover:
+            return jsonify({"error": "claude_unavailable",
+                            "reason": "the estimation ran but produced no "
+                                      "usable result",
+                            "retry": False}), 503
+        return jsonify({"ok": True, "leftover": leftover,
                         "analyzed_by": backend})
 
     @app.route('/api/text_intent', methods=['POST'])

@@ -205,6 +205,15 @@ abstract class AnalyzerService {
   Future<Map<String, dynamic>?> textIntent(String prompt); // raw JSON or null
   Future<String?> validateKey(String apiKey); // null = OK, else error text
 
+  /// Leftover-photo estimation (spec §9, 2026-08-04): given the leftover
+  /// photo and the COMPACT original analysis, return the model's
+  /// {same_meal, leftover_fraction, items, note} JSON, or null when this
+  /// provider cannot estimate. Default null keeps existing fakes and
+  /// third-party implementations compiling; real providers override.
+  Future<Map<String, dynamic>?> leftoverIntent(
+          Uint8List originalBytes, String originalCompact) async =>
+      null;
+
   /// Richer probe for the diagnostics page. [validateKey] deliberately
   /// ACCEPTS a quota-class reply (it proves the key authenticated), which
   /// makes "key fine, account empty" indistinguishable from "all good" —

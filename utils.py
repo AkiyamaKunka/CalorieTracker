@@ -191,3 +191,54 @@ def telegram_message_chunks(text: str, limit: int = 3900) -> List[str]:
     if current:
         chunks.append(current.rstrip())
     return chunks or [""]
+
+
+def compact_leftover_original(raw) -> "Optional[str]":
+    """Re-sanitize the app's compact original-analysis JSON for the
+    leftover prompt (2026-08-05).
+
+    The client already sends a whitelisted compact form, but this server
+    NEVER embeds network JSON into a CLI prompt verbatim: the object is
+    parsed and REBUILT from a field whitelist (numbers coerced, names
+    stringified and length-capped), so no smuggled keys or oversized
+    strings ride into the prompt. None = unusable input (caller 400s).
+    """
+    import shared_generated
+
+    if isinstance(raw, (dict,)):
+        parsed = raw
+    else:
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        if len(raw) > shared_generated.API_LEFTOVER_MAX_CHARS:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return None
+    if not isinstance(parsed, dict):
+        return None
+
+    def _num(v):
+        n = safe_number(v, 0)
+        return n if isinstance(n, (int, float)) else 0
+
+    compact = {
+        "meal_description": str(parsed.get("meal_description", "Meal"))[:300],
+        "total_calories": _num(parsed.get("total_calories")),
+        "total_protein_g": _num(parsed.get("total_protein_g")),
+        "total_carbs_g": _num(parsed.get("total_carbs_g")),
+        "total_fat_g": _num(parsed.get("total_fat_g")),
+        "food_items": [
+            {
+                "name": str(item.get("name", "?"))[:200],
+                "estimated_calories": _num(item.get("estimated_calories")),
+            }
+            for item in safe_food_items(parsed)[:30]
+        ],
+    }
+    out = json.dumps(compact, ensure_ascii=False)
+    if len(out) > shared_generated.API_LEFTOVER_MAX_CHARS:
+        compact["food_items"] = []
+        out = json.dumps(compact, ensure_ascii=False)
+    return out
