@@ -509,7 +509,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get reportNoMeals => 'No meals logged.';
 
   @override
-  String get reportFooter => 'Logged with CalorieTracker';
+  String get reportFooter => 'Logged with Bitewise';
 
   @override
   String typicalDayHeadroom(String typical, String delta) {

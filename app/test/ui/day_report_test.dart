@@ -62,7 +62,7 @@ void main() {
     expect(find.textContaining('Rice (~150 g)'), findsWidgets,
         reason: 'portion assumptions reach the coach');
     expect(find.text('+88'), findsOneWidget, reason: 'burn in the math');
-    expect(find.text('Logged with CalorieTracker'), findsOneWidget);
+    expect(find.text('Logged with Bitewise'), findsOneWidget);
   });
 
   testWidgets('an empty day still renders honestly', (tester) async {
@@ -129,7 +129,7 @@ void main() {
     ));
     expect(find.text('今日饮食'), findsOneWidget);
     expect(find.text('380 千卡'), findsOneWidget);
-    expect(find.text('由 CalorieTracker 记录'), findsOneWidget);
+    expect(find.text('由筷拍记录'), findsOneWidget);
     // Dates and clocks localize too (user-reported 2026-08-03: History
     // weekdays stayed English in zh) — the report shares the helpers.
     expect(find.text('8月2日 星期日'), findsOneWidget);

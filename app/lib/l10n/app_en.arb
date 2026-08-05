@@ -261,7 +261,7 @@
     }
   },
   "reportNoMeals": "No meals logged.",
-  "reportFooter": "Logged with CalorieTracker",
+  "reportFooter": "Logged with Bitewise",
   "typicalDayHeadroom": "Typical day: ~{typical} kcal · ~{delta} kcal headroom",
   "@typicalDayHeadroom": {
     "placeholders": {

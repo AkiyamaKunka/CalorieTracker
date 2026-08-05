@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🥗 CalorieTracker
+# 🥢 Bitewise · 筷拍
 
 **You eat. It notices.** Take photos the way you already do — the app finds the food ones, an AI model reads them like a nutritionist (labels first, estimates last), and your calorie log writes itself. Even leftovers deduct themselves. **Your data stays on your phone; only the photo being analyzed ever leaves it.**
 
@@ -10,7 +10,7 @@
   <img alt="License" src="https://img.shields.io/badge/license-MIT-f2f2f2?style=flat-square">
 </p>
 
-*A Flutter app for iOS and Android — plus an optional self-hosted server that lets an existing AI subscription pay for analysis instead of metered API keys.*
+*Formerly CalorieTracker. A Flutter app for iOS and Android — plus an optional self-hosted server that lets an existing AI subscription pay for analysis instead of metered API keys.*
 
 </div>
 

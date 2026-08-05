@@ -110,7 +110,7 @@ class CalorieTrackerApp extends StatelessWidget {
     // app re-locales in place — no restart.
     final shell = HomeShell(services: services);
     Widget appFor(Locale? locale) => MaterialApp(
-          title: 'CalorieTracker',
+          title: 'Bitewise',
           scaffoldMessengerKey: messengerKey,
           // iOS scroll feel everywhere: bounce, no glow indicator.
           scrollBehavior: const _AppleScrollBehavior(),
@@ -324,7 +324,7 @@ class StartupErrorApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'CalorieTracker',
+      title: 'Bitewise',
       home: Scaffold(
         body: Center(
           child: Padding(

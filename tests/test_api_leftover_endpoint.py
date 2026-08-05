@@ -7,13 +7,11 @@ caller's original analysis, and never the Read-tool fallback.
 import base64
 import json
 
-import pytest
 
 import claude_analyzer
-import telegram_bot
 import utils
 
-from test_api_analyze_endpoints import client, _meals, _ledger_rows  # noqa: F401
+from conftest import _ledger_rows, _meals
 
 LEFTOVER = {"same_meal": True, "confidence": 0.9,
             "leftover_fraction": 0.4,
@@ -55,7 +53,7 @@ def test_requires_the_api_key(client, monkeypatch):
 
 
 def test_returns_leftover_and_stays_pure(client, monkeypatch):
-    captured = _stub(monkeypatch)
+    _stub(monkeypatch)
     resp = client.http.post("/api/analyze_leftover",
                             headers={"X-API-Key": "secret-key"},
                             json=_payload())

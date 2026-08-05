@@ -472,7 +472,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get reportNoMeals => '没有记录。';
 
   @override
-  String get reportFooter => '由 CalorieTracker 记录';
+  String get reportFooter => '由筷拍记录';
 
   @override
   String typicalDayHeadroom(String typical, String delta) {

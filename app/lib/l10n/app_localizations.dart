@@ -941,7 +941,7 @@ abstract class AppLocalizations {
   /// No description provided for @reportFooter.
   ///
   /// In en, this message translates to:
-  /// **'Logged with CalorieTracker'**
+  /// **'Logged with Bitewise'**
   String get reportFooter;
 
   /// No description provided for @typicalDayHeadroom.

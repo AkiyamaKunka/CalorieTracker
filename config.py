@@ -53,7 +53,7 @@ SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".tiff"}
 # The mobile app consumes the SAME sources via its generated Dart binding.
 from shared_generated import (  # noqa: E402
     FOOD_DETECTION_PROMPT_RAW,
-    LEFTOVER_PROMPT_TEMPLATE,
+    LEFTOVER_PROMPT_TEMPLATE,  # noqa: F401  (re-exported for telegram_bot)
     TEXT_HANDLER_PROMPT_TEMPLATE,
 )
 

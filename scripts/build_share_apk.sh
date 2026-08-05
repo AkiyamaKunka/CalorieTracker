@@ -13,7 +13,7 @@ export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Develope
 flutter build apk --release --split-per-abi
 OUT="build/app/outputs/flutter-apk/app-arm64-v8a-release.apk"
 VERSION="$(grep '^version:' pubspec.yaml | awk '{print $2}' | cut -d+ -f1)"
-DEST="$HOME/Desktop/CalorieTracker-share/CalorieTracker-$VERSION.apk"
+DEST="$HOME/Desktop/Bitewise-share/Bitewise-$VERSION.apk"
 mkdir -p "$(dirname "$DEST")"
 cp "$OUT" "$DEST"
 ls -lh "$DEST"

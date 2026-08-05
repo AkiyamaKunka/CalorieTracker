@@ -5,12 +5,9 @@ endpoints must 400 anything unlisted BEFORE a CLI run exists, and the
 vendor plans (which map model names server-side) must reject overrides.
 """
 import base64
-import json
 
 import claude_analyzer
-import telegram_bot
 
-from test_api_analyze_endpoints import client  # noqa: F401
 
 ANALYSIS = {"is_food": True, "total_calories": 450}
 
