@@ -18,6 +18,14 @@
 
 The core loop is **automatic**: turn on *Watch camera roll* and every food photo you take — meals, takeout order screenshots, nutrition labels — becomes a logged meal with calories, protein, carbs, and fat, without opening the app. Photograph what's LEFT on the plate afterwards and the app recognizes it as the same meal and **deducts the uneaten part** instead of double-counting. Everything lands in a local log you can browse, chart, edit, and correct in plain language (*"the noodles were actually roast duck rice"*, *"删除第一餐"*). No account, no analytics, no cloud database. Full Chinese UI. Works in mainland China without a VPN, and there is a completely free way to run it (Zhipu GLM's default vision model costs nothing).
 
+## How it works
+
+**1 · Eat as usual.** Take photos the way you already do — of the meal, the takeout order screen, or the nutrition label. There is no app to open: with *Watch camera roll* on, new food photos are noticed and picked up automatically (share-sheet, photo picker, plain-text description, and manual entry all feed the same pipeline).
+
+**2 · The AI reads evidence before it estimates.** Each photo is analyzed against a strict evidence ladder — a nutrition label beats a printed weight, a printed weight beats brand data, and only when no printed truth exists does it fall back to visual estimation calibrated against real-size references. Every meal states which evidence it used and the portion assumptions it made, so a wrong guess is visible and fixable.
+
+**3 · Your log corrects itself — and listens.** Photograph what's left on the plate and the meal shrinks to what you actually ate, automatically. Anything else you'd change, just say: *"lunch was about 650 kcal"*, *"the second meal had no rice"*, *"删掉昨天的宵夜"* — any language your model reads.
+
 ```mermaid
 flowchart LR
     subgraph Phone["📱 Your phone"]
