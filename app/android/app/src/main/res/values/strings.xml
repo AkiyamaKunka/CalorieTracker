@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Launcher label. The Chinese name 筷拍 (chopsticks + snap) lives in
+         values-zh; the label follows the SYSTEM language. -->
+    <string name="app_name">CalorieTracker</string>
+</resources>
