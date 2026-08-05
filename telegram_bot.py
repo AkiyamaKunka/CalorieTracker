@@ -74,7 +74,9 @@ from config import (
     SUPPORTED_EXTENSIONS,
 )
 from utils import (
+    build_recent_meals_block,
     compact_leftover_original,
+    compact_recent_meals,
     meal_calorie_mismatch,
     parse_ai_json,
     parse_boolish,
@@ -5011,6 +5013,15 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
                 if len(profile) > API_PROFILE_MAX_CHARS:
                     return jsonify({"error": "profile_too_large"}), 413
                 prompt = build_photo_prompt_with_profile(profile)
+            # AUTO leftover check (2026-08-05): the app ships STRUCTURED
+            # recent-meal compacts; the block is composed HERE from a
+            # whitelist rebuild — same no-caller-prompt rule as always.
+            recent = compact_recent_meals(payload.get("recent_meals"))
+            if recent is None:
+                return jsonify({"error": "bad_recent_meals"}), 400
+            if recent:
+                base_prompt = prompt if prompt else FOOD_DETECTION_PROMPT
+                prompt = base_prompt + build_recent_meals_block(recent)
             backend = payload.get("backend") or "claude"
             model, effort, bad = _plan_model_effort(payload, backend)
             if bad:
@@ -5077,6 +5088,10 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         if not _authorized_api_request():
             return jsonify({"error": "Unauthorized"}), 401
         payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            # A JSON array/scalar body crashed .get with a 500
+            # (pressure-test find) — it is a client error, say so.
+            return jsonify({"error": "bad_request_shape"}), 400
         raw = payload.get("image_b64")
         if not isinstance(raw, str) or not raw.strip():
             return jsonify({"error": "no_image"}), 400

@@ -33,8 +33,13 @@ class FakeAnalyzer implements AnalyzerService {
   /// Test hook: controls validateKey resolution. Default resolves null (OK).
   Future<String?> Function(String apiKey)? onValidateKey;
 
+  /// Records the compacts the pipeline sent for the auto-leftover check.
+  List<Map<String, dynamic>>? lastRecentMeals;
+
   @override
-  Future<AnalysisOutcome> analyzePhoto(Uint8List originalBytes) async {
+  Future<AnalysisOutcome> analyzePhoto(Uint8List originalBytes,
+      {List<Map<String, dynamic>>? recentMeals}) async {
+    lastRecentMeals = recentMeals;
     if (onAnalyze != null) await onAnalyze!();
     return nextPhotoOutcome;
   }

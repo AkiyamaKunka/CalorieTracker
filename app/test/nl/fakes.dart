@@ -43,7 +43,8 @@ class FakeAnalyzer implements AnalyzerService {
   }
 
   @override
-  Future<AnalysisOutcome> analyzePhoto(Uint8List originalBytes) async =>
+  Future<AnalysisOutcome> analyzePhoto(Uint8List originalBytes,
+          {List<Map<String, dynamic>>? recentMeals}) async =>
       const AnalysisOutcome(wall: Duration.zero);
 
   @override

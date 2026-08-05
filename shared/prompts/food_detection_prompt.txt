@@ -33,6 +33,30 @@ order or of consumption is not clear, answer {"is_food": false}.
 If the image contains NO food, meal, or beverage, respond with exactly:
 {"is_food": false}
 
+LEFTOVERS OF A RECENT MEAL — when a "RECENT MEALS" list is appended at
+the end of this prompt, FIRST check whether the photo shows the
+PARTIALLY EATEN REMAINS of one of those meals rather than a new meal:
+the same dishes, containers, tray or setting, with the food visibly
+REDUCED and signs of eating (used utensils, bones, emptied bowls). A
+fresh, untouched serving of a similar dish is a NEW meal, not leftovers.
+If (and only if) it clearly is the remains of listed meal N, respond
+with EXACTLY this shape instead of the normal analysis:
+{
+  "is_food": true,
+  "leftover_of": N,
+  "confidence": 0.9,
+  "leftover_fraction": 0.35,
+  "items": [
+    {"name": "<exact item name from that meal>", "left_fraction": 0.5}
+  ],
+  "note": "<one short sentence: what remains and how you judged it>"
+}
+leftover_of is the meal's index in the list; left_fraction is the share
+still REMAINING (0 = fully eaten, 1 = untouched) judged against that
+meal's stated portions; items not visible count as eaten. When no list
+is provided, or the photo is not clearly the remains of a listed meal,
+ignore this section entirely.
+
 <<ESTIMATION_PRIORITY>>
 
 PORTION SIZE (the Priority-4 fallback) — the main source of error when no

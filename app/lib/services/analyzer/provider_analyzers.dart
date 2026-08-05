@@ -19,6 +19,7 @@ import 'package:http/http.dart' as http;
 
 import '../../core/coerce.dart';
 import '../../core/contracts.dart';
+import '../../core/leftover_logic.dart' show formatRecentMealsBlock;
 import '../../core/prompts.dart';
 import '../settings/app_settings.dart';
 import 'gemini_analyzer.dart' show createAnalyzer;
@@ -59,6 +60,9 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
   /// and the retry only meets its own busy lock.
   Duration get deadline => httpDeadline;
   static const int maxOriginalFallbackBytes = 5 * 1024 * 1024; // spec §3.1
+
+  /// See [analyzePhoto] — the current call's recent-meal compacts.
+  List<Map<String, dynamic>> recentMealsForRequest = const [];
 
   /// Provider hooks.
   String? get apiKey;
@@ -201,8 +205,13 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
   }
 
   @override
-  Future<AnalysisOutcome> analyzePhoto(Uint8List originalBytes) async {
+  Future<AnalysisOutcome> analyzePhoto(Uint8List originalBytes,
+      {List<Map<String, dynamic>>? recentMeals}) async {
     final sw = Stopwatch()..start();
+    // Stashed for ServerAnalyzer.buildRequest (which sends DATA, not
+    // prompt text). Safe as a field: the app's photo pipeline is
+    // strictly serialized, so no two analyzePhoto calls overlap.
+    recentMealsForRequest = recentMeals ?? const [];
     if (settings.isQuotaPaused) {
       return AnalysisOutcome(
           error: 'Analysis paused (quota) — retrying later.',
@@ -221,7 +230,8 @@ abstract class _HttpVisionAnalyzer implements AnalyzerService {
       }
     }
     final prompt =
-        withDietaryProfile(foodDetectionPrompt, settings.dietaryProfile);
+        withDietaryProfile(foodDetectionPrompt, settings.dietaryProfile) +
+            formatRecentMealsBlock(recentMeals ?? const []);
     for (var attempt = 1;; attempt++) {
       String text;
       try {
@@ -699,6 +709,14 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
       if (resp.statusCode != 200) return null;
       final decoded = jsonDecode(resp.body);
       if (decoded is Map && decoded['leftover'] is Map) {
+        // Same receipt rule as the photo path: a pre-upgrade server
+        // ignores the backend field and answers analyzed_by:'claude' —
+        // accepting that reply silently bills the wrong plan forever
+        // (pressure-test find).
+        final paidBy = decoded['analyzed_by'];
+        if (paidBy is String && paidBy != settings.serverBackend) {
+          return null;
+        }
         return (decoded['leftover'] as Map).cast<String, dynamic>();
       }
     } catch (_) {
@@ -739,6 +757,8 @@ class ServerAnalyzer extends _HttpVisionAnalyzer {
               // 'glm' (coding plan) or 'doubao' (agent plan). The plan
               // keys live in the SERVER's .env — never on the phone.
               'backend': settings.serverBackend,
+              if (recentMealsForRequest.isNotEmpty)
+                'recent_meals': recentMealsForRequest,
               ..._planChoice(),
             }
           : {
@@ -1010,8 +1030,9 @@ class MultiProviderAnalyzer implements AnalyzerService {
       };
 
   @override
-  Future<AnalysisOutcome> analyzePhoto(Uint8List originalBytes) =>
-      _active.analyzePhoto(originalBytes);
+  Future<AnalysisOutcome> analyzePhoto(Uint8List originalBytes,
+          {List<Map<String, dynamic>>? recentMeals}) =>
+      _active.analyzePhoto(originalBytes, recentMeals: recentMeals);
 
   @override
   Future<Map<String, dynamic>?> textIntent(String prompt) =>

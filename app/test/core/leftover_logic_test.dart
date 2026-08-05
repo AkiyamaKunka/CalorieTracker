@@ -128,4 +128,61 @@ void main() {
     expect(compact['total_calories'], 965,
         reason: 're-analysis must describe the ORIGINAL portions');
   });
+
+  // ─── Pressure-campaign regressions (2026-08-05 wave 2) ─────────────
+
+  test('negative base totals cannot crash (clamp bounds)', () {
+    final r = applyLeftover({'total_calories': -100}, {'leftover_fraction': 0.5},
+        leftoverPhotoMd5: 'aa', appliedAtIso: 't');
+    expect(r, isNotNull); // and no throw
+    expect(r!.deductedKcal, 0);
+  });
+
+  test("a string left_fraction falls back to the overall, never 'eaten'",
+      () {
+    final r = applyLeftover(
+        {
+          'total_calories': 500,
+          'food_items': [
+            {'name': 'Rice', 'estimated_calories': 500}
+          ],
+        },
+        {
+          'leftover_fraction': 1.0,
+          'items': [
+            {'name': 'Rice', 'left_fraction': '1.0'}
+          ],
+        },
+        leftoverPhotoMd5: 'aa',
+        appliedAtIso: 't')!;
+    expect(r.adjusted['total_calories'], 0,
+        reason: 'the model said the WHOLE meal is left');
+  });
+
+  test('all-junk fractions are unusable → null, not a zero deduction', () {
+    expect(
+        applyLeftover(
+            meal(),
+            {
+              'items': [
+                {'name': 'Rice (~200 g)', 'left_fraction': 'lots'},
+                {'name': 'Pork (~150 g)', 'left_fraction': true},
+              ],
+            },
+            leftoverPhotoMd5: 'aa',
+            appliedAtIso: 't'),
+        isNull);
+  });
+
+  test('a manual edit AFTER an application becomes the new base', () {
+    final applied = applyLeftover(meal(), {'leftover_fraction': 0.5},
+        leftoverPhotoMd5: 'aa', appliedAtIso: 't1')!;
+    // The user then corrects the total by hand (editor keeps the block).
+    final edited = Map<String, dynamic>.from(applied.adjusted)
+      ..['total_calories'] = 100;
+    final second = applyLeftover(edited, {'leftover_fraction': 0.0},
+        leftoverPhotoMd5: 'bb', appliedAtIso: 't2')!;
+    expect(second.adjusted['total_calories'], 100,
+        reason: 'the manual 100 is the truth — never resurrect the 965');
+  });
 }

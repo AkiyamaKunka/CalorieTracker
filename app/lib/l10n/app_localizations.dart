@@ -1025,13 +1025,13 @@ abstract class AppLocalizations {
   /// No description provided for @addLeftover.
   ///
   /// In en, this message translates to:
-  /// **'Log leftovers'**
+  /// **'Leftovers'**
   String get addLeftover;
 
   /// No description provided for @addLeftoverNote.
   ///
   /// In en, this message translates to:
-  /// **'deduct what you didn\'t finish'**
+  /// **'deduct what\'s left'**
   String get addLeftoverNote;
 
   /// No description provided for @leftoverTitle.

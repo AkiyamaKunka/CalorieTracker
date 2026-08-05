@@ -85,11 +85,13 @@ const List<(String, String, String)> kApiKeyChoices = [
   ('glm', 'Zhipu GLM 智谱', 'free 免费 · 中国直连'),
 ];
 
-/// (backend id, name, note) — all three ride the user's server.
+/// (backend id, name, note) — all three ride the user's server. Notes
+/// name the VENDOR, never a price: plan pricing changes under vendors'
+/// feet and a stale number reads as unprofessional (user, 2026-08-05).
 const List<(String, String, String)> kPlanChoices = [
   ('claude', 'Claude Plan', 'Anthropic subscription'),
-  ('glm', 'GLM Coding Plan', '¥49/mo'),
-  ('doubao', 'Doubao Agent Plan', '¥40/mo'),
+  ('glm', 'GLM Coding Plan', 'Zhipu subscription'),
+  ('doubao', 'Doubao Agent Plan', 'Volcengine subscription'),
 ];
 
 /// Root-row display: the concrete plan name, never an opaque 'My server'.

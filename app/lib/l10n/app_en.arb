@@ -318,8 +318,8 @@
       }
     }
   },
-  "addLeftover": "Log leftovers",
-  "addLeftoverNote": "deduct what you didn't finish",
+  "addLeftover": "Leftovers",
+  "addLeftoverNote": "deduct what's left",
   "leftoverTitle": "Leftovers",
   "leftoverPickMeal": "Which meal was this?",
   "leftoverPickPhoto": "Pick the photo of what's LEFT — the meal's calories shrink to what you ate.",

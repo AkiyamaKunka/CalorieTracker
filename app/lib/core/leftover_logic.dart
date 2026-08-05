@@ -54,6 +54,19 @@ String compactOriginalAnalysis(Map<String, dynamic> analysis) {
 Map<String, dynamic> leftoverBase(Map<String, dynamic> analysis) {
   final leftover = analysis['leftover'];
   if (leftover is Map && leftover['original'] is Map) {
+    // STALENESS GUARD: the snapshot only speaks for the meal while the
+    // stored totals still match what that application produced. A manual
+    // edit afterwards (meal editor, chat correction) is the user's newer
+    // truth — re-basing on the old snapshot would silently discard it
+    // (pressure-test find).
+    final stamped = leftover['applied_total'];
+    if (stamped == null ||
+        safeNumber(stamped) != safeNumber(analysis['total_calories'])) {
+      // No stamp (a pre-guard row) or totals that no longer match the
+      // application: the CURRENT analysis is the user's newer truth —
+      // protecting a manual edit beats snapshot fidelity.
+      return analysis;
+    }
     return (leftover['original'] as Map).cast<String, dynamic>();
   }
   return analysis;
@@ -65,14 +78,20 @@ double _clamp01(num v) => v.toDouble().clamp(0.0, 1.0);
 /// case-insensitive name match; falls back to the overall fraction.
 double _leftFractionFor(
     String name, List<Map<String, dynamic>> modelItems, double overall) {
+  // safeNumberOr (not safeNumber): an UNCOERCIBLE fraction must fall back
+  // to the meal-level estimate — reading it as 0 silently declared the
+  // item fully eaten and inflated the day (pressure-test find).
+  double? pick(Map<String, dynamic> m) {
+    final v = safeNumberOr(m['left_fraction'], null);
+    return v == null ? null : _clamp01(v);
+  }
+
   for (final m in modelItems) {
-    if ('${m['name']}' == name) return _clamp01(safeNumber(m['left_fraction']));
+    if ('${m['name']}' == name) return pick(m) ?? overall;
   }
   final lower = name.toLowerCase();
   for (final m in modelItems) {
-    if ('${m['name']}'.toLowerCase() == lower) {
-      return _clamp01(safeNumber(m['left_fraction']));
-    }
+    if ('${m['name']}'.toLowerCase() == lower) return pick(m) ?? overall;
   }
   return overall;
 }
@@ -118,7 +137,13 @@ LeftoverResult? applyLeftover(
   double? overall = rawOverall is num && !(rawOverall is double && !rawOverall.isFinite)
       ? _clamp01(rawOverall)
       : null;
-  if (overall == null && modelItems.isEmpty) return null;
+  // USABILITY gate: at least one coercible fraction must exist somewhere.
+  // Items whose fractions are all junk ('1.0'-as-string, bools) used to
+  // slip past the emptiness check and return a 'successful' zero
+  // deduction — a guess dressed as an answer (pressure-test find).
+  final anyItemFraction = modelItems
+      .any((m) => safeNumberOr(m['left_fraction'], null) != null);
+  if (overall == null && !anyItemFraction) return null;
 
   final baseItems = safeFoodItems(base);
   // Per-item eaten calories; items unknown to the model fall back to the
@@ -153,7 +178,13 @@ LeftoverResult? applyLeftover(
   }
 
   final newTotal = (baseTotal * eatenFraction).round();
-  final deducted = (baseTotal.round() - newTotal).clamp(0, baseTotal.round());
+  // A hostile/corrupt base can be negative; clamp(0, negative) THROWS
+  // (pressure-test find). A deduction is never negative and never more
+  // than the base.
+  final baseRounded = baseTotal.round();
+  final deducted = baseRounded <= 0
+      ? 0
+      : (baseRounded - newTotal).clamp(0, baseRounded);
   num scaledMacro(String key) {
     final v = safeNumber(base[key]).toDouble() * eatenFraction;
     return double.parse(v.toStringAsFixed(1));
@@ -168,6 +199,9 @@ LeftoverResult? applyLeftover(
     if (adjustedItems.isNotEmpty) 'food_items': adjustedItems,
     'leftover': {
       'applied_at': appliedAtIso,
+      // What THIS application stored; leftoverBase compares against it to
+      // notice a later manual edit.
+      'applied_total': newTotal,
       'leftover_photo_md5': leftoverPhotoMd5,
       'eaten_fraction': double.parse(eatenFraction.toStringAsFixed(2)),
       'note': modelOut['note'] is String ? modelOut['note'] : null,
@@ -199,4 +233,81 @@ bool isFoodTruthyBool(dynamic v) {
   if (v == null) return true;
   final parsed = parseBoolish(v);
   return parsed ?? true;
+}
+
+// ─── Automatic detection (2026-08-05) ────────────────────────────────
+// The watcher's own analysis call carries a compact list of the day's
+// meals; the model may answer {leftover_of: i, ...} instead of a new
+// meal. Everything here is the DETERMINISTIC half of that contract.
+
+/// Auto-apply only above this confidence: below it a wrong match would
+/// silently shrink a real meal, while falling through merely logs a new
+/// meal the manual flow can still fix.
+const double kAutoLeftoverMinConfidence = 0.75;
+
+/// The prompt carries at most this many of TODAY's most recent meals —
+/// leftovers come minutes-to-hours after the original, and a shorter
+/// list keeps the model's matching sharp.
+const int kAutoLeftoverMaxCandidates = 5;
+
+/// The RECENT MEALS block appended to the photo prompt. Indexes are the
+/// caller's list positions — the SAME snapshot must be used to resolve
+/// the reply (spec §4.2 snapshot rule). Empty list → empty string (the
+/// prompt section tells the model to ignore itself in that case).
+String formatRecentMealsBlock(List<Map<String, dynamic>> compacts) {
+  if (compacts.isEmpty) return '';
+  final lines = <String>['', 'RECENT MEALS (today, for the leftover check):'];
+  for (var i = 0; i < compacts.length; i++) {
+    final c = compacts[i];
+    final items = c['food_items'];
+    final itemBits = items is List
+        ? [
+            for (final it in items.whereType<Map>())
+              '${it['name'] ?? '?'} (~${safeNumber(it['estimated_calories']).round()} kcal)'
+          ]
+        : const <String>[];
+    lines.add('[$i] ${c['time'] ?? ''} — ${c['meal_description'] ?? 'Meal'} '
+        '(~${safeNumber(c['total_calories']).round()} kcal)'
+        '${itemBits.isEmpty ? '' : ': ${itemBits.join(', ')}'}');
+  }
+  return lines.join('\n');
+}
+
+/// The compact shape one candidate meal contributes to the block AND to
+/// the server payload (whitelisted, like compactOriginalAnalysis).
+Map<String, dynamic> recentMealCompact(
+        {required String time, required Map<String, dynamic> analysis}) =>
+    {
+      'time': time,
+      'meal_description': '${analysis['meal_description'] ?? 'Meal'}',
+      'total_calories': safeNumber(analysis['total_calories']),
+      'food_items': [
+        for (final it in safeFoodItems(analysis))
+          {
+            'name': '${it['name'] ?? '?'}',
+            'estimated_calories': safeNumber(it['estimated_calories']),
+          },
+      ],
+    };
+
+/// Gate an analysis reply's automatic-leftover claim: returns the VALID
+/// candidate index, or null when the reply is not a confident, usable
+/// leftover verdict (→ caller saves a normal meal). Never throws.
+int? autoLeftoverIndex(Map<String, dynamic> analysis,
+    {required int candidateCount}) {
+  final raw = analysis['leftover_of'];
+  if (raw is! num || raw is bool) return null;
+  final idx = raw.toInt();
+  if (idx < 0 || idx >= candidateCount || idx != raw) return null;
+  final conf = analysis['confidence'];
+  final confidence =
+      conf is num && conf.toDouble().isFinite ? conf.toDouble() : 0.0;
+  if (confidence < kAutoLeftoverMinConfidence) return null;
+  // Usability: applyLeftover needs a fraction or items to work with.
+  final frac = analysis['leftover_fraction'];
+  final items = analysis['items'];
+  final hasFraction = frac is num && !(frac is double && !frac.isFinite);
+  final hasItems = items is List && items.whereType<Map>().isNotEmpty;
+  if (!hasFraction && !hasItems) return null;
+  return idx;
 }

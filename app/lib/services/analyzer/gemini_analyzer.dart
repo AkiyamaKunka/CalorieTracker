@@ -12,6 +12,7 @@ import 'package:http/http.dart' as http;
 
 import '../../core/coerce.dart';
 import '../../core/contracts.dart';
+import '../../core/leftover_logic.dart' show formatRecentMealsBlock;
 import '../../core/prompts.dart';
 import '../settings/app_settings.dart';
 import 'normalize.dart';
@@ -240,7 +241,8 @@ class GeminiAnalyzer implements AnalyzerService {
   }
 
   @override
-  Future<AnalysisOutcome> analyzePhoto(Uint8List originalBytes) async {
+  Future<AnalysisOutcome> analyzePhoto(Uint8List originalBytes,
+      {List<Map<String, dynamic>>? recentMeals}) async {
     final sw = Stopwatch()..start();
     // Spec §3.3: while paused, skip analysis entirely — no model call. The
     // pause expires, so this is retryable by definition.
@@ -264,7 +266,8 @@ class GeminiAnalyzer implements AnalyzerService {
 
     // Spec §1.3: dietary profile appends to the photo prompt only.
     final prompt =
-        withDietaryProfile(foodDetectionPrompt, _settings.dietaryProfile);
+        withDietaryProfile(foodDetectionPrompt, _settings.dietaryProfile) +
+            formatRecentMealsBlock(recentMeals ?? const []);
     final parts = <Map<String, Object?>>[
       {'text': prompt},
       {

@@ -2,7 +2,7 @@
 
 # 🥗 CalorieTracker
 
-**Point your camera at food. Get calories, macros, and a searchable history — your data stays on your phone; only the photo being analyzed ever leaves it.**
+**You eat. It notices.** Take photos the way you already do — the app finds the food ones, an AI model reads them like a nutritionist (labels first, estimates last), and your calorie log writes itself. Even leftovers deduct themselves. **Your data stays on your phone; only the photo being analyzed ever leaves it.**
 
 <p>
   <a href="https://github.com/AkiyamaKunka/CalorieTracker/actions/workflows/python-tests.yml"><img alt="CI" src="https://github.com/AkiyamaKunka/CalorieTracker/actions/workflows/python-tests.yml/badge.svg"></a>
@@ -16,7 +16,7 @@
 
 ---
 
-Take a photo of your meal — or just let the app watch your camera roll — and an AI vision model identifies the food and estimates calories, protein, carbs, and fat. Meals land in a local log you can browse, chart, edit, and correct in plain language (*"the noodles were actually roast duck rice"*, *"删除第一餐"*). No account, no analytics, no cloud database. Works in mainland China without a VPN, and there is a completely free way to run it (Zhipu GLM's default vision model costs nothing).
+The core loop is **automatic**: turn on *Watch camera roll* and every food photo you take — meals, takeout order screenshots, nutrition labels — becomes a logged meal with calories, protein, carbs, and fat, without opening the app. Photograph what's LEFT on the plate afterwards and the app recognizes it as the same meal and **deducts the uneaten part** instead of double-counting. Everything lands in a local log you can browse, chart, edit, and correct in plain language (*"the noodles were actually roast duck rice"*, *"删除第一餐"*). No account, no analytics, no cloud database. Full Chinese UI. Works in mainland China without a VPN, and there is a completely free way to run it (Zhipu GLM's default vision model costs nothing).
 
 ```mermaid
 flowchart LR
@@ -38,16 +38,20 @@ flowchart LR
 *Everything stays on your phone except the single photo being analyzed.*
 
 <p align="center">
-  <img src="docs/screenshots/today_light.png" width="23%" alt="Today — calorie ring, transparent arithmetic, macro bars (light)">
-  <img src="docs/screenshots/today_dark.png" width="23%" alt="Today in dark mode">
-  <img src="docs/screenshots/history_dark.png" width="23%" alt="History — 30 days with honest gap days">
-  <img src="docs/screenshots/body_dark.png" width="23%" alt="Body — weight trend and measurements">
+  <img src="docs/screenshots/today_light.png" width="23%" alt="Today — calorie ring, transparent arithmetic, macro bars, per-item portions">
+  <img src="docs/screenshots/log_sheet_light.png" width="23%" alt="One button logs everything: photos, leftovers, text in any language, manual, corrections">
+  <img src="docs/screenshots/history_dark.png" width="23%" alt="History in dark mode — magnitude bars and honest gap days">
+  <img src="docs/screenshots/today_zh.png" width="23%" alt="全中文界面 — the full Chinese UI">
 </p>
 <p align="center"><sub><i>Demo data. The design pass is research-driven — ten leading health apps studied, lessons applied, backlashes avoided.</i></sub></p>
 
 ## Features
 
-**Photo → meal log, automatically.** Turn on *Watch camera roll* and every food photo you take logs itself — no need to open the app after each meal. Dedup is guaranteed: a photo is never analyzed (or billed) twice, even across restarts, double-taps on share, or a 200-photo backlog.
+**Photo → meal log, automatically.** Turn on *Watch camera roll* and every food photo you take logs itself — no need to open the app after each meal. Dedup is guaranteed: a photo is never analyzed (or billed) twice, even across restarts, double-taps on share, or a 200-photo backlog. Share-sheet photos are dated by the JPEG's own EXIF shutter time, so a 23:50 dinner shared after midnight lands on *yesterday's* total.
+
+**AI conclusions from evidence, not guesses.** The analysis follows a strict, user-editable evidence ladder (`shared/prompts/estimation_priority.txt`): a **nutrition label** in the photo beats everything (including the Chinese kJ-per-100g conversion), then a **printed weight** (scale sticker, package, receipt), then **brand-published data** for recognized chains and packaged goods — and only then visual estimation, calibrated against real-size references (chopsticks, bowls, hands) with the assumed grams stated in every item name so you can spot and fix a wrong assumption. Every meal says which evidence it used.
+
+**Leftovers deduct themselves.** Photograph what's left on the plate and the analysis recognizes it as the remains of a meal you already logged — same tray, food visibly reduced — and shrinks that meal to what you actually ate instead of logging a phantom second meal. All arithmetic runs in deterministic, clamped code against the local database; the model only ever supplies fractions. Confidence-gated with a manual *Leftovers* flow as the fallback and repair path.
 
 **Corrections in your own words.** *"Lunch was about 650 kcal"*, *"the second meal had no rice"*, *"删掉昨天的宵夜"* — the app updates or deletes meals from plain language, in any language your model reads, and always confirms before deleting. Describing a brand-new meal in text works the same way.
 
@@ -71,7 +75,7 @@ flowchart LR
 
 **Privacy.** Meals, photos, and thumbnails live in SQLite on the device. The only network traffic is the photo you chose to analyze, going to the provider you chose. Export writes a JSON file you own; import merges it back (device moves are two taps), never destructively.
 
-**Small details.** Share-sheet photos are dated by the JPEG's own EXIF shutter time (validated — junk dates rejected), so a 23:50 dinner shared after midnight lands on *yesterday's* total. Every meal keeps a thumbnail even after you clean your gallery. Manual entry works offline with no key at all. Material 3, light and dark.
+**Small details.** Full Chinese UI with a live in-app language switcher; imperial units (lb/in) for body data in the English UI. On the self-hosted subscription path you can pick the analysis model (Fable / Opus / Sonnet / Haiku) and thinking effort per request, from the phone. Every meal keeps a thumbnail even after you clean your gallery. Manual entry works offline with no key at all. Light and dark, Apple-style design.
 
 ## Getting started
 

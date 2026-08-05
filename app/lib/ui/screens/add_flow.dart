@@ -228,6 +228,7 @@ class _AddPhotoScreenState extends State<AddPhotoScreen> {
           PhotoOutcomeKind.duplicate => 'Duplicate photo',
           PhotoOutcomeKind.alreadyTracked => 'Already logged',
           PhotoOutcomeKind.failed => 'Analysis failed',
+          PhotoOutcomeKind.leftoverApplied => 'Leftovers deducted',
         }),
         content: Text(canLogManually
             ? '${outcome.message}\n\nIf this IS food, log it yourself — '

@@ -214,9 +214,17 @@ def compact_leftover_original(raw) -> "Optional[str]":
             return None
         try:
             parsed = json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            # RecursionError: a deeply nested array bomb under the size
+            # cap crashed the endpoint with a 500 (pressure-test find).
             return None
     if not isinstance(parsed, dict):
+        return None
+    try:
+        # Force any lurking deep structure through a bounded round-trip
+        # BEFORE fields are str()'d into the compact.
+        json.dumps(parsed)
+    except (RecursionError, ValueError, TypeError):
         return None
 
     def _num(v):
@@ -242,3 +250,58 @@ def compact_leftover_original(raw) -> "Optional[str]":
         compact["food_items"] = []
         out = json.dumps(compact, ensure_ascii=False)
     return out
+
+
+def compact_recent_meals(raw) -> "Optional[list]":
+    """Sanitize the app's recent-meals list for the AUTO leftover check
+    (2026-08-05): parsed and REBUILT from a whitelist per meal — same
+    posture as compact_leftover_original. None = unusable (caller 400s);
+    a valid-but-empty list is fine (no check requested).
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        return None
+    out = []
+    for meal in raw[:5]:
+        if not isinstance(meal, dict):
+            return None
+        out.append({
+            "time": str(meal.get("time", ""))[:20],
+            "meal_description": str(meal.get("meal_description", "Meal"))[:300],
+            "total_calories": safe_number(meal.get("total_calories"), 0),
+            "food_items": [
+                {
+                    "name": str(item.get("name", "?"))[:200],
+                    "estimated_calories": safe_number(
+                        item.get("estimated_calories"), 0),
+                }
+                for item in safe_food_items(meal)[:30]
+            ],
+        })
+    return out
+
+
+def build_recent_meals_block(compacts) -> str:
+    """The RECENT MEALS prompt block — BYTE-IDENTICAL to the Dart
+    formatRecentMealsBlock (core/leftover_logic.dart), pinned by
+    tests: same analysis text on both platforms or the model behaves
+    differently per provider path.
+    """
+    if not compacts:
+        return ""
+    lines = ["", "RECENT MEALS (today, for the leftover check):"]
+    for i, c in enumerate(compacts):
+        items = c.get("food_items") or []
+        bits = ", ".join(
+            f"{it.get('name', '?')} (~{round(safe_number(it.get('estimated_calories'), 0))} kcal)"
+            for it in items
+        )
+        line = (
+            f"[{i}] {c.get('time', '')} — {c.get('meal_description', 'Meal')} "
+            f"(~{round(safe_number(c.get('total_calories'), 0))} kcal)"
+        )
+        if bits:
+            line += f": {bits}"
+        lines.append(line)
+    return "\n".join(lines)

@@ -561,10 +561,10 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
-  String get addLeftover => 'Log leftovers';
+  String get addLeftover => 'Leftovers';
 
   @override
-  String get addLeftoverNote => 'deduct what you didn\'t finish';
+  String get addLeftoverNote => 'deduct what\'s left';
 
   @override
   String get leftoverTitle => 'Leftovers';

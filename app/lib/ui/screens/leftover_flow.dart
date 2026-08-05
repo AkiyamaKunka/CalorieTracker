@@ -84,10 +84,17 @@ class _LeftoverScreenState extends State<LeftoverScreen> {
     });
   }
 
+  /// Synchronous re-entry guard: [_analyzing] drives the SPINNER and is
+  /// cleared before the confirm dialog, so it cannot also police taps —
+  /// two taps in the dialog-open gap stacked two estimates and applied an
+  /// unseen one (pressure-test find).
+  bool _busy = false;
+
   Future<void> _pickPhoto(RecentAsset asset) async {
-    if (_analyzing) return;
+    if (_busy) return;
     final meal = _selected;
     if (meal == null) return;
+    _busy = true;
     setState(() => _analyzing = true);
     final services = widget.services;
     final l = context.l10n;
@@ -139,6 +146,7 @@ class _LeftoverScreenState extends State<LeftoverScreen> {
       }
       await _confirmAndApply(meal, hash, result);
     } finally {
+      _busy = false;
       if (mounted) setState(() => _analyzing = false);
     }
   }
@@ -150,15 +158,21 @@ class _LeftoverScreenState extends State<LeftoverScreen> {
     // a meal of its own?
     int? duplicateId;
     num duplicateKcal = 0;
-    if (hash.isNotEmpty) {
-      final status = await services.dao.photoStatus(hash);
-      final dupId = status?.mealId;
-      if (status?.status == IngestionStatus.saved &&
+    // The photo's existing ledger state decides what we may touch later.
+    final status = hash.isEmpty ? null : await services.dao.photoStatus(hash);
+    if (status != null) {
+      final dupId = status.mealId;
+      if (status.status == IngestionStatus.saved &&
           dupId != null &&
           dupId != meal.id) {
         duplicateId = dupId;
-        final rows = await services.dao
-            .mealsBetween(meal.date, isoDate(DateTime.now()));
+        // A generous window: a duplicate can be dated BEFORE the selected
+        // meal (clock/EXIF skew, near-midnight capture, an import), and a
+        // narrow lookup showed '0 kcal' while deleting a real meal
+        // (pressure-test find).
+        final now = DateTime.now();
+        final rows = await services.dao.mealsBetween(
+            isoDate(now.subtract(const Duration(days: 30))), isoDate(now));
         for (final m in rows) {
           if (m.id == dupId) {
             duplicateKcal = safeCal(m);
@@ -218,18 +232,34 @@ class _LeftoverScreenState extends State<LeftoverScreen> {
     );
     if (ok != true || !mounted) return;
 
+    // The meal may have been deleted during the model round-trip: a
+    // no-op UPDATE reported success and still burned the photo hash
+    // (pressure-test find).
+    final stillThere = (await services.dao
+            .mealsBetween(meal.date, meal.date))
+        .any((m) => m.id == meal.id);
+    if (!mounted) return;
+    if (!stillThere) {
+      _snack(context.l10n.leftoverFailed);
+      return;
+    }
+
     await services.dao.updateMealAnalysis(meal.id, result.adjusted);
     if (duplicateId != null) {
       // Removes the double-count AND tombstones the photo's ledger row so
       // the backfill scan can never resurrect it (deleteMeal contract).
       await services.dao.deleteMeal(duplicateId);
-    } else if (hash.isNotEmpty) {
-      // The watcher hasn't met this photo yet — make sure it never logs
-      // it as food.
+    } else if (hash.isNotEmpty && status == null) {
+      // ONLY when the ledger has never seen this photo. Marking an
+      // existing row 'skipped' rewrote the SELECTED meal's own saved row
+      // (severing meal_id) when the user re-picked its before-photo, and
+      // stomped a live 'processing' reservation out from under the
+      // watcher (pressure-test finds).
       await services.dao.markPhotoHash(hash, IngestionStatus.skipped);
     }
     if (!mounted) return;
     _snack(context.l10n.leftoverApplied);
+    // pop THIS route by name, never 'whatever is topmost'.
     Navigator.of(context).pop(true);
   }
 

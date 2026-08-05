@@ -580,6 +580,7 @@ def _attempt_glm_vision(
 def _attempt_file(
     cli: str, image_bytes: bytes, env: Dict[str, str], start: float,
     prompt: Optional[str] = None,
+    model: Optional[str] = None, effort: Optional[str] = None,
 ) -> Optional[Dict]:
     """Two-turn dispatch: temp image file + a Read-tool prompt. The
     compatibility fallback for CLIs without stream-json support, and the
@@ -599,7 +600,7 @@ def _attempt_file(
             "--output-format", "json",
             "--allowedTools", "Read",
         ]
-        _append_model_and_extra_flags(cmd)
+        _append_model_and_extra_flags(cmd, model=model, effort=effort)
         proc = subprocess.run(
             cmd,
             capture_output=True,
@@ -830,6 +831,7 @@ def analyze_food_photo(
                 "Claude stream-json dispatch failed — retrying once via the "
                 "two-turn Read-file path."
             )
-        return _attempt_file(cli, image_bytes, env, start, prompt)
+        return _attempt_file(cli, image_bytes, env, start, prompt,
+                             model=model, effort=effort)
     finally:
         _CLI_LOCK.release()
