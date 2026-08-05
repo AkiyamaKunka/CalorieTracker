@@ -509,7 +509,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get reportNoMeals => 'No meals logged.';
 
   @override
-  String get reportFooter => 'Logged with CalorieTracker';
+  String get reportFooter => 'Logged with Bitewise';
 
   @override
   String typicalDayHeadroom(String typical, String delta) {
@@ -559,4 +559,90 @@ class AppLocalizationsEn extends AppLocalizations {
   String bodySince(String date) {
     return 'since $date';
   }
+
+  @override
+  String get addLeftover => 'Leftovers';
+
+  @override
+  String get addLeftoverNote => 'deduct what\'s left';
+
+  @override
+  String get leftoverTitle => 'Leftovers';
+
+  @override
+  String get leftoverPickMeal => 'Which meal was this?';
+
+  @override
+  String get leftoverPickPhoto =>
+      'Pick the photo of what\'s LEFT — the meal\'s calories shrink to what you ate.';
+
+  @override
+  String get leftoverChangeMeal => 'Change';
+
+  @override
+  String get leftoverNotSame => 'This doesn\'t look like the same meal';
+
+  @override
+  String get leftoverUseAnyway => 'Use anyway';
+
+  @override
+  String get leftoverResultTitle => 'Deduct leftovers?';
+
+  @override
+  String leftoverResultLine(String pct, String kcal, String now) {
+    return 'Eaten ~$pct% — deducting $kcal kcal, this meal is now $now kcal.';
+  }
+
+  @override
+  String leftoverDupRemoved(String kcal) {
+    return 'This photo was also logged as its own $kcal kcal meal — that duplicate will be removed.';
+  }
+
+  @override
+  String get leftoverApplied => 'Leftovers deducted.';
+
+  @override
+  String get leftoverFailed =>
+      'Couldn\'t estimate the leftovers from that photo.';
+
+  @override
+  String get leftoverNoMeals =>
+      'No meals from today or yesterday to deduct from.';
+
+  @override
+  String get planTuningHeader => 'Model & thinking';
+
+  @override
+  String get planTuningFooter =>
+      'Which Claude model analyzes on your server, and how hard it thinks. Default follows the server\'s own setting; only the Claude plan offers this — the other plans choose models themselves.';
+
+  @override
+  String get planModelRow => 'Model';
+
+  @override
+  String get planEffortRow => 'Thinking effort';
+
+  @override
+  String get planChoiceDefault => 'Server default';
+
+  @override
+  String get planModelOpus => 'Opus — most accurate';
+
+  @override
+  String get planModelSonnet => 'Sonnet — balanced';
+
+  @override
+  String get planModelHaiku => 'Haiku — fastest';
+
+  @override
+  String get planEffortLow => 'Low — fastest';
+
+  @override
+  String get planEffortMedium => 'Medium';
+
+  @override
+  String get planEffortHigh => 'High — most thorough';
+
+  @override
+  String get planModelFable => 'Fable — frontier, most capable';
 }

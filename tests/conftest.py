@@ -56,3 +56,56 @@ def _no_real_pushplus_pushes(monkeypatch):
     if utils_mod is None:
         import utils as utils_mod
     monkeypatch.setattr(utils_mod, "PUSHPLUS_TOKEN", None)
+
+
+# ─── Shared app-API test harness (moved from test_api_analyze_endpoints.py:
+# fixtures in conftest need no imports, which keeps ruff F811 quiet in every
+# suite that uses them) ───
+from types import SimpleNamespace  # noqa: E402
+
+import database  # noqa: E402
+import telegram_bot  # noqa: E402
+
+
+class FakeBot:
+    def __init__(self):
+        self.messages = []
+
+    def send_message(self, chat_id, text, **kw):
+        self.messages.append((chat_id, text))
+        return {"ok": True}
+
+    def send_photo(self, *a, **kw):
+        self.messages.append(("photo", a, kw))
+        return {"ok": True}
+
+    def _redact(self, e):
+        return str(e)
+
+
+@pytest.fixture
+def client(monkeypatch, tmp_path):
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "api.db")
+    database.init_db()
+    monkeypatch.setattr(telegram_bot, "ALLOWED_CHAT_ID", 12345)
+    monkeypatch.setattr(telegram_bot, "ANDROID_API_KEY", "secret-key")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(telegram_bot, "API_UPLOAD_FAILED_DIR", tmp_path / "failed")
+    monkeypatch.setattr(telegram_bot, "SERVICE_HEALTH_PATH", tmp_path / "health.json")
+    monkeypatch.setattr(telegram_bot, "maybe_warn_android_vpn_inactive",
+                        lambda *a, **kw: None)
+    bot = FakeBot()
+    app = telegram_bot._build_api_app(bot, object())
+    return SimpleNamespace(http=app.test_client(), bot=bot)
+
+
+def _meals():
+    import sqlite3
+    with sqlite3.connect(database.DB_PATH) as conn:
+        return conn.execute("SELECT COUNT(*) FROM meals").fetchone()[0]
+
+
+def _ledger_rows():
+    import sqlite3
+    with sqlite3.connect(database.DB_PATH) as conn:
+        return conn.execute("SELECT COUNT(*) FROM photo_ingestions").fetchone()[0]

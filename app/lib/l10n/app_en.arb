@@ -261,7 +261,7 @@
     }
   },
   "reportNoMeals": "No meals logged.",
-  "reportFooter": "Logged with CalorieTracker",
+  "reportFooter": "Logged with Bitewise",
   "typicalDayHeadroom": "Typical day: ~{typical} kcal · ~{delta} kcal headroom",
   "@typicalDayHeadroom": {
     "placeholders": {
@@ -317,5 +317,51 @@
         "type": "String"
       }
     }
-  }
+  },
+  "addLeftover": "Leftovers",
+  "addLeftoverNote": "deduct what's left",
+  "leftoverTitle": "Leftovers",
+  "leftoverPickMeal": "Which meal was this?",
+  "leftoverPickPhoto": "Pick the photo of what's LEFT — the meal's calories shrink to what you ate.",
+  "leftoverChangeMeal": "Change",
+  "leftoverNotSame": "This doesn't look like the same meal",
+  "leftoverUseAnyway": "Use anyway",
+  "leftoverResultTitle": "Deduct leftovers?",
+  "leftoverResultLine": "Eaten ~{pct}% — deducting {kcal} kcal, this meal is now {now} kcal.",
+  "@leftoverResultLine": {
+    "placeholders": {
+      "pct": {
+        "type": "String"
+      },
+      "kcal": {
+        "type": "String"
+      },
+      "now": {
+        "type": "String"
+      }
+    }
+  },
+  "leftoverDupRemoved": "This photo was also logged as its own {kcal} kcal meal — that duplicate will be removed.",
+  "@leftoverDupRemoved": {
+    "placeholders": {
+      "kcal": {
+        "type": "String"
+      }
+    }
+  },
+  "leftoverApplied": "Leftovers deducted.",
+  "leftoverFailed": "Couldn't estimate the leftovers from that photo.",
+  "leftoverNoMeals": "No meals from today or yesterday to deduct from.",
+  "planTuningHeader": "Model & thinking",
+  "planTuningFooter": "Which Claude model analyzes on your server, and how hard it thinks. Default follows the server's own setting; only the Claude plan offers this — the other plans choose models themselves.",
+  "planModelRow": "Model",
+  "planEffortRow": "Thinking effort",
+  "planChoiceDefault": "Server default",
+  "planModelOpus": "Opus — most accurate",
+  "planModelSonnet": "Sonnet — balanced",
+  "planModelHaiku": "Haiku — fastest",
+  "planEffortLow": "Low — fastest",
+  "planEffortMedium": "Medium",
+  "planEffortHigh": "High — most thorough",
+  "planModelFable": "Fable — frontier, most capable"
 }

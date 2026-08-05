@@ -191,3 +191,117 @@ def telegram_message_chunks(text: str, limit: int = 3900) -> List[str]:
     if current:
         chunks.append(current.rstrip())
     return chunks or [""]
+
+
+def compact_leftover_original(raw) -> "Optional[str]":
+    """Re-sanitize the app's compact original-analysis JSON for the
+    leftover prompt (2026-08-05).
+
+    The client already sends a whitelisted compact form, but this server
+    NEVER embeds network JSON into a CLI prompt verbatim: the object is
+    parsed and REBUILT from a field whitelist (numbers coerced, names
+    stringified and length-capped), so no smuggled keys or oversized
+    strings ride into the prompt. None = unusable input (caller 400s).
+    """
+    import shared_generated
+
+    if isinstance(raw, (dict,)):
+        parsed = raw
+    else:
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        if len(raw) > shared_generated.API_LEFTOVER_MAX_CHARS:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            # RecursionError: a deeply nested array bomb under the size
+            # cap crashed the endpoint with a 500 (pressure-test find).
+            return None
+    if not isinstance(parsed, dict):
+        return None
+    try:
+        # Force any lurking deep structure through a bounded round-trip
+        # BEFORE fields are str()'d into the compact.
+        json.dumps(parsed)
+    except (RecursionError, ValueError, TypeError):
+        return None
+
+    def _num(v):
+        n = safe_number(v, 0)
+        return n if isinstance(n, (int, float)) else 0
+
+    compact = {
+        "meal_description": str(parsed.get("meal_description", "Meal"))[:300],
+        "total_calories": _num(parsed.get("total_calories")),
+        "total_protein_g": _num(parsed.get("total_protein_g")),
+        "total_carbs_g": _num(parsed.get("total_carbs_g")),
+        "total_fat_g": _num(parsed.get("total_fat_g")),
+        "food_items": [
+            {
+                "name": str(item.get("name", "?"))[:200],
+                "estimated_calories": _num(item.get("estimated_calories")),
+            }
+            for item in safe_food_items(parsed)[:30]
+        ],
+    }
+    out = json.dumps(compact, ensure_ascii=False)
+    if len(out) > shared_generated.API_LEFTOVER_MAX_CHARS:
+        compact["food_items"] = []
+        out = json.dumps(compact, ensure_ascii=False)
+    return out
+
+
+def compact_recent_meals(raw) -> "Optional[list]":
+    """Sanitize the app's recent-meals list for the AUTO leftover check
+    (2026-08-05): parsed and REBUILT from a whitelist per meal — same
+    posture as compact_leftover_original. None = unusable (caller 400s);
+    a valid-but-empty list is fine (no check requested).
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        return None
+    out = []
+    for meal in raw[:5]:
+        if not isinstance(meal, dict):
+            return None
+        out.append({
+            "time": str(meal.get("time", ""))[:20],
+            "meal_description": str(meal.get("meal_description", "Meal"))[:300],
+            "total_calories": safe_number(meal.get("total_calories"), 0),
+            "food_items": [
+                {
+                    "name": str(item.get("name", "?"))[:200],
+                    "estimated_calories": safe_number(
+                        item.get("estimated_calories"), 0),
+                }
+                for item in safe_food_items(meal)[:30]
+            ],
+        })
+    return out
+
+
+def build_recent_meals_block(compacts) -> str:
+    """The RECENT MEALS prompt block — BYTE-IDENTICAL to the Dart
+    formatRecentMealsBlock (core/leftover_logic.dart), pinned by
+    tests: same analysis text on both platforms or the model behaves
+    differently per provider path.
+    """
+    if not compacts:
+        return ""
+    lines = ["", "RECENT MEALS (today, for the leftover check):"]
+    for i, c in enumerate(compacts):
+        items = c.get("food_items") or []
+        bits = ", ".join(
+            f"{it.get('name', '?')} (~{round(safe_number(it.get('estimated_calories'), 0))} kcal)"
+            for it in items
+        )
+        line = (
+            f"[{i}] {c.get('time', '')} — {c.get('meal_description', 'Meal')} "
+            f"(~{round(safe_number(c.get('total_calories'), 0))} kcal)"
+        )
+        if bits:
+            line += f": {bits}"
+        lines.append(line)
+    return "\n".join(lines)

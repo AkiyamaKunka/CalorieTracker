@@ -14,6 +14,7 @@ import 'package:intl/intl.dart';
 
 import '../core/coerce.dart';
 import '../core/contracts.dart';
+import '../core/leftover_logic.dart';
 import '../services/analyzer/normalize.dart' show makeMealThumb;
 import '../services/photo/filename_dates.dart'
     show exifCapturedAt, validateCapturedAt;
@@ -23,7 +24,18 @@ import 'format.dart';
 Future<String> _computeMd5(Uint8List bytes) =>
     compute(originalBytesMd5, bytes);
 
-enum PhotoOutcomeKind { saved, skipped, failed, duplicate, alreadyTracked }
+enum PhotoOutcomeKind {
+  saved,
+  skipped,
+  failed,
+  duplicate,
+  alreadyTracked,
+
+  /// The photo was the REMAINS of an earlier meal (2026-08-05): no new
+  /// row — the original meal's totals shrank and the photo's hash is
+  /// tombstoned so no scan re-offers it.
+  leftoverApplied,
+}
 
 class PhotoOutcome {
   final PhotoOutcomeKind kind;
@@ -143,7 +155,24 @@ class PhotoPipeline {
             'This photo was already logged.');
       }
 
-      final outcome = await analyzer.analyzePhoto(photo.bytes);
+      // AUTOMATIC leftover check (2026-08-05): today's meals ride along
+      // as compacts; the model may answer leftover_of instead of a new
+      // meal. The SNAPSHOT is captured here — reply indexes resolve
+      // against exactly this list (spec §4.2 snapshot rule).
+      final today = isoDate(DateTime.now());
+      final candidates = byMealClock(
+              (await dao.mealsBetween(today, today)).where(isFoodMeal))
+          .toList();
+      final recent = candidates.length > kAutoLeftoverMaxCandidates
+          ? candidates.sublist(candidates.length - kAutoLeftoverMaxCandidates)
+          : candidates;
+      final compacts = [
+        for (final m in recent)
+          recentMealCompact(time: m.time, analysis: m.analysis),
+      ];
+
+      final outcome =
+          await analyzer.analyzePhoto(photo.bytes, recentMeals: compacts);
       if (outcome.analysis == null) {
         final why = outcome.error ?? 'Analysis failed.';
         if (outcome.retryable) {
@@ -168,6 +197,37 @@ class PhotoPipeline {
       }
 
       final analysis = Map<String, dynamic>.from(outcome.analysis!);
+
+      // AUTOMATIC leftover application (2026-08-05): a confident
+      // leftover_of verdict ADJUSTS the original meal in place — no new
+      // row, no double-count, photo tombstoned. Unusable verdicts fall
+      // through to a normal save (the manual flow remains the repair
+      // path); this branch never deletes anything.
+      final autoIdx =
+          autoLeftoverIndex(analysis, candidateCount: recent.length);
+      if (autoIdx != null) {
+        final original = recent[autoIdx];
+        final applied = applyLeftover(original.analysis, analysis,
+            leftoverPhotoMd5: hash,
+            appliedAtIso: DateTime.now().toIso8601String());
+        if (applied != null) {
+          await dao.updateMealAnalysis(original.id, applied.adjusted);
+          await dao.markPhotoHash(hash, IngestionStatus.skipped);
+          final newKcal =
+              safeNumber(applied.adjusted['total_calories']).round();
+          final summary =
+              '${mealDescription(original.analysis)} — −${applied.deductedKcal} '
+              'kcal, now ~$newKcal kcal';
+          try {
+            notify?.call('Leftovers deducted: $summary');
+            onMealSaved?.call();
+          } catch (_) {}
+          return PhotoOutcome(
+              PhotoOutcomeKind.leftoverApplied, 'Leftovers deducted: $summary',
+              analysis: applied.adjusted);
+        }
+      }
+
       if (analysis.containsKey('food_items')) {
         // Sanitize before persisting — a hostile shape is never stored
         // (spec §3.5).

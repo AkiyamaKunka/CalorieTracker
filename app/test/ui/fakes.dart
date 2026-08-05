@@ -33,8 +33,13 @@ class FakeAnalyzer implements AnalyzerService {
   /// Test hook: controls validateKey resolution. Default resolves null (OK).
   Future<String?> Function(String apiKey)? onValidateKey;
 
+  /// Records the compacts the pipeline sent for the auto-leftover check.
+  List<Map<String, dynamic>>? lastRecentMeals;
+
   @override
-  Future<AnalysisOutcome> analyzePhoto(Uint8List originalBytes) async {
+  Future<AnalysisOutcome> analyzePhoto(Uint8List originalBytes,
+      {List<Map<String, dynamic>>? recentMeals}) async {
+    lastRecentMeals = recentMeals;
     if (onAnalyze != null) await onAnalyze!();
     return nextPhotoOutcome;
   }
@@ -42,6 +47,18 @@ class FakeAnalyzer implements AnalyzerService {
   @override
   Future<Map<String, dynamic>?> textIntent(String prompt) async =>
       nextTextIntent;
+
+  /// Canned leftover reply for the deduction-flow tests; records the
+  /// compact original the flow sent.
+  Map<String, dynamic>? nextLeftover;
+  String? lastLeftoverCompact;
+
+  @override
+  Future<Map<String, dynamic>?> leftoverIntent(
+      Uint8List originalBytes, String originalCompact) async {
+    lastLeftoverCompact = originalCompact;
+    return nextLeftover;
+  }
 
   @override
   Future<String?> validateKey(String apiKey) =>
@@ -164,6 +181,12 @@ class FakeSettings with ChangeNotifier implements SettingsStore {
   String units = 'metric';
 
   @override
+  String serverModel = '';
+
+  @override
+  String serverEffort = '';
+
+  @override
   Future<void> update({
     String? apiKey,
     String? provider,
@@ -176,10 +199,14 @@ class FakeSettings with ChangeNotifier implements SettingsStore {
     String? serverBackend,
     String? appLanguage,
     String? units,
+    String? serverModel,
+    String? serverEffort,
   }) async {
     updateCalls++;
     if (appLanguage != null) this.appLanguage = appLanguage;
     if (units != null) this.units = units;
+    if (serverModel != null) this.serverModel = serverModel;
+    if (serverEffort != null) this.serverEffort = serverEffort;
     if (apiKey != null) this.apiKey = apiKey;
     if (provider != null) this.provider = provider;
     if (model != null) this.model = model;

@@ -50,6 +50,12 @@ class FlutterSecureKeyStore implements SecureKeyStore {
 /// app works at all.
 enum AiProvider { gemini, openai, anthropic, server, qwen, doubao, glm }
 
+/// The Claude-plan model/effort choices (2026-08-05), mirroring the
+/// server's closed whitelists (claude_analyzer.CLAUDE_PLAN_MODELS /
+/// _EFFORTS) — the server 400s anything else, so these lists ARE the UI.
+const List<String> kServerPlanModels = ['opus', 'sonnet', 'haiku', 'fable'];
+const List<String> kServerPlanEfforts = ['low', 'medium', 'high'];
+
 class AppSettings extends ChangeNotifier {
   AppSettings._(this._prefs, this._keys);
 
@@ -71,6 +77,8 @@ class AppSettings extends ChangeNotifier {
   static const String _kReportTime = 'settings.report_time';
   static const String _kAppLanguage = 'settings.app_language';
   static const String _kUnits = 'settings.units';
+  static const String _kServerModel = 'settings.server_model';
+  static const String _kServerEffort = 'settings.server_effort';
   static const String _kWatcherEnabled = 'settings.watcher_enabled';
   static const String _kDietaryProfile = 'settings.dietary_profile';
   static const String _kQuotaPauseUntil = 'settings.quota_pause_until';
@@ -130,6 +138,8 @@ class AppSettings extends ChangeNotifier {
   String _reportTime = defaultReportTime;
   String _appLanguage = 'system'; // 'system' | 'en' | 'zh'
   String _units = 'metric'; // 'metric' | 'imperial'
+  String _serverModel = ''; // '' = server default | opus/sonnet/haiku
+  String _serverEffort = ''; // '' = server default | low/medium/high
   bool _watcherEnabled = false;
   String? _dietaryProfile;
   DateTime? _quotaPauseUntil;
@@ -183,6 +193,10 @@ class AppSettings extends ChangeNotifier {
     final units = p.getString(_kUnits) ?? 'metric';
     s._units =
         const {'metric', 'imperial'}.contains(units) ? units : 'metric';
+    final sm = p.getString(_kServerModel) ?? '';
+    s._serverModel = kServerPlanModels.contains(sm) ? sm : '';
+    final se = p.getString(_kServerEffort) ?? '';
+    s._serverEffort = kServerPlanEfforts.contains(se) ? se : '';
     s._watcherEnabled = p.getBool(_kWatcherEnabled) ?? false;
     final profile = (p.getString(_kDietaryProfile) ?? '').trim();
     s._dietaryProfile = profile.isEmpty ? null : profile;
@@ -435,6 +449,27 @@ class AppSettings extends ChangeNotifier {
   /// stays metric everywhere; the Chinese UI ignores this and renders
   /// metric regardless (user decision 2026-08-03). App-only (spec §9).
   String get units => _units;
+
+  /// Claude-plan model/effort choice (2026-08-05): '' = server default.
+  /// CLAUDE-ONLY — the vendor plans map model names server-side and the
+  /// API 400s overrides for them, so the UI only offers these on the
+  /// Claude plan. Values mirror the server's closed whitelists.
+  String get serverModel => _serverModel;
+  String get serverEffort => _serverEffort;
+
+  Future<void> setServerModel(String value) async {
+    final v = kServerPlanModels.contains(value) ? value : '';
+    _serverModel = v;
+    await _prefs.setString(_kServerModel, v);
+    notifyListeners();
+  }
+
+  Future<void> setServerEffort(String value) async {
+    final v = kServerPlanEfforts.contains(value) ? value : '';
+    _serverEffort = v;
+    await _prefs.setString(_kServerEffort, v);
+    notifyListeners();
+  }
 
   Future<void> setUnits(String value) async {
     final v =

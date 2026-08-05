@@ -60,17 +60,28 @@ def load_sources():
     food = food.replace("<<ESTIMATION_PRIORITY>>", priority)
     if "<<ESTIMATION_PRIORITY>>" in food or "Priority 1" not in food:
         raise SystemExit("estimation-priority splice failed")
-    return food, text, constants
+
+    leftover = (SHARED / "prompts" / "leftover_prompt.txt").read_text(
+        encoding="utf-8"
+    )
+    if "<<ORIGINAL_ANALYSIS>>" not in leftover:
+        raise SystemExit("leftover_prompt.txt lost <<ORIGINAL_ANALYSIS>>")
+    return food, text, leftover, constants
 
 
-def python_binding(food, text, constants):
+def python_binding(food, text, leftover, constants):
     fmt = text.replace("{", "{{").replace("}", "}}")
     for token in TOKENS:
         fmt = fmt.replace("<<%s>>" % token, "{%s}" % token.lower())
+    left_fmt = leftover.replace("{", "{{").replace("}", "}}").replace(
+        "<<ORIGINAL_ANALYSIS>>", "{original_analysis}"
+    )
     lines = ['"""%s"""' % HEADER, ""]
     lines.append("FOOD_DETECTION_PROMPT_RAW = %r" % food)
     lines.append("")
     lines.append("TEXT_HANDLER_PROMPT_TEMPLATE = %r" % fmt)
+    lines.append("")
+    lines.append("LEFTOVER_PROMPT_TEMPLATE = %r" % left_fmt)
     lines.append("")
     for key, value in constants.items():
         lines.append("%s = %r" % (key.upper(), value))
@@ -80,7 +91,7 @@ def python_binding(food, text, constants):
     return "\n".join(lines)
 
 
-def dart_binding(food, text, constants):
+def dart_binding(food, text, leftover, constants):
     def dart_str(s):
         return "'''\n%s'''" % s.replace("\\", "\\\\").replace("$", "\\$").replace("'''", "\\'\\'\\'")
 
@@ -101,6 +112,13 @@ def dart_binding(food, text, constants):
     lines.append("const String sharedFoodDetectionPrompt = %s;" % dart_str(food))
     lines.append("")
     lines.append("const String sharedTextHandlerTemplate = %s;" % dart_str(text))
+    lines.append("")
+    lines.append("const String sharedLeftoverTemplate = %s;" % dart_str(leftover))
+    lines.append("")
+    lines.append("/// The leftover-deduction prompt with the original analysis spliced in.")
+    lines.append("String sharedLeftoverPrompt({required String originalAnalysis}) =>")
+    lines.append("    sharedLeftoverTemplate.replaceAll(")
+    lines.append("        '<<ORIGINAL_ANALYSIS>>', originalAnalysis);")
     lines.append("")
     lines.append("/// Substitutes the `<<TOKEN>>` placeholders. Kept as replaceAll so the")
     lines.append("/// template needs no Dart interpolation escaping.")
@@ -130,9 +148,9 @@ def dart_binding(food, text, constants):
 
 def main():
     check = "--check" in sys.argv
-    food, text, constants = load_sources()
-    outputs = {PY_OUT: python_binding(food, text, constants),
-               DART_OUT: dart_binding(food, text, constants)}
+    food, text, leftover, constants = load_sources()
+    outputs = {PY_OUT: python_binding(food, text, leftover, constants),
+               DART_OUT: dart_binding(food, text, leftover, constants)}
     stale = []
     for path, content in outputs.items():
         current = path.read_text(encoding="utf-8") if path.exists() else None

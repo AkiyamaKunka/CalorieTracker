@@ -220,18 +220,34 @@ def _extra_flags() -> list:
         return []
 
 
-def _append_model_and_extra_flags(cmd: list, backend: str = "claude") -> None:
-    """Shared argv tail: optional --model override, then extra flags last.
+# The app-facing per-request choices (2026-08-05). CLAUDE-ONLY, closed
+# whitelists: these values become CLI argv, so free text is never accepted
+# — the endpoints 400 anything else before a CLI run exists.
+CLAUDE_PLAN_MODELS = ("opus", "sonnet", "haiku", "fable")
+CLAUDE_PLAN_EFFORTS = ("low", "medium", "high")
 
-    The --model override is CLAUDE-ONLY: the vendor plans map Anthropic
-    model names to their own models server-side (GLM: sonnet→glm-5.2;
-    Doubao: per plan tier), and an Anthropic model id pushed at them is at
-    best ignored and at worst a 400 on every photo.
+
+def _append_model_and_extra_flags(
+    cmd: list, backend: str = "claude",
+    model: Optional[str] = None, effort: Optional[str] = None,
+) -> None:
+    """Shared argv tail: optional --model/--effort, then extra flags last.
+
+    The overrides are CLAUDE-ONLY: the vendor plans map Anthropic model
+    names to their own models server-side (GLM: sonnet→glm-5.2; Doubao:
+    per plan tier), and an Anthropic model id pushed at them is at best
+    ignored and at worst a 400 on every photo. [model]/[effort] come from
+    the API endpoints PRE-VALIDATED against the whitelists above; the env
+    knob remains the owner's default when no request override arrives.
     """
     if backend == "claude":
-        model = (os.environ.get("CLAUDE_ANALYZER_MODEL") or "").strip()
-        if model:
-            cmd += ["--model", model]
+        chosen = (model or "").strip() if model in CLAUDE_PLAN_MODELS else ""
+        if not chosen:
+            chosen = (os.environ.get("CLAUDE_ANALYZER_MODEL") or "").strip()
+        if chosen:
+            cmd += ["--model", chosen]
+        if effort in CLAUDE_PLAN_EFFORTS:
+            cmd += ["--effort", effort]
     cmd += _extra_flags()
 
 
@@ -332,21 +348,30 @@ def _log_cli_exit(proc) -> None:
 def _finish_analysis(
     envelope: Dict, result_text: str, start: float,
     backend: str = "claude",
+    require_is_food: bool = True,
 ) -> Optional[Dict]:
     """is_food-contract validation + success instrumentation, shared by all
     dispatch paths. None here means the MODEL answered junk — callers must
-    treat it as terminal and never retry-spend on a model that answered."""
+    treat it as terminal and never retry-spend on a model that answered.
+
+    [require_is_food] False is the LEFTOVER estimation contract
+    (2026-08-05): those replies are {same_meal, leftover_fraction, items}
+    — still a dict, but the food gate does not apply; the app's pure
+    apply layer owns every numeric clamp."""
     try:
         analysis = parse_ai_json(result_text)
     except (json.JSONDecodeError, ValueError) as e:
         log.warning(f"Could not parse Claude analysis JSON: {e}")
         return None
-    if not isinstance(analysis, dict) or "is_food" not in analysis:
+    if not isinstance(analysis, dict):
+        log.warning("Claude analysis JSON was not an object.")
+        return None
+    if require_is_food and "is_food" not in analysis:
         log.warning("Claude analysis JSON missing the is_food contract.")
         return None
     # The CLI has no JSON mode, so is_food may arrive as a quoted
     # "false" — truthy downstream. Coerce to a real bool or reject.
-    if not isinstance(analysis["is_food"], bool):
+    if require_is_food and not isinstance(analysis["is_food"], bool):
         coerced = parse_boolish(analysis["is_food"])
         if coerced is None:
             log.warning("Claude analysis is_food was not boolean-like.")
@@ -369,6 +394,8 @@ def _finish_analysis(
 def _attempt_stream(
     cli: str, image_bytes: bytes, env: Dict[str, str], start: float,
     prompt: Optional[str] = None, backend: str = "claude",
+    require_is_food: bool = True,
+    model: Optional[str] = None, effort: Optional[str] = None,
 ) -> Tuple[Optional[Dict], bool]:
     """Single-turn dispatch: image on stdin, no temp file, no tool turns.
 
@@ -387,7 +414,7 @@ def _attempt_stream(
         "--verbose",
         "--tools", "",  # no tools: the answer must land in turn one
     ]
-    _append_model_and_extra_flags(cmd, backend)
+    _append_model_and_extra_flags(cmd, backend, model=model, effort=effort)
     try:
         proc = subprocess.run(
             cmd,
@@ -408,7 +435,8 @@ def _attempt_stream(
         if text is None:
             log.warning("Claude CLI stream result envelope was unusable.")
             return None, True
-        return _finish_analysis(envelope, text, start, backend), False
+        return _finish_analysis(envelope, text, start, backend,
+                                require_is_food=require_is_food), False
     except subprocess.TimeoutExpired:
         log.warning(f"Claude CLI timed out after {_timeout_seconds()}s.")
         return None, False
@@ -435,6 +463,7 @@ def _zai_mcp_config(key: str) -> str:
 def _attempt_glm_vision(
     cli: str, image_bytes: bytes, env: Dict[str, str], start: float,
     prompt: Optional[str] = None,
+    require_is_food: bool = True,
 ) -> Optional[Dict]:
     """GLM-backend photo dispatch: temp file + the official zai vision MCP.
 
@@ -523,7 +552,8 @@ def _attempt_glm_vision(
                 " — the zai MCP server likely failed to start; discarding "
                 "the blind answer.")
             return None
-        return _finish_analysis(envelope, text, start, "glm")
+        return _finish_analysis(envelope, text, start, "glm",
+                                require_is_food=require_is_food)
     except subprocess.TimeoutExpired:
         log.warning(f"GLM CLI timed out after {_timeout_seconds()}s.")
         return None
@@ -550,6 +580,7 @@ def _attempt_glm_vision(
 def _attempt_file(
     cli: str, image_bytes: bytes, env: Dict[str, str], start: float,
     prompt: Optional[str] = None,
+    model: Optional[str] = None, effort: Optional[str] = None,
 ) -> Optional[Dict]:
     """Two-turn dispatch: temp image file + a Read-tool prompt. The
     compatibility fallback for CLIs without stream-json support, and the
@@ -569,7 +600,7 @@ def _attempt_file(
             "--output-format", "json",
             "--allowedTools", "Read",
         ]
-        _append_model_and_extra_flags(cmd)
+        _append_model_and_extra_flags(cmd, model=model, effort=effort)
         proc = subprocess.run(
             cmd,
             capture_output=True,
@@ -607,6 +638,8 @@ def _attempt_file(
 
 
 def analyze_text_prompt(prompt: str, backend: str = "claude",
+                        model: Optional[str] = None,
+                        effort: Optional[str] = None,
                         raise_on_busy: bool = False) -> Optional[Dict]:
     """Run an arbitrary JSON-answering prompt through the CLI (subscription).
 
@@ -632,7 +665,8 @@ def analyze_text_prompt(prompt: str, backend: str = "claude",
     start = time.time()
     try:
         cmd = [cli, "-p", "--output-format", "json", "--tools", ""]
-        _append_model_and_extra_flags(cmd, backend)
+        _append_model_and_extra_flags(cmd, backend, model=model,
+                                      effort=effort)
         proc = subprocess.run(
             cmd,
             input=prompt,
@@ -673,12 +707,58 @@ def analyze_text_prompt(prompt: str, backend: str = "claude",
         _CLI_LOCK.release()
 
 
+def analyze_leftover_photo(
+    image_bytes: bytes,
+    prompt: str,
+    backend: str = "claude",
+    raise_on_busy: bool = False,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
+) -> Optional[Dict]:
+    """Estimate leftover fractions for a previously analyzed meal.
+
+    [prompt] is ALWAYS composed server-side (the leftover template plus a
+    re-sanitized compact original analysis) — and this path NEVER takes
+    the Read-tool file fallback: the embedded original analysis came over
+    the network, so the exfiltration rule for analyze_food_photo applies
+    with no exceptions. The reply skips the is_food gate (leftover
+    contract); every numeric clamp lives in the app's pure apply layer.
+    """
+    if backend not in SUBSCRIPTION_BACKENDS:
+        return None
+    if not backend_available(backend, for_photo=True):
+        return None
+    cli = _cli_path()
+    if cli is None or not image_bytes or not (prompt or "").strip():
+        return None
+    if not _CLI_LOCK.acquire(blocking=False):
+        log.info("Claude CLI busy — leftover estimation declined.")
+        if raise_on_busy:
+            raise AnalyzerBusy()
+        return None
+    start = time.time()
+    try:
+        env = _cli_env(backend)
+        if backend == "glm":
+            return _attempt_glm_vision(cli, image_bytes, env, start, prompt,
+                                       require_is_food=False)
+        analysis, _retry = _attempt_stream(cli, image_bytes, env, start,
+                                           prompt, backend,
+                                           require_is_food=False,
+                                           model=model, effort=effort)
+        return analysis
+    finally:
+        _CLI_LOCK.release()
+
+
 def analyze_food_photo(
     image_bytes: bytes,
     prompt: Optional[str] = None,
     allow_file_fallback: bool = True,
     backend: str = "claude",
     raise_on_busy: bool = False,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
 ) -> Optional[Dict]:
     """Analyze a food photo via the Claude Code CLI; None means 'use Gemini'.
 
@@ -736,7 +816,8 @@ def analyze_food_photo(
             return analysis
         if _dispatch_mode() == "stream":
             analysis, retry_via_file = _attempt_stream(
-                cli, image_bytes, env, start, prompt)
+                cli, image_bytes, env, start, prompt,
+                model=model, effort=effort)
             if not retry_via_file:
                 return analysis
             if not allow_file_fallback:
@@ -750,6 +831,7 @@ def analyze_food_photo(
                 "Claude stream-json dispatch failed — retrying once via the "
                 "two-turn Read-file path."
             )
-        return _attempt_file(cli, image_bytes, env, start, prompt)
+        return _attempt_file(cli, image_bytes, env, start, prompt,
+                             model=model, effort=effort)
     finally:
         _CLI_LOCK.release()

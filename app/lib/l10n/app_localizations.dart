@@ -941,7 +941,7 @@ abstract class AppLocalizations {
   /// No description provided for @reportFooter.
   ///
   /// In en, this message translates to:
-  /// **'Logged with CalorieTracker'**
+  /// **'Logged with Bitewise'**
   String get reportFooter;
 
   /// No description provided for @typicalDayHeadroom.
@@ -1021,6 +1021,162 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'since {date}'**
   String bodySince(String date);
+
+  /// No description provided for @addLeftover.
+  ///
+  /// In en, this message translates to:
+  /// **'Leftovers'**
+  String get addLeftover;
+
+  /// No description provided for @addLeftoverNote.
+  ///
+  /// In en, this message translates to:
+  /// **'deduct what\'s left'**
+  String get addLeftoverNote;
+
+  /// No description provided for @leftoverTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Leftovers'**
+  String get leftoverTitle;
+
+  /// No description provided for @leftoverPickMeal.
+  ///
+  /// In en, this message translates to:
+  /// **'Which meal was this?'**
+  String get leftoverPickMeal;
+
+  /// No description provided for @leftoverPickPhoto.
+  ///
+  /// In en, this message translates to:
+  /// **'Pick the photo of what\'s LEFT — the meal\'s calories shrink to what you ate.'**
+  String get leftoverPickPhoto;
+
+  /// No description provided for @leftoverChangeMeal.
+  ///
+  /// In en, this message translates to:
+  /// **'Change'**
+  String get leftoverChangeMeal;
+
+  /// No description provided for @leftoverNotSame.
+  ///
+  /// In en, this message translates to:
+  /// **'This doesn\'t look like the same meal'**
+  String get leftoverNotSame;
+
+  /// No description provided for @leftoverUseAnyway.
+  ///
+  /// In en, this message translates to:
+  /// **'Use anyway'**
+  String get leftoverUseAnyway;
+
+  /// No description provided for @leftoverResultTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Deduct leftovers?'**
+  String get leftoverResultTitle;
+
+  /// No description provided for @leftoverResultLine.
+  ///
+  /// In en, this message translates to:
+  /// **'Eaten ~{pct}% — deducting {kcal} kcal, this meal is now {now} kcal.'**
+  String leftoverResultLine(String pct, String kcal, String now);
+
+  /// No description provided for @leftoverDupRemoved.
+  ///
+  /// In en, this message translates to:
+  /// **'This photo was also logged as its own {kcal} kcal meal — that duplicate will be removed.'**
+  String leftoverDupRemoved(String kcal);
+
+  /// No description provided for @leftoverApplied.
+  ///
+  /// In en, this message translates to:
+  /// **'Leftovers deducted.'**
+  String get leftoverApplied;
+
+  /// No description provided for @leftoverFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t estimate the leftovers from that photo.'**
+  String get leftoverFailed;
+
+  /// No description provided for @leftoverNoMeals.
+  ///
+  /// In en, this message translates to:
+  /// **'No meals from today or yesterday to deduct from.'**
+  String get leftoverNoMeals;
+
+  /// No description provided for @planTuningHeader.
+  ///
+  /// In en, this message translates to:
+  /// **'Model & thinking'**
+  String get planTuningHeader;
+
+  /// No description provided for @planTuningFooter.
+  ///
+  /// In en, this message translates to:
+  /// **'Which Claude model analyzes on your server, and how hard it thinks. Default follows the server\'s own setting; only the Claude plan offers this — the other plans choose models themselves.'**
+  String get planTuningFooter;
+
+  /// No description provided for @planModelRow.
+  ///
+  /// In en, this message translates to:
+  /// **'Model'**
+  String get planModelRow;
+
+  /// No description provided for @planEffortRow.
+  ///
+  /// In en, this message translates to:
+  /// **'Thinking effort'**
+  String get planEffortRow;
+
+  /// No description provided for @planChoiceDefault.
+  ///
+  /// In en, this message translates to:
+  /// **'Server default'**
+  String get planChoiceDefault;
+
+  /// No description provided for @planModelOpus.
+  ///
+  /// In en, this message translates to:
+  /// **'Opus — most accurate'**
+  String get planModelOpus;
+
+  /// No description provided for @planModelSonnet.
+  ///
+  /// In en, this message translates to:
+  /// **'Sonnet — balanced'**
+  String get planModelSonnet;
+
+  /// No description provided for @planModelHaiku.
+  ///
+  /// In en, this message translates to:
+  /// **'Haiku — fastest'**
+  String get planModelHaiku;
+
+  /// No description provided for @planEffortLow.
+  ///
+  /// In en, this message translates to:
+  /// **'Low — fastest'**
+  String get planEffortLow;
+
+  /// No description provided for @planEffortMedium.
+  ///
+  /// In en, this message translates to:
+  /// **'Medium'**
+  String get planEffortMedium;
+
+  /// No description provided for @planEffortHigh.
+  ///
+  /// In en, this message translates to:
+  /// **'High — most thorough'**
+  String get planEffortHigh;
+
+  /// No description provided for @planModelFable.
+  ///
+  /// In en, this message translates to:
+  /// **'Fable — frontier, most capable'**
+  String get planModelFable;
 }
 
 class _AppLocalizationsDelegate

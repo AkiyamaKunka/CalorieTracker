@@ -17,6 +17,7 @@ import '../photo_pipeline.dart';
 import '../l10n.dart';
 import '../widgets/grouped.dart';
 import 'fix_meal_screen.dart';
+import 'leftover_flow.dart';
 import 'meal_editor_screen.dart';
 import '../services.dart';
 
@@ -33,7 +34,10 @@ Future<void> openAddFlow(BuildContext context, UiServices services,
     backgroundColor: groupedBackground(Theme.of(context).colorScheme),
     builder: (ctx) => SafeArea(
       top: false,
-      child: Column(
+      // Scrollable since the 5th tile (leftovers, 2026-08-05): on a short
+      // viewport the fixed Column overflowed instead of scrolling.
+      child: SingleChildScrollView(
+          child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           Padding(
@@ -55,6 +59,14 @@ Future<void> openAddFlow(BuildContext context, UiServices services,
                 iconColor: Theme.of(ctx).colorScheme.primary,
                 title: ctx.l10n.addFromPhotos,
                 onTap: () => Navigator.of(ctx).pop('photos'),
+              ),
+              GroupedRow(
+                key: const Key('addLeftover'),
+                icon: Icons.restaurant_outlined,
+                iconColor: Theme.of(ctx).colorScheme.secondary,
+                title: ctx.l10n.addLeftover,
+                value: ctx.l10n.addLeftoverNote,
+                onTap: () => Navigator.of(ctx).pop('leftover'),
               ),
               GroupedRow(
                 key: const Key('addFromText'),
@@ -95,13 +107,16 @@ Future<void> openAddFlow(BuildContext context, UiServices services,
           ),
           const SizedBox(height: 16),
         ],
-      ),
+      )),
     ),
   );
   if (!context.mounted) return;
   if (choice == 'photos') {
     await Navigator.of(context).push(MaterialPageRoute<void>(
         builder: (_) => AddPhotoScreen(services: services)));
+  } else if (choice == 'leftover') {
+    await Navigator.of(context).push(MaterialPageRoute<void>(
+        builder: (_) => LeftoverScreen(services: services)));
   } else if (choice == 'text') {
     await Navigator.of(context).push(MaterialPageRoute<void>(
         builder: (_) => AddTextScreen(
@@ -213,6 +228,7 @@ class _AddPhotoScreenState extends State<AddPhotoScreen> {
           PhotoOutcomeKind.duplicate => 'Duplicate photo',
           PhotoOutcomeKind.alreadyTracked => 'Already logged',
           PhotoOutcomeKind.failed => 'Analysis failed',
+          PhotoOutcomeKind.leftoverApplied => 'Leftovers deducted',
         }),
         content: Text(canLogManually
             ? '${outcome.message}\n\nIf this IS food, log it yourself — '

@@ -66,6 +66,7 @@ from config import (
     TELEGRAM_CHAT_ID,
     TEXT_HANDLER_PROMPT,
     FOOD_DETECTION_PROMPT,
+    LEFTOVER_PROMPT_TEMPLATE,
     DUPLICATE_WINDOW_MINUTES,
     ANDROID_API_KEY,
     ANDROID_API_KEY_RETIRING,
@@ -73,6 +74,9 @@ from config import (
     SUPPORTED_EXTENSIONS,
 )
 from utils import (
+    build_recent_meals_block,
+    compact_leftover_original,
+    compact_recent_meals,
     meal_calorie_mismatch,
     parse_ai_json,
     parse_boolish,
@@ -4955,6 +4959,26 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         return jsonify({"ok": True,
                         "cancelled": claude_auth.cancel_session()})
 
+
+    def _plan_model_effort(payload, backend):
+        """Validate the app's optional model/effort choice (2026-08-05).
+
+        CLAUDE-ONLY closed whitelists — these become CLI argv, so anything
+        else is a 400 BEFORE a CLI run exists. Returns (model, effort,
+        error_response); error_response is None when valid.
+        """
+        model = payload.get("model") or None
+        effort = payload.get("effort") or None
+        if model is not None and (
+                backend != "claude"
+                or model not in claude_analyzer.CLAUDE_PLAN_MODELS):
+            return None, None, (jsonify({"error": "bad_model"}), 400)
+        if effort is not None and (
+                backend != "claude"
+                or effort not in claude_analyzer.CLAUDE_PLAN_EFFORTS):
+            return None, None, (jsonify({"error": "bad_effort"}), 400)
+        return model, effort, None
+
     @app.route('/api/analyze_photo', methods=['POST'])
     def api_analyze_photo():
         """Analyze a photo with the Claude Code CLI and RETURN the analysis.
@@ -4989,11 +5013,25 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
                 if len(profile) > API_PROFILE_MAX_CHARS:
                     return jsonify({"error": "profile_too_large"}), 413
                 prompt = build_photo_prompt_with_profile(profile)
+            # AUTO leftover check (2026-08-05): the app ships STRUCTURED
+            # recent-meal compacts; the block is composed HERE from a
+            # whitelist rebuild — same no-caller-prompt rule as always.
+            recent = compact_recent_meals(payload.get("recent_meals"))
+            if recent is None:
+                return jsonify({"error": "bad_recent_meals"}), 400
+            if recent:
+                base_prompt = prompt if prompt else FOOD_DETECTION_PROMPT
+                prompt = base_prompt + build_recent_meals_block(recent)
             backend = payload.get("backend") or "claude"
+            model, effort, bad = _plan_model_effort(payload, backend)
+            if bad:
+                return bad
         elif 'photo' in request.files:
             data = request.files['photo'].read()
+            model = effort = None
         else:
             data = request.get_data(cache=False) or b""
+            model = effort = None
         if not data:
             return jsonify({"error": "no_image"}), 400
         if len(data) > API_ANALYZE_MAX_BYTES:
@@ -5016,7 +5054,7 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         try:
             analysis = claude_analyzer.analyze_food_photo(
                 data, prompt, allow_file_fallback=False, backend=backend,
-                raise_on_busy=True)
+                raise_on_busy=True, model=model, effort=effort)
         except claude_analyzer.AnalyzerBusy:
             # Another photo owns the single-flight CLI — seconds fix this.
             return jsonify({"error": "claude_unavailable",
@@ -5035,6 +5073,70 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         return jsonify({"ok": True, "analysis": analysis,
                         "analyzed_by": backend})
 
+    @app.route('/api/analyze_leftover', methods=['POST'])
+    def api_analyze_leftover():
+        """Estimate leftover fractions for a previously analyzed meal.
+
+        Shape: {image_b64, original_analysis, backend?}. Same posture as
+        analyze_photo — the caller may NOT supply a prompt: the leftover
+        prompt is composed HERE from the server's shared/ template plus a
+        RE-SANITIZED compact of the caller's original analysis
+        (utils.compact_leftover_original — parsed and rebuilt from a
+        whitelist, never embedded verbatim), and the CLI run never takes
+        the Read-tool fallback.
+        """
+        if not _authorized_api_request():
+            return jsonify({"error": "Unauthorized"}), 401
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            # A JSON array/scalar body crashed .get with a 500
+            # (pressure-test find) — it is a client error, say so.
+            return jsonify({"error": "bad_request_shape"}), 400
+        raw = payload.get("image_b64")
+        if not isinstance(raw, str) or not raw.strip():
+            return jsonify({"error": "no_image"}), 400
+        try:
+            data = base64.b64decode(raw, validate=True)
+        except (binascii.Error, ValueError):
+            return jsonify({"error": "bad_image_encoding"}), 400
+        if not data:
+            return jsonify({"error": "no_image"}), 400
+        if len(data) > API_ANALYZE_MAX_BYTES:
+            return jsonify({"error": "image_too_large"}), 413
+        compact = compact_leftover_original(payload.get("original_analysis"))
+        if compact is None:
+            return jsonify({"error": "bad_original_analysis"}), 400
+        backend = payload.get("backend") or "claude"
+        if backend not in claude_analyzer.SUBSCRIPTION_BACKENDS:
+            return jsonify({"error": "bad_backend"}), 400
+        model, effort, bad = _plan_model_effort(payload, backend)
+        if bad:
+            return bad
+        if not claude_analyzer.backend_available(backend, for_photo=True):
+            reason = claude_analyzer.backend_status().get(backend)
+            log.warning(
+                f"analyze_leftover refused: backend '{backend}' unavailable "
+                f"({reason}).")
+            return jsonify({"error": "claude_unavailable",
+                            "reason": reason}), 503
+        prompt = LEFTOVER_PROMPT_TEMPLATE.format(original_analysis=compact)
+        try:
+            leftover = claude_analyzer.analyze_leftover_photo(
+                data, prompt, backend=backend, raise_on_busy=True,
+                model=model, effort=effort)
+        except claude_analyzer.AnalyzerBusy:
+            return jsonify({"error": "claude_unavailable",
+                            "reason": "the analyzer is busy with another "
+                                      "photo",
+                            "retry": True}), 503
+        if not leftover:
+            return jsonify({"error": "claude_unavailable",
+                            "reason": "the estimation ran but produced no "
+                                      "usable result",
+                            "retry": False}), 503
+        return jsonify({"ok": True, "leftover": leftover,
+                        "analyzed_by": backend})
+
     @app.route('/api/text_intent', methods=['POST'])
     def api_text_intent():
         """Run the app's natural-language prompt through the CLI and return
@@ -5051,6 +5153,9 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
         backend = payload.get("backend") or "claude"
         if backend not in claude_analyzer.SUBSCRIPTION_BACKENDS:
             return jsonify({"error": "bad_backend"}), 400
+        model, effort, bad = _plan_model_effort(payload, backend)
+        if bad:
+            return bad
         if not claude_analyzer.backend_available(backend):
             reason = claude_analyzer.backend_status().get(backend)
             log.warning(
@@ -5060,7 +5165,8 @@ def _build_api_app(bot: TelegramBot, gemini_client) -> Flask:
                             "reason": reason}), 503
         try:
             out = claude_analyzer.analyze_text_prompt(
-                prompt, backend=backend, raise_on_busy=True)
+                prompt, backend=backend, raise_on_busy=True,
+                model=model, effort=effort)
         except claude_analyzer.AnalyzerBusy:
             return jsonify({"error": "claude_unavailable",
                             "reason": "the analyzer is busy",

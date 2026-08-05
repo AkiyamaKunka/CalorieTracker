@@ -38,6 +38,30 @@ order or of consumption is not clear, answer {"is_food": false}.
 If the image contains NO food, meal, or beverage, respond with exactly:
 {"is_food": false}
 
+LEFTOVERS OF A RECENT MEAL — when a "RECENT MEALS" list is appended at
+the end of this prompt, FIRST check whether the photo shows the
+PARTIALLY EATEN REMAINS of one of those meals rather than a new meal:
+the same dishes, containers, tray or setting, with the food visibly
+REDUCED and signs of eating (used utensils, bones, emptied bowls). A
+fresh, untouched serving of a similar dish is a NEW meal, not leftovers.
+If (and only if) it clearly is the remains of listed meal N, respond
+with EXACTLY this shape instead of the normal analysis:
+{
+  "is_food": true,
+  "leftover_of": N,
+  "confidence": 0.9,
+  "leftover_fraction": 0.35,
+  "items": [
+    {"name": "<exact item name from that meal>", "left_fraction": 0.5}
+  ],
+  "note": "<one short sentence: what remains and how you judged it>"
+}
+leftover_of is the meal's index in the list; left_fraction is the share
+still REMAINING (0 = fully eaten, 1 = untouched) judged against that
+meal's stated portions; items not visible count as eaten. When no list
+is provided, or the photo is not clearly the remains of a listed meal,
+ignore this section entirely.
+
 CALORIE EVIDENCE — decide each item's calories from the BEST evidence in
 the photo, in this strict priority order (highest first). Printed truth
 always beats estimation; never eyeball a number the photo already states.
@@ -188,6 +212,42 @@ Rules:
 - If the user describes food but meals_list is empty, it MUST be a "new_meal", not a "correction" or "delete".
 ''';
 
+const String sharedLeftoverTemplate = '''
+You are looking at a photo of LEFTOVERS. The meal was previously analyzed
+as:
+
+<<ORIGINAL_ANALYSIS>>
+
+The attached photo shows the SAME meal now, after the person finished
+eating — whatever is visible remains UNEATEN.
+
+1. First confirm the photo plausibly shows the remains of that meal (same
+   dishes, containers, or setting). If it clearly shows different food or
+   an unrelated scene, say so with same_meal false.
+2. For EACH item of the original analysis, estimate the fraction still
+   REMAINING, from 0 (fully eaten) to 1 (untouched). Compare against the
+   original portion estimates stated in the item names. An item not
+   visible in the photo counts as eaten (0) unless the setting clearly
+   suggests otherwise (e.g. an unopened drink moved aside).
+3. Estimate the overall leftover fraction of the meal's total calories.
+
+Respond ONLY with valid JSON, no other text:
+{
+  "same_meal": true,
+  "confidence": 0.8,
+  "leftover_fraction": 0.35,
+  "items": [
+    {"name": "<exact item name from the original analysis>", "left_fraction": 0.5}
+  ],
+  "note": "<one short sentence: what remains and how you judged it>"
+}
+''';
+
+/// The leftover-deduction prompt with the original analysis spliced in.
+String sharedLeftoverPrompt({required String originalAnalysis}) =>
+    sharedLeftoverTemplate.replaceAll(
+        '<<ORIGINAL_ANALYSIS>>', originalAnalysis);
+
 /// Substitutes the `<<TOKEN>>` placeholders. Kept as replaceAll so the
 /// template needs no Dart interpolation escaping.
 String sharedTextHandlerPrompt({
@@ -224,4 +284,5 @@ abstract final class SharedConstants {
   static const String geminiModelDefault = 'gemini-2.5-flash';
   static const int geminiAnalysisMaxAttempts = 3;
   static const int geminiRetryDelayCapSeconds = 60;
+  static const int apiLeftoverMaxChars = 4000;
 }

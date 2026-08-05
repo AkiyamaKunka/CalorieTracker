@@ -201,9 +201,24 @@ class AnalysisOutcome {
 /// for JSON, applies the §3.3 retry/quota-pause rules, and returns COERCED
 /// output. Never throws for model/network trouble.
 abstract class AnalyzerService {
-  Future<AnalysisOutcome> analyzePhoto(Uint8List originalBytes);
+  /// [recentMeals]: compact same-day meal summaries (leftover_logic
+  /// .recentMealCompact shape) for the AUTOMATIC leftover check
+  /// (2026-08-05) — direct providers format them into the prompt's
+  /// RECENT MEALS block; the server provider ships them as data and the
+  /// server composes its own block. Null/empty = no check.
+  Future<AnalysisOutcome> analyzePhoto(Uint8List originalBytes,
+      {List<Map<String, dynamic>>? recentMeals});
   Future<Map<String, dynamic>?> textIntent(String prompt); // raw JSON or null
   Future<String?> validateKey(String apiKey); // null = OK, else error text
+
+  /// Leftover-photo estimation (spec §9, 2026-08-04): given the leftover
+  /// photo and the COMPACT original analysis, return the model's
+  /// {same_meal, leftover_fraction, items, note} JSON, or null when this
+  /// provider cannot estimate. Default null keeps existing fakes and
+  /// third-party implementations compiling; real providers override.
+  Future<Map<String, dynamic>?> leftoverIntent(
+          Uint8List originalBytes, String originalCompact) async =>
+      null;
 
   /// Richer probe for the diagnostics page. [validateKey] deliberately
   /// ACCEPTS a quota-class reply (it proves the key authenticated), which

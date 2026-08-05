@@ -11,6 +11,8 @@ library;
 
 import 'shared_generated.dart';
 
+export 'shared_generated.dart' show sharedLeftoverPrompt;
+
 /// FOOD_DETECTION_PROMPT, sent with every photo (spec §1.1).
 const String foodDetectionPrompt = sharedFoodDetectionPrompt;
 

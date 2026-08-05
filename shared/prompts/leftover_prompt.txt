@@ -1,0 +1,28 @@
+You are looking at a photo of LEFTOVERS. The meal was previously analyzed
+as:
+
+<<ORIGINAL_ANALYSIS>>
+
+The attached photo shows the SAME meal now, after the person finished
+eating — whatever is visible remains UNEATEN.
+
+1. First confirm the photo plausibly shows the remains of that meal (same
+   dishes, containers, or setting). If it clearly shows different food or
+   an unrelated scene, say so with same_meal false.
+2. For EACH item of the original analysis, estimate the fraction still
+   REMAINING, from 0 (fully eaten) to 1 (untouched). Compare against the
+   original portion estimates stated in the item names. An item not
+   visible in the photo counts as eaten (0) unless the setting clearly
+   suggests otherwise (e.g. an unopened drink moved aside).
+3. Estimate the overall leftover fraction of the meal's total calories.
+
+Respond ONLY with valid JSON, no other text:
+{
+  "same_meal": true,
+  "confidence": 0.8,
+  "leftover_fraction": 0.35,
+  "items": [
+    {"name": "<exact item name from the original analysis>", "left_fraction": 0.5}
+  ],
+  "note": "<one short sentence: what remains and how you judged it>"
+}

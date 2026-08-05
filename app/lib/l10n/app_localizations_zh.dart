@@ -472,7 +472,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get reportNoMeals => '没有记录。';
 
   @override
-  String get reportFooter => '由 CalorieTracker 记录';
+  String get reportFooter => '由筷拍记录';
 
   @override
   String typicalDayHeadroom(String typical, String delta) {
@@ -521,4 +521,87 @@ class AppLocalizationsZh extends AppLocalizations {
   String bodySince(String date) {
     return '自 $date';
   }
+
+  @override
+  String get addLeftover => '记录剩菜';
+
+  @override
+  String get addLeftoverNote => '扣除没吃完的部分';
+
+  @override
+  String get leftoverTitle => '剩菜扣除';
+
+  @override
+  String get leftoverPickMeal => '这是哪一餐的剩菜？';
+
+  @override
+  String get leftoverPickPhoto => '选择剩下食物的照片 — 这餐的热量会减为实际吃掉的部分。';
+
+  @override
+  String get leftoverChangeMeal => '更换';
+
+  @override
+  String get leftoverNotSame => '照片看起来不是这一餐';
+
+  @override
+  String get leftoverUseAnyway => '仍然使用';
+
+  @override
+  String get leftoverResultTitle => '确认扣除剩菜？';
+
+  @override
+  String leftoverResultLine(String pct, String kcal, String now) {
+    return '吃了约 $pct% — 扣除 $kcal 千卡，这餐现在 $now 千卡。';
+  }
+
+  @override
+  String leftoverDupRemoved(String kcal) {
+    return '这张照片还被误记成了一餐（$kcal 千卡）— 该重复记录将一并删除。';
+  }
+
+  @override
+  String get leftoverApplied => '已扣除剩菜。';
+
+  @override
+  String get leftoverFailed => '无法从这张照片估算剩菜。';
+
+  @override
+  String get leftoverNoMeals => '今天和昨天没有可扣除的餐。';
+
+  @override
+  String get planTuningHeader => '模型与思考';
+
+  @override
+  String get planTuningFooter =>
+      '服务器用哪个 Claude 模型分析、思考多少。默认跟随服务器自身设置；仅 Claude 订阅提供此选项 — 其他套餐由服务商决定模型。';
+
+  @override
+  String get planModelRow => '模型';
+
+  @override
+  String get planEffortRow => '思考力度';
+
+  @override
+  String get planChoiceDefault => '服务器默认';
+
+  @override
+  String get planModelOpus => 'Opus — 最准确';
+
+  @override
+  String get planModelSonnet => 'Sonnet — 均衡';
+
+  @override
+  String get planModelHaiku => 'Haiku — 最快';
+
+  @override
+  String get planEffortLow => '低 — 最快';
+
+  @override
+  String get planEffortMedium => '中';
+
+  @override
+  String get planEffortHigh => '高 — 最仔细';
+
+  @override
+  String get planModelFable => 'Fable — 旗舰，能力最强';
 }
