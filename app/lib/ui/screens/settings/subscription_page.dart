@@ -155,6 +155,7 @@ class _SubscriptionProviderPageState
       );
 
   String _modelLabel(BuildContext context, String v) => switch (v) {
+        'fable' => 'Fable',
         'opus' => 'Opus',
         'sonnet' => 'Sonnet',
         'haiku' => 'Haiku',
@@ -301,6 +302,7 @@ class _SubscriptionProviderPageState
                     current: settings.serverModel,
                     options: [
                       ('', context.l10n.planChoiceDefault),
+                      ('fable', context.l10n.planModelFable),
                       ('opus', context.l10n.planModelOpus),
                       ('sonnet', context.l10n.planModelSonnet),
                       ('haiku', context.l10n.planModelHaiku),

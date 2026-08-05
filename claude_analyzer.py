@@ -223,7 +223,7 @@ def _extra_flags() -> list:
 # The app-facing per-request choices (2026-08-05). CLAUDE-ONLY, closed
 # whitelists: these values become CLI argv, so free text is never accepted
 # — the endpoints 400 anything else before a CLI run exists.
-CLAUDE_PLAN_MODELS = ("opus", "sonnet", "haiku")
+CLAUDE_PLAN_MODELS = ("opus", "sonnet", "haiku", "fable")
 CLAUDE_PLAN_EFFORTS = ("low", "medium", "high")
 
 

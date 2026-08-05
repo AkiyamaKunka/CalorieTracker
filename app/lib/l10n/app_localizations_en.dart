@@ -642,4 +642,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get planEffortHigh => 'High — most thorough';
+
+  @override
+  String get planModelFable => 'Fable — frontier, most capable';
 }

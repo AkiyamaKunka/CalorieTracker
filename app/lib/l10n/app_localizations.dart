@@ -1171,6 +1171,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'High — most thorough'**
   String get planEffortHigh;
+
+  /// No description provided for @planModelFable.
+  ///
+  /// In en, this message translates to:
+  /// **'Fable — frontier, most capable'**
+  String get planModelFable;
 }
 
 class _AppLocalizationsDelegate

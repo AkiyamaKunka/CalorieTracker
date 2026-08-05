@@ -53,7 +53,7 @@ enum AiProvider { gemini, openai, anthropic, server, qwen, doubao, glm }
 /// The Claude-plan model/effort choices (2026-08-05), mirroring the
 /// server's closed whitelists (claude_analyzer.CLAUDE_PLAN_MODELS /
 /// _EFFORTS) — the server 400s anything else, so these lists ARE the UI.
-const List<String> kServerPlanModels = ['opus', 'sonnet', 'haiku'];
+const List<String> kServerPlanModels = ['opus', 'sonnet', 'haiku', 'fable'];
 const List<String> kServerPlanEfforts = ['low', 'medium', 'high'];
 
 class AppSettings extends ChangeNotifier {
